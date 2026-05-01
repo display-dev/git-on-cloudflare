@@ -17,8 +17,8 @@
  *  [20]   idx SHA-1    SHA-1 of everything above
  */
 
-import type { PackEntryTable } from "./types.ts";
-import { asBufferSource } from "@/worker/common/webtypes.ts";
+import type { PackEntryTable } from "./types";
+import { asBufferSource } from "@/worker/common/webtypes";
 
 /** Compare two raw 20-byte OIDs located at positions a and b in a flat buffer. */
 function compareOids(oids: Uint8Array, a: number, b: number): number {

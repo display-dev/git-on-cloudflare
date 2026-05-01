@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { buildPack, buildAppendOnlyDelta, makeCommit, makeTree } from "./util/git-pack.ts";
+import { buildPack, buildAppendOnlyDelta, makeCommit, makeTree } from "./util/git-pack";
 import {
   makeLimiter,
   packIndexerLog as log,
   rewritePackChecksum,
   setSingleBytePackHeaderSize,
-} from "./util/pack-indexer.helpers.ts";
+} from "./util/pack-indexer.helpers";
 
-import { scanPack } from "@/worker/git/pack/indexer/index.ts";
-import { computeOid } from "@/worker/git/core/objects.ts";
-import { bytesToHex } from "@/worker/common/hex.ts";
+import { scanPack } from "@/worker/git/pack/indexer";
+import { computeOid } from "@/worker/git/core/objects";
+import { bytesToHex } from "@/worker/common/hex";
 
 describe("scanPack", () => {
   it("indexes a pack with non-delta objects", async () => {

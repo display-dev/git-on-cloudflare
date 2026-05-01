@@ -5,15 +5,15 @@
  * to maintain repository health when repos are no longer in use.
  */
 
-import type { RepoStateSchema } from "./repoState.ts";
-import type { Logger } from "@/worker/common/logger.ts";
+import type { RepoStateSchema } from "./repoState";
+import type { Logger } from "@/worker/common/logger";
 
-import { asTypedStorage } from "./repoState.ts";
-import { getDb } from "./db/client.ts";
-import { getActivePackCatalogCount } from "./db/index.ts";
-import { doPrefix } from "@/worker/keys.ts";
-import { ensureScheduled } from "./scheduler.ts";
-import { getConfig } from "./repoConfig.ts";
+import { asTypedStorage } from "./repoState";
+import { getDb } from "./db/client";
+import { getActivePackCatalogCount } from "./db";
+import { doPrefix } from "@/worker/keys";
+import { ensureScheduled } from "./scheduler";
+import { getConfig } from "./repoConfig";
 
 /**
  * Handles idle cleanup after alarm fires.

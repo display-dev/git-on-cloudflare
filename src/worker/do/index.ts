@@ -1,4 +1,4 @@
-export type { AuthDurableObject } from "./auth/authDO.ts";
-export type { RepoDurableObject } from "./repo/repoDO.ts";
-export * from "./auth/authState.ts";
-export * from "./repo/repoState.ts";
+export type { AuthDurableObject } from "./auth/authDO";
+export type { RepoDurableObject } from "./repo/repoDO";
+export * from "./auth/authState";
+export * from "./repo/repoState";

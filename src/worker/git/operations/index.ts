@@ -2,7 +2,7 @@
  * High-level git operations
  */
 
-export * from "./types.ts";
-export * from "./read/index.ts";
-export * from "./uploadStream/index.ts";
-export * from "./args.ts";
+export * from "./types";
+export * from "./read";
+export * from "./uploadStream";
+export * from "./args";

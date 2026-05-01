@@ -1,2 +1,2 @@
-export * from "./packCatalog.ts";
-export * from "./shared.ts";
+export * from "./packCatalog";
+export * from "./shared";

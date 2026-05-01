@@ -3,10 +3,10 @@
  */
 
 // Core utilities
-export * from "./core/index.ts";
+export * from "./core";
 
 // Pack operations
-export * from "./pack/index.ts";
+export * from "./pack";
 
 // High-level operations
-export * from "./operations/index.ts";
+export * from "./operations";

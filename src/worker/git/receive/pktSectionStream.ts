@@ -1,5 +1,5 @@
-import { DELIM, FLUSH, RESPONSE_END } from "@/worker/git/core/pktline.ts";
-import { appendBytes, cloneBytes } from "./bytes.ts";
+import { DELIM, FLUSH, RESPONSE_END } from "@/worker/git/core/pktline";
+import { appendBytes, cloneBytes } from "./bytes";
 
 const MAX_COMMAND_SECTION_BYTES = 256 * 1024;
 

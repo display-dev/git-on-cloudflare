@@ -1,12 +1,12 @@
-import test from "ava";
+import { assert, test } from "vitest";
 import {
   inflateAndParseHeader,
   parseCommitRefs,
   parseTreeChildOids,
   parseTagTarget,
-} from "@/worker/git/core/index.ts";
-import { encodeGitObject, type GitObjectType } from "@/worker/git/core/objects.ts";
-import { deflate } from "@/worker/common/compression.ts";
+} from "@/worker/git/core";
+import { encodeGitObject, type GitObjectType } from "@/worker/git/core/objects";
+import { deflate } from "@/worker/common/compression";
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(20);
@@ -63,7 +63,7 @@ function textPayloadFor(
 
 // Inflate-and-parse round-trip for blob, commit, tree, tag
 for (const type of ["blob", "commit", "tree", "tag"] as GitObjectType[]) {
-  test(`inflateAndParseHeader parses ${type}`, async (t) => {
+  test(`inflateAndParseHeader parses ${type}`, async () => {
     const enc = new TextEncoder();
     let payload: Uint8Array;
     if (type === "blob") payload = enc.encode("hello");
@@ -93,31 +93,31 @@ for (const type of ["blob", "commit", "tree", "tag"] as GitObjectType[]) {
     }
     const { zdata } = await encodeGitObject(type, payload);
     const parsed = await inflateAndParseHeader(zdata);
-    t.truthy(parsed);
-    t.is(parsed!.type, type);
+    assert.ok(parsed);
+    assert.strictEqual(parsed!.type, type);
     if (type === "commit") {
       const refs = parseCommitRefs(parsed!.payload);
-      t.regex(refs.tree || "", /^[0-9a-f]{40}$/);
-      t.true(Array.isArray(refs.parents));
+      assert.match(refs.tree || "", /^[0-9a-f]{40}$/);
+      assert.isTrue(Array.isArray(refs.parents));
     }
     if (type === "tree") {
       const kids = parseTreeChildOids(parsed!.payload);
-      t.true(kids.length >= 2);
-      t.regex(kids[0], /^[0-9a-f]{40}$/);
-      t.regex(kids[1], /^[0-9a-f]{40}$/);
+      assert.isTrue(kids.length >= 2);
+      assert.match(kids[0], /^[0-9a-f]{40}$/);
+      assert.match(kids[1], /^[0-9a-f]{40}$/);
     }
     if (type === "tag") {
       const tag = parseTagTarget(parsed!.payload);
-      t.truthy(tag);
-      t.regex(tag!.targetOid, /^[0-9a-f]{40}$/);
-      t.is(typeof tag!.targetType, "string");
+      assert.ok(tag);
+      assert.match(tag!.targetOid, /^[0-9a-f]{40}$/);
+      assert.strictEqual(typeof tag!.targetType, "string");
     }
   });
 }
 
 // Malformed zdata should return null
-test("inflateAndParseHeader returns null on malformed data", async (t) => {
+test("inflateAndParseHeader returns null on malformed data", async () => {
   const z = await deflate(new TextEncoder().encode("garbage-without-header"));
   const parsed = await inflateAndParseHeader(z);
-  t.is(parsed, null);
+  assert.strictEqual(parsed, null);
 });

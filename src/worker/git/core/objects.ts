@@ -2,9 +2,9 @@
  * Git object encoding/decoding utilities
  */
 
-import { deflate } from "@/worker/common/compression.ts";
-import { bytesToHex } from "@/worker/common/hex.ts";
-import { asBufferSource, createDigestStream } from "@/worker/common/webtypes.ts";
+import { deflate } from "@/worker/common/compression";
+import { bytesToHex } from "@/worker/common/hex";
+import { asBufferSource, createDigestStream } from "@/worker/common/webtypes";
 
 /**
  * Git object types

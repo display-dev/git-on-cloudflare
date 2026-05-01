@@ -1,11 +1,11 @@
-import type { Logger } from "@/worker/common/logger.ts";
-import type { PackCatalogRow } from "../../db/schema.ts";
-import type { RepoLease, RepoStateSchema, TypedStorage } from "../../repoState.ts";
+import type { Logger } from "@/worker/common/logger";
+import type { PackCatalogRow } from "../../db/schema";
+import type { RepoLease, RepoStateSchema, TypedStorage } from "../../repoState";
 
-import { asTypedStorage } from "../../repoState.ts";
-import { scheduleAlarmIfSooner } from "../../scheduler.ts";
-import { getActivePackCatalogSnapshot } from "../state.ts";
-import { COMPACTION_WAKE_DELAY_MS, ensureRepoMetadataDefaults } from "../shared.ts";
+import { asTypedStorage } from "../../repoState";
+import { scheduleAlarmIfSooner } from "../../scheduler";
+import { getActivePackCatalogSnapshot } from "../state";
+import { COMPACTION_WAKE_DELAY_MS, ensureRepoMetadataDefaults } from "../shared";
 
 const COMPACTION_FAN_IN = 4;
 

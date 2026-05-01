@@ -11,12 +11,12 @@
  * first — no new R2-reading code is needed.
  */
 
-import type { CacheContext, RequestMemo } from "@/worker/cache/index.ts";
-import type { PackCatalogRow } from "@/worker/git/object-store/types.ts";
-import { parseCommitRefs, parseTagTarget } from "@/worker/git/core/object-parse.ts";
-import { readObject, findObject } from "@/worker/git/object-store/store.ts";
+import type { CacheContext, RequestMemo } from "@/worker/cache";
+import type { PackCatalogRow } from "@/worker/git/object-store/types";
+import { parseCommitRefs, parseTagTarget } from "@/worker/git/core/object-parse";
+import { readObject, findObject } from "@/worker/git/object-store/store";
 
-import type { ConnectivityCheckOptions } from "./types.ts";
+import type { ConnectivityCheckOptions } from "./types";
 
 const MAX_TAG_DEPTH = 8;
 

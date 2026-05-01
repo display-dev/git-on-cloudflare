@@ -153,7 +153,7 @@ npm install
 npm run dev             # Start local server
 npm run test:workers    # Run Vitest tests
 npm run test:auth       # Run Auth DO tests
-npm run test            # Run AVA tests
+npm run test            # Run Node Vitest unit tests
 ```
 
 ## License

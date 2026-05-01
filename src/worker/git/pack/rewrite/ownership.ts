@@ -1,8 +1,8 @@
-import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types.ts";
-import type { Logger } from "@/worker/common/logger.ts";
+import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
+import type { Logger } from "@/worker/common/logger";
 
-import { collectPackedObjectCandidates } from "@/worker/git/object-store/index.ts";
-import type { PackHeaderEx } from "../packMeta.ts";
+import { collectPackedObjectCandidates } from "@/worker/git/object-store";
+import type { PackHeaderEx } from "../packMeta";
 import {
   copySelectionRow,
   ensurePackReadState,
@@ -13,7 +13,7 @@ import {
   type PackReadState,
   type RewriteOptions,
   type SelectionTable,
-} from "./shared.ts";
+} from "./shared";
 
 /**
  * Planner-local OID owner table.

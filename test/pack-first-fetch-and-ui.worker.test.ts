@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoStateSchema } from "@/worker/do/repo/repoState.ts";
+import type { RepoStateSchema } from "@/worker/do/repo/repoState";
 
-import { buildPack, callStubWithRetry, runDOWithRetry, uniqueRepoId } from "./util/test-helpers.ts";
-import { asTypedStorage, objKey } from "@/worker/do/repo/repoState.ts";
-import { encodeGitObject } from "@/worker/git/core/index.ts";
-import { doPrefix, r2LooseKey, r2PackKey } from "@/worker/keys.ts";
-import { buildTreePayload } from "./util/packed-repo.ts";
-import { indexTestPack } from "./util/test-indexer.ts";
-import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db/index.ts";
-import { buildFetchBody, findBytes } from "./util/fetch-protocol.ts";
+import { buildPack, callStubWithRetry, runDOWithRetry, uniqueRepoId } from "./util/test-helpers";
+import { asTypedStorage, objKey } from "@/worker/do/repo/repoState";
+import { encodeGitObject } from "@/worker/git/core";
+import { doPrefix, r2LooseKey, r2PackKey } from "@/worker/keys";
+import { buildTreePayload } from "./util/packed-repo";
+import { indexTestPack } from "./util/test-indexer";
+import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db";
+import { buildFetchBody, findBytes } from "./util/fetch-protocol";
 
 async function seedPackedOnlyRepo(repoId: string) {
   const id = env.REPO_DO.idFromName(repoId);

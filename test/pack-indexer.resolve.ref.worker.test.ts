@@ -1,22 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { buildPack, buildAppendOnlyDelta, buildCopyPrefixDelta } from "./util/git-pack.ts";
-import { createTestCacheContext } from "./util/pack-first.ts";
-import { uniqueRepoId } from "./util/test-helpers.ts";
+import { buildPack, buildAppendOnlyDelta, buildCopyPrefixDelta } from "./util/git-pack";
+import { createTestCacheContext } from "./util/pack-first";
+import { uniqueRepoId } from "./util/test-helpers";
 import {
   makeActiveCatalogRow,
   makeCountSubrequest,
   makeLimiter,
   makeTracingLimiter,
   packIndexerLog as log,
-} from "./util/pack-indexer.helpers.ts";
+} from "./util/pack-indexer.helpers";
 
-import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/index.ts";
-import { computeOid, encodeGitObject } from "@/worker/git/core/objects.ts";
-import { bytesToHex } from "@/worker/common/hex.ts";
-import { findOidIndex } from "@/worker/git/object-store/idxView.ts";
-import { packIndexKey } from "@/worker/keys.ts";
+import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer";
+import { computeOid, encodeGitObject } from "@/worker/git/core/objects";
+import { bytesToHex } from "@/worker/common/hex";
+import { findOidIndex } from "@/worker/git/object-store/idxView";
+import { packIndexKey } from "@/worker/keys";
 
 describe("resolveDeltasAndWriteIdx REF_DELTA", () => {
   it("resolves REF_DELTA with external base from the provided active catalog snapshot", async () => {

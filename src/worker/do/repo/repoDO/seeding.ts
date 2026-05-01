@@ -1,13 +1,13 @@
-import { buildPackV2 } from "@/worker/git/pack/build.ts";
-import { encodeGitObject } from "@/worker/git/core/index.ts";
-import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/index.ts";
-import { createLogger } from "@/worker/common/logger.ts";
-import { r2PackKey } from "@/worker/keys.ts";
-import type { Limiter } from "@/worker/git/operations/limits.ts";
+import { buildPackV2 } from "@/worker/git/pack/build";
+import { encodeGitObject } from "@/worker/git/core";
+import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer";
+import { createLogger } from "@/worker/common/logger";
+import { r2PackKey } from "@/worker/keys";
+import type { Limiter } from "@/worker/git/operations/limits";
 
-import { asTypedStorage, objKey } from "../repoState.ts";
-import type { RepoStateSchema } from "../repoState.ts";
-import { getDb, upsertPackCatalogRow } from "../db/index.ts";
+import { asTypedStorage, objKey } from "../repoState";
+import type { RepoStateSchema } from "../repoState";
+import { getDb, upsertPackCatalogRow } from "../db";
 
 /** No-op limiter for test-only seeding path (no real concurrency limits). */
 const seedLimiter: Limiter = { run: (_label, fn) => fn() };

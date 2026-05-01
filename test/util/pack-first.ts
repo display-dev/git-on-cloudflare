@@ -1,8 +1,8 @@
 import type { CacheContext } from "@/worker/cache";
 
-import { buildPack } from "./git-pack.ts";
-import { buildTreePayload, seedPackedRepoState } from "./packed-repo.ts";
-import { encodeGitObject } from "@/worker/git/core/index.ts";
+import { buildPack } from "./git-pack";
+import { buildTreePayload, seedPackedRepoState } from "./packed-repo";
+import { encodeGitObject } from "@/worker/git/core";
 import { env } from "cloudflare:test";
 
 export function createTestCacheContext(url: string, subreqBudget?: number): CacheContext {

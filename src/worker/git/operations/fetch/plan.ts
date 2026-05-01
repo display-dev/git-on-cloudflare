@@ -1,18 +1,15 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { Logger } from "@/worker/common/logger.ts";
-import type { SnapshotLoadResult } from "@/worker/git/pack/snapshot.ts";
-import type { OrderedPackSnapshot, ServeUploadPackPlan, UploadPackPlan } from "./types.ts";
-import type {
-  PackRefSnapshotEntry,
-  PackRefSnapshotLoadResult,
-} from "@/worker/git/pack/refIndex.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
+import type { SnapshotLoadResult } from "@/worker/git/pack/snapshot";
+import type { OrderedPackSnapshot, ServeUploadPackPlan, UploadPackPlan } from "./types";
+import type { PackRefSnapshotEntry, PackRefSnapshotLoadResult } from "@/worker/git/pack/refIndex";
 
-import { createLogger } from "@/worker/common/index.ts";
-import { buildInitialCloneNeeded, loadOrderedPackSnapshot } from "@/worker/git/pack/snapshot.ts";
-import { getDoIdFromPath } from "@/worker/keys.ts";
-import { findCommonHaves } from "../closure.ts";
-import { computeNeededFromPackRefs } from "./refClosure.ts";
-import { loadPackRefView } from "@/worker/git/pack/refIndex.ts";
+import { createLogger } from "@/worker/common";
+import { buildInitialCloneNeeded, loadOrderedPackSnapshot } from "@/worker/git/pack/snapshot";
+import { getDoIdFromPath } from "@/worker/keys";
+import { findCommonHaves } from "../closure";
+import { computeNeededFromPackRefs } from "./refClosure";
+import { loadPackRefView } from "@/worker/git/pack/refIndex";
 
 export class FetchPlanRetryError extends Error {
   readonly reason: "missing-ref-index" | "closure-budget-exceeded";

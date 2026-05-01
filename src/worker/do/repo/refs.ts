@@ -5,9 +5,9 @@
  * including resolution and updates with consistency guarantees.
  */
 
-import type { RepoStateSchema, Head } from "./repoState.ts";
+import type { RepoStateSchema, Head } from "./repoState";
 
-import { asTypedStorage } from "./repoState.ts";
+import { asTypedStorage } from "./repoState";
 
 /**
  * Retrieves all refs from storage

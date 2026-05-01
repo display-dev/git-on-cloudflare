@@ -1,6 +1,6 @@
-import { pktLine, flushPkt, concatChunks, decodePktLines } from "./pktline.ts";
-import { asBodyInit } from "@/worker/common/webtypes.ts";
-import { getRepoStub } from "@/worker/common/stub.ts";
+import { pktLine, flushPkt, concatChunks, decodePktLines } from "./pktline";
+import { asBodyInit } from "@/worker/common/webtypes";
+import { getRepoStub } from "@/worker/common/stub";
 
 /**
  * Generates a Git capability advertisement response.

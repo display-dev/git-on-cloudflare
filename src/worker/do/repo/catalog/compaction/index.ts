@@ -1,3 +1,3 @@
-export * from "./plan.ts";
-export * from "./requests.ts";
-export * from "./lease.ts";
+export * from "./plan";
+export * from "./requests";
+export * from "./lease";

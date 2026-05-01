@@ -1,5 +1,5 @@
-import type { Head, RepoLease } from "../repoState.ts";
-import type { PackCatalogRow } from "../db/schema.ts";
+import type { Head, RepoLease } from "../repoState";
+import type { PackCatalogRow } from "../db/schema";
 
 export type DebugPackState = {
   key: string;

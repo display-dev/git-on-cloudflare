@@ -1,4 +1,4 @@
-import type { PackEntryTable } from "../types.ts";
+import type { PackEntryTable } from "../types";
 
 export interface InPackDependencyQueue {
   waitHeadByBase: Int32Array;

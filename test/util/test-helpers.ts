@@ -34,9 +34,9 @@ export async function withEnvOverrides<T, K extends StringEnvKey>(
   }
 }
 
-export * from "./do-retry.ts";
-export * from "./git-pack.ts";
-export * from "./packed-repo.ts";
+export * from "./do-retry";
+export * from "./git-pack";
+export * from "./packed-repo";
 
 export function toRequestBody(bytes: Uint8Array): ArrayBuffer {
   const body = new ArrayBuffer(bytes.byteLength);

@@ -1,4 +1,4 @@
-import { asByteTransformStream, createBlobFromBytes } from "./webtypes.ts";
+import { asByteTransformStream, createBlobFromBytes } from "./webtypes";
 
 /**
  * Compression and decompression utilities using Web Streams API

@@ -1,15 +1,15 @@
-import type { Logger } from "@/worker/common/logger.ts";
+import type { Logger } from "@/worker/common/logger";
 
-import { asTypedStorage } from "../repoState.ts";
-import type { RepoLease, RepoStateSchema } from "../repoState.ts";
-import { getActivePackCatalogSnapshot } from "./state.ts";
-import type { BeginReceiveResult } from "./shared.ts";
+import { asTypedStorage } from "../repoState";
+import type { RepoLease, RepoStateSchema } from "../repoState";
+import { getActivePackCatalogSnapshot } from "./state";
+import type { BeginReceiveResult } from "./shared";
 import {
   DEFAULT_HEAD,
   LEASE_RETRY_AFTER_SECONDS,
   ensureRepoMetadataDefaults,
   RECEIVE_LEASE_TTL_MS,
-} from "./shared.ts";
+} from "./shared";
 
 export async function clearExpiredLeases(
   ctx: DurableObjectState,

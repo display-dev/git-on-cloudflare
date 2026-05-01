@@ -1,3 +1,3 @@
-export * from "./checks.ts";
-export * from "./state.ts";
-export * from "./types.ts";
+export * from "./checks";
+export * from "./state";
+export * from "./types";

@@ -5,11 +5,11 @@
  * This module retains only readCommitFromStore for the debug endpoint fallback.
  */
 
-import type { RepoStateSchema } from "./repoState.ts";
+import type { RepoStateSchema } from "./repoState";
 
-import { asTypedStorage, objKey } from "./repoState.ts";
-import { r2LooseKey } from "@/worker/keys.ts";
-import { inflateAndParseHeader, parseCommitText } from "@/worker/git/index.ts";
+import { asTypedStorage, objKey } from "./repoState";
+import { r2LooseKey } from "@/worker/keys";
+import { inflateAndParseHeader, parseCommitText } from "@/worker/git";
 
 /**
  * Read and parse a commit object directly from DO storage (fallback to R2 if needed).

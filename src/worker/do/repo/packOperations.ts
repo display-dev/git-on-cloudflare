@@ -5,18 +5,13 @@
  * removal of specific packs and complete repository purging.
  */
 
-import type { Logger } from "@/worker/common/logger.ts";
+import type { Logger } from "@/worker/common/logger";
 
 import { createLogger } from "@/worker/common";
-import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits.ts";
-import { doPrefix, packIndexKey, packRefsKey } from "@/worker/keys.ts";
-import {
-  deletePackCatalogRows,
-  getDb,
-  getPackCatalogCount,
-  getPackCatalogRow,
-} from "./db/index.ts";
-import { getActivePackCatalogSnapshot } from "./catalog.ts";
+import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits";
+import { doPrefix, packIndexKey, packRefsKey } from "@/worker/keys";
+import { deletePackCatalogRows, getDb, getPackCatalogCount, getPackCatalogRow } from "./db";
+import { getActivePackCatalogSnapshot } from "./catalog";
 
 export type RemovePackResult = {
   removed: boolean;

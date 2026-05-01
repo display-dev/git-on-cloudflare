@@ -1,24 +1,24 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { Logger } from "@/worker/common/logger.ts";
-import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types.ts";
-import type { RepoDurableObject } from "@/worker/do/repo/repoDO.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
+import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
+import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
 
-import { createLogger, getRepoStubByDoId } from "@/worker/common/index.ts";
-import { buildCompactionNeededOids } from "@/worker/git/compaction/plan.ts";
+import { createLogger, getRepoStubByDoId } from "@/worker/common";
+import { buildCompactionNeededOids } from "@/worker/git/compaction/plan";
 import {
   MAX_SIMULTANEOUS_CONNECTIONS,
   SubrequestLimiter,
   countSubrequest,
-} from "@/worker/git/operations/limits.ts";
-import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/index.ts";
-import { rewritePackResult } from "@/worker/git/pack/rewrite.ts";
-import { loadOrderedPackSnapshot } from "@/worker/git/pack/snapshot.ts";
+} from "@/worker/git/operations/limits";
+import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer";
+import { rewritePackResult } from "@/worker/git/pack/rewrite";
+import { loadOrderedPackSnapshot } from "@/worker/git/pack/snapshot";
 import {
   deleteStagedPack,
   stagePackToR2,
   type StagedPackUpload,
-} from "@/worker/git/receive/r2Upload.ts";
-import { doPrefix, packIndexKey, packRefsKey, r2PackKey } from "@/worker/keys.ts";
+} from "@/worker/git/receive/r2Upload";
+import { doPrefix, packIndexKey, packRefsKey, r2PackKey } from "@/worker/keys";
 
 const COMPACTION_SUBREQUEST_BUDGET = 7_500;
 const COMPACTION_RETRY_DELAY_SECONDS = 30;

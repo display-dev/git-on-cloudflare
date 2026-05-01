@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { buildCopyPrefixDelta, buildPack } from "./util/git-pack.ts";
-import { uniqueRepoId } from "./util/test-helpers.ts";
+import { buildCopyPrefixDelta, buildPack } from "./util/git-pack";
+import { uniqueRepoId } from "./util/test-helpers";
 import {
   makeActiveCatalogRow,
   makeLimiter,
   packIndexerLog as log,
-} from "./util/pack-indexer.helpers.ts";
+} from "./util/pack-indexer.helpers";
 
-import { computeOid } from "@/worker/git/core/objects.ts";
+import { computeOid } from "@/worker/git/core/objects";
 import {
   collectPackedObjectCandidates,
   findFirstPackedObjectCandidate,
@@ -19,9 +19,9 @@ import {
   type IndexedPackSource,
   type PackedMaterializerCyclePolicy,
   type PackedObjectCandidate,
-} from "@/worker/git/object-store/index.ts";
-import type { PackedObjectResult, PackCatalogRow } from "@/worker/git/object-store/types.ts";
-import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/index.ts";
+} from "@/worker/git/object-store";
+import type { PackedObjectResult, PackCatalogRow } from "@/worker/git/object-store/types";
+import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer";
 
 type IndexedTestPack = {
   packKey: string;

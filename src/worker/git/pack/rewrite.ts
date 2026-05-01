@@ -1,19 +1,19 @@
-import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types.ts";
+import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
 
-import { createLogger } from "@/worker/common/index.ts";
+import { createLogger } from "@/worker/common";
 import {
   buildSelection,
   buildOutputOrder,
   canPassthroughSinglePack,
   computeHeaderLengths,
-} from "./rewrite/plan.ts";
+} from "./rewrite/plan";
 import {
   ensurePackReadState,
   type RewriteFailure,
   type RewriteFailureRecorder,
   type RewriteOptions,
-} from "./rewrite/shared.ts";
-import { createPassthroughStream, createRewriteStream } from "./rewrite/stream.ts";
+} from "./rewrite/shared";
+import { createPassthroughStream, createRewriteStream } from "./rewrite/stream";
 
 export type PackRewriteResult =
   | { status: "ok"; stream: ReadableStream<Uint8Array> }

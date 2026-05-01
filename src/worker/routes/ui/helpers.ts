@@ -1,15 +1,15 @@
 import type { CacheContext } from "@/worker/cache";
 import type { DebugPackState, DebugStateSnapshot } from "@/worker/do/repo/debug";
 import type { HeadInfo, Ref } from "@/worker/git";
-import type { PackRefIndexStatus } from "@/shared/git/types.ts";
+import type { PackRefIndexStatus } from "@/shared/git/types";
 import { getHeadAndRefs } from "@/worker/git";
-import { shortRefName } from "@/shared/git/ref-display.ts";
+import { shortRefName } from "@/shared/git/ref-display";
 import { formatSize, HttpError } from "@/shared/web";
 import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
-import { createLogger } from "@/worker/common/logger.ts";
-import { countSubrequest, getLimiter } from "@/worker/git/operations/limits.ts";
-import { packRefsKey } from "@/worker/keys.ts";
+import { createLogger } from "@/worker/common/logger";
+import { countSubrequest, getLimiter } from "@/worker/git/operations/limits";
+import { packRefsKey } from "@/worker/keys";
 
 export type AdminPackState = DebugPackState & {
   refIndexStatus?: PackRefIndexStatus;

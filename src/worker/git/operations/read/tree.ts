@@ -1,9 +1,9 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { TreeEntry } from "./types.ts";
-import { readLooseObjectRaw, parseTree } from "./objects.ts";
-import { resolveRef } from "./refs.ts";
-import { readCommit } from "./commits.ts";
-import { parseTagTarget } from "@/worker/git/core/index.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { TreeEntry } from "./types";
+import { readLooseObjectRaw, parseTree } from "./objects";
+import { resolveRef } from "./refs";
+import { readCommit } from "./commits";
+import { parseTagTarget } from "@/worker/git/core";
 
 export async function readTree(
   env: Env,

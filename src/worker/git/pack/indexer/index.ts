@@ -2,13 +2,13 @@
  * Streaming pack indexer — public API.
  */
 
-export { scanPack } from "./scan.ts";
-export { resolveDeltasAndWriteIdx } from "./resolve/index.ts";
-export { ResolveAbortedError, isResolveAbortedError } from "./resolve/errors.ts";
-export { runPackConnectivityCheck } from "./connectivity.ts";
-export { writeIdxV2 } from "./writeIdx.ts";
-export { InflateCursor, CRC32_INIT, crc32Update, crc32Finish } from "./inflateCursor.ts";
-export { allocateEntryTable, searchOffsetIndex, getRefBaseOidAt } from "./types.ts";
+export { scanPack } from "./scan";
+export { resolveDeltasAndWriteIdx } from "./resolve";
+export { ResolveAbortedError, isResolveAbortedError } from "./resolve/errors";
+export { runPackConnectivityCheck } from "./connectivity";
+export { writeIdxV2 } from "./writeIdx";
+export { InflateCursor, CRC32_INIT, crc32Update, crc32Finish } from "./inflateCursor";
+export { allocateEntryTable, searchOffsetIndex, getRefBaseOidAt } from "./types";
 export type {
   PackEntryTable,
   RefBaseOids,
@@ -17,4 +17,4 @@ export type {
   IndexerOptions,
   ResolveOptions,
   ConnectivityCheckOptions,
-} from "./types.ts";
+} from "./types";

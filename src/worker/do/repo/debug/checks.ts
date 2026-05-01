@@ -1,13 +1,13 @@
-import type { DebugCommitCheck, DebugOidCheck } from "./types.ts";
+import type { DebugCommitCheck, DebugOidCheck } from "./types";
 
-import { objKey } from "../repoState.ts";
-import { doPrefix, r2LooseKey } from "@/worker/keys.ts";
-import { isValidOid } from "@/worker/common/index.ts";
-import { readCommitFromStore } from "../storage.ts";
-import { getDb, listPackCatalog } from "../db/index.ts";
-import { getActivePackCatalogSnapshot } from "../catalog.ts";
-import { parseCommitText } from "@/worker/git/core/commitParse.ts";
-import { findCatalogPacksContainingOid, readPackedObjectFromCatalogRows } from "./packed.ts";
+import { objKey } from "../repoState";
+import { doPrefix, r2LooseKey } from "@/worker/keys";
+import { isValidOid } from "@/worker/common";
+import { readCommitFromStore } from "../storage";
+import { getDb, listPackCatalog } from "../db";
+import { getActivePackCatalogSnapshot } from "../catalog";
+import { parseCommitText } from "@/worker/git/core/commitParse";
+import { findCatalogPacksContainingOid, readPackedObjectFromCatalogRows } from "./packed";
 
 export async function debugCheckCommit(
   ctx: DurableObjectState,

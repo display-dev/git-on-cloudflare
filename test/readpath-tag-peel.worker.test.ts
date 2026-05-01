@@ -1,11 +1,11 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState.ts";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { readPath } from "@/worker/git/operations/read.ts";
-import { encodeGitObject } from "@/worker/git/core/objects.ts";
-import { seedPackFirstRepo } from "./util/pack-first.ts";
-import { registerTestPack } from "./util/packed-repo.ts";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { readPath } from "@/worker/git/operations/read";
+import { encodeGitObject } from "@/worker/git/core/objects";
+import { seedPackFirstRepo } from "./util/pack-first";
+import { registerTestPack } from "./util/packed-repo";
 
 it("readPath resolves tag to its target commit tree (tag peel)", async () => {
   const owner = "o";

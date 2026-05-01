@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { env, SELF } from "cloudflare:test";
 
-import { getRepoStub } from "@/worker/common/index.ts";
-import { bytesToHex } from "@/worker/common/hex.ts";
-import { encodeGitObject } from "@/worker/git/core/objects.ts";
+import { getRepoStub } from "@/worker/common";
+import { bytesToHex } from "@/worker/common/hex";
+import { encodeGitObject } from "@/worker/git/core/objects";
 import { concatChunks, decodePktLines } from "@/worker/git";
-import { packIndexKey, packRefsKey } from "@/worker/keys.ts";
-import { buildFetchBody } from "./util/fetch-protocol.ts";
+import { packIndexKey, packRefsKey } from "@/worker/keys";
+import { buildFetchBody } from "./util/fetch-protocol";
 import {
   deleteLooseObjectCopies,
   uniqueRepoId,
@@ -15,17 +15,17 @@ import {
   buildTreePayload,
   buildPack,
   buildAppendOnlyDelta,
-} from "./util/test-helpers.ts";
-import { seedPackFirstRepo } from "./util/pack-first.ts";
-import { indexTestPack } from "./util/test-indexer.ts";
-import { decodeReportStatus, promoteToStreaming } from "./util/streaming-helpers.ts";
-import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState.ts";
+} from "./util/test-helpers";
+import { seedPackFirstRepo } from "./util/pack-first";
+import { indexTestPack } from "./util/test-indexer";
+import { decodeReportStatus, promoteToStreaming } from "./util/streaming-helpers";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 import {
   compactOnce,
   deleteSupersededOnce,
   collectPackObjects,
   pushOverflowingStreamingHistory,
-} from "./util/compaction-helpers.ts";
+} from "./util/compaction-helpers";
 
 type DebugState = {
   activePacks?: Array<{ key: string; tier: number; kind: string }>;

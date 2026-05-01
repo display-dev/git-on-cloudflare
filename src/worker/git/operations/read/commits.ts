@@ -1,10 +1,10 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { CommitInfo, MergeSideOptions } from "./types.ts";
-import { parseCommitText } from "@/worker/git/core/commitParse.ts";
-import { readLooseObjectRaw } from "./objects.ts";
-import { resolveRef } from "./refs.ts";
-import { MAX_SIMULTANEOUS_CONNECTIONS } from "../limits.ts";
-import { createLogger, BinaryHeap } from "@/worker/common/index.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { CommitInfo, MergeSideOptions } from "./types";
+import { parseCommitText } from "@/worker/git/core/commitParse";
+import { readLooseObjectRaw } from "./objects";
+import { resolveRef } from "./refs";
+import { MAX_SIMULTANEOUS_CONNECTIONS } from "../limits";
+import { createLogger, BinaryHeap } from "@/worker/common";
 
 export async function readCommit(
   env: Env,

@@ -1,19 +1,16 @@
 import type {
   OrderedPackSnapshot,
   OrderedPackSnapshotEntry,
-} from "@/worker/git/operations/fetch/types.ts";
-import type { Logger } from "@/worker/common/logger.ts";
-import type { Limiter } from "@/worker/git/operations/limits.ts";
-import type { IdxView } from "@/worker/git/object-store/types.ts";
-import type { PackHeaderEx } from "../packMeta.ts";
+} from "@/worker/git/operations/fetch/types";
+import type { Logger } from "@/worker/common/logger";
+import type { Limiter } from "@/worker/git/operations/limits";
+import type { IdxView } from "@/worker/git/object-store/types";
+import type { PackHeaderEx } from "../packMeta";
 
-import { createLogger } from "@/worker/common/index.ts";
-import {
-  findFirstPackedObjectCandidate,
-  getNextOffsetByIndex,
-} from "@/worker/git/object-store/index.ts";
-import { SequentialReader } from "@/worker/git/pack/indexer/resolve/reader.ts";
-import { readPackHeaderExFromBuf, readPackRange } from "../packMeta.ts";
+import { createLogger } from "@/worker/common";
+import { findFirstPackedObjectCandidate, getNextOffsetByIndex } from "@/worker/git/object-store";
+import { SequentialReader } from "@/worker/git/pack/indexer/resolve/reader";
+import { readPackHeaderExFromBuf, readPackRange } from "../packMeta";
 
 export const HEADER_READ_BYTES = 128;
 export const DEFAULT_CHUNK_SIZE = 4_194_304;

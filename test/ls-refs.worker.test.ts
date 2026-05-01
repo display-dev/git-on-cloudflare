@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { SELF, env } from "cloudflare:test";
 import { decodePktLines } from "@/worker/git";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
 
 function pktLine(s: string | Uint8Array): Uint8Array {
   const enc = typeof s === "string" ? new TextEncoder().encode(s) : s;

@@ -1,9 +1,9 @@
-import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types.ts";
-import type { Logger } from "@/worker/common/logger.ts";
+import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
+import type { Logger } from "@/worker/common/logger";
 
-import { BinaryHeap } from "@/worker/common/index.ts";
-import { ofsDeltaDistanceLength } from "../packMeta.ts";
-import { HEADER_STABILITY_CAP, type SelectionTable } from "./shared.ts";
+import { BinaryHeap } from "@/worker/common";
+import { ofsDeltaDistanceLength } from "../packMeta";
+import { HEADER_STABILITY_CAP, type SelectionTable } from "./shared";
 
 export function canPassthroughSinglePack(
   snapshot: OrderedPackSnapshot,

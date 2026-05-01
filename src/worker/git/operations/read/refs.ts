@@ -1,5 +1,5 @@
-import type { HeadInfo, Ref } from "../types.ts";
-import { getRepoStub, createLogger } from "@/worker/common/index.ts";
+import type { HeadInfo, Ref } from "../types";
+import { getRepoStub, createLogger } from "@/worker/common";
 
 export async function getHeadAndRefs(
   env: Env,

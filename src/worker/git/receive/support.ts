@@ -1,8 +1,8 @@
-import type { Logger } from "@/worker/common/logger.ts";
-import type { ReceiveCommand, ReceiveStatus } from "@/worker/git/operations/validation.ts";
+import type { Logger } from "@/worker/common/logger";
+import type { ReceiveCommand, ReceiveStatus } from "@/worker/git/operations/validation";
 
-import { concatChunks, flushPkt, pktLine } from "@/worker/git/core/pktline.ts";
-import { isResolveAbortedError } from "@/worker/git/pack/indexer/index.ts";
+import { concatChunks, flushPkt, pktLine } from "@/worker/git/core/pktline";
+import { isResolveAbortedError } from "@/worker/git/pack/indexer";
 
 export function throwIfReceiveAborted(request: Request, log: Logger, stage: string): void {
   if (!request.signal.aborted) return;

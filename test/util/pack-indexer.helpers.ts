@@ -1,6 +1,6 @@
-import { SubrequestLimiter } from "@/worker/git/operations/limits.ts";
-import { createLogger } from "@/worker/common/logger.ts";
-import type { PackCatalogRow } from "@/worker/git/object-store/types.ts";
+import { SubrequestLimiter } from "@/worker/git/operations/limits";
+import { createLogger } from "@/worker/common/logger";
+import type { PackCatalogRow } from "@/worker/git/object-store/types";
 
 export const packIndexerLog = createLogger("debug", { service: "PackIndexerTest" });
 

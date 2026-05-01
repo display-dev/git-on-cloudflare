@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
 
-import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState.ts";
-import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast.ts";
-import { packRefsKey } from "@/worker/keys.ts";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
+import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast";
+import { packRefsKey } from "@/worker/keys";
 import {
   deleteLooseObjectCopies,
   runDOWithRetry,
   toRequestBody,
   uniqueRepoId,
-} from "./util/test-helpers.ts";
-import { buildFetchBody, decodePktTextLines } from "./util/fetch-protocol.ts";
-import { seedPackFirstRepo } from "./util/pack-first.ts";
+} from "./util/test-helpers";
+import { buildFetchBody, decodePktTextLines } from "./util/fetch-protocol";
+import { seedPackFirstRepo } from "./util/pack-first";
 
 describe("pack-first read path routes", () => {
   it("serves fetch and UI routes after deleting all loose object copies", async () => {

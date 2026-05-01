@@ -1,7 +1,7 @@
-import type { PktItem } from "@/worker/git/core/index.ts";
+import type { PktItem } from "@/worker/git/core";
 
 import { delimPkt, flushPkt, pktLine } from "@/worker/git";
-import { decodePktLines } from "@/worker/git/core/index.ts";
+import { decodePktLines } from "@/worker/git/core";
 
 export function buildFetchBody(args: {
   wants: string[];

@@ -1,8 +1,8 @@
-import { readPackRange } from "@/worker/git/pack/packMeta.ts";
+import { readPackRange } from "@/worker/git/pack/packMeta";
 
-import { InflateCursor } from "../inflateCursor.ts";
-import type { PackEntryTable, ResolveOptions } from "../types.ts";
-import { throwIfAborted } from "./errors.ts";
+import { InflateCursor } from "../inflateCursor";
+import type { PackEntryTable, ResolveOptions } from "../types";
+import { throwIfAborted } from "./errors";
 
 export class SequentialReader {
   private buf: Uint8Array<ArrayBufferLike> = new Uint8Array(0);

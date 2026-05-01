@@ -1,8 +1,8 @@
-import test from "ava";
+import { assert, test } from "vitest";
 
-import { hexToBytes } from "@/worker/common/index.ts";
-import { objTypeCode, type GitObjectType } from "@/worker/git/core/index.ts";
-import type { IdxView } from "@/worker/git/object-store/types.ts";
+import { hexToBytes } from "@/worker/common";
+import { objTypeCode, type GitObjectType } from "@/worker/git/core";
+import type { IdxView } from "@/worker/git/object-store/types";
 import {
   getPackRefObjectType,
   getPackRefRefsAt,
@@ -10,9 +10,9 @@ import {
   parsePackRefView,
   parseTreeClosureRefs,
   type PackRefSnapshotEntry,
-} from "@/worker/git/pack/refIndex.ts";
-import { allocateEntryTable, type PackEntryTable } from "@/worker/git/pack/indexer/index.ts";
-import { computeNeededFromPackRefs } from "@/worker/git/operations/fetch/refClosure.ts";
+} from "@/worker/git/pack/refIndex";
+import { allocateEntryTable, type PackEntryTable } from "@/worker/git/pack/indexer";
+import { computeNeededFromPackRefs } from "@/worker/git/operations/fetch/refClosure";
 
 const HEADER_BYTES = 60;
 
@@ -224,26 +224,26 @@ function buildSampleRefIndex() {
   return { built, idx, refs: { treeOid, parentOid, fileOid, tagTargetOid } };
 }
 
-test("pack ref sidecar encodes and parses logical object refs", (t) => {
+test("pack ref sidecar encodes and parses logical object refs", () => {
   const { built, idx, refs } = buildSampleRefIndex();
   const parsed = parsePackRefView(idx.packKey, built.bytes, idx);
 
-  t.is(parsed.type, "Ready");
+  assert.strictEqual(parsed.type, "Ready");
   if (parsed.type !== "Ready") return;
 
-  t.is(parsed.view.objectCount, 4);
-  t.is(parsed.view.refStartsBytes.byteLength, 5 * 4);
-  t.is(getPackRefObjectType(parsed.view, 0), "commit");
-  t.deepEqual(getPackRefRefsAt(parsed.view, 0), [refs.treeOid, refs.parentOid]);
-  t.is(getPackRefObjectType(parsed.view, 1), "tree");
-  t.deepEqual(getPackRefRefsAt(parsed.view, 1), [refs.fileOid]);
-  t.is(getPackRefObjectType(parsed.view, 2), "tag");
-  t.deepEqual(getPackRefRefsAt(parsed.view, 2), [refs.tagTargetOid]);
-  t.is(getPackRefObjectType(parsed.view, 3), "blob");
-  t.deepEqual(getPackRefRefsAt(parsed.view, 3), []);
+  assert.strictEqual(parsed.view.objectCount, 4);
+  assert.strictEqual(parsed.view.refStartsBytes.byteLength, 5 * 4);
+  assert.strictEqual(getPackRefObjectType(parsed.view, 0), "commit");
+  assert.deepEqual(getPackRefRefsAt(parsed.view, 0), [refs.treeOid, refs.parentOid]);
+  assert.strictEqual(getPackRefObjectType(parsed.view, 1), "tree");
+  assert.deepEqual(getPackRefRefsAt(parsed.view, 1), [refs.fileOid]);
+  assert.strictEqual(getPackRefObjectType(parsed.view, 2), "tag");
+  assert.deepEqual(getPackRefRefsAt(parsed.view, 2), [refs.tagTargetOid]);
+  assert.strictEqual(getPackRefObjectType(parsed.view, 3), "blob");
+  assert.deepEqual(getPackRefRefsAt(parsed.view, 3), []);
 });
 
-test("tree closure parser excludes gitlinks", (t) => {
+test("tree closure parser excludes gitlinks", () => {
   const fileOid = oid("11");
   const gitlinkOid = oid("22");
   const refs = parseTreeClosureRefs(
@@ -254,10 +254,10 @@ test("tree closure parser excludes gitlinks", (t) => {
     ])
   );
 
-  t.deepEqual(refs, [fileOid, oid("33")]);
+  assert.deepEqual(refs, [fileOid, oid("33")]);
 });
 
-test("pack ref sidecar keeps duplicate OID ordering deterministic", (t) => {
+test("pack ref sidecar keeps duplicate OID ordering deterministic", () => {
   const packKey = "do/test/objects/pack/dupe.pack";
   const packChecksum = hexToBytes(oid("aa"));
   const idxChecksum = hexToBytes(oid("bb"));
@@ -301,13 +301,13 @@ test("pack ref sidecar keeps duplicate OID ordering deterministic", (t) => {
   });
   const parsed = parsePackRefView(packKey, built.bytes, idx);
 
-  t.is(parsed.type, "Ready");
+  assert.strictEqual(parsed.type, "Ready");
   if (parsed.type !== "Ready") return;
-  t.deepEqual(getPackRefRefsAt(parsed.view, 0), [treeA]);
-  t.deepEqual(getPackRefRefsAt(parsed.view, 1), [treeB]);
+  assert.deepEqual(getPackRefRefsAt(parsed.view, 0), [treeA]);
+  assert.deepEqual(getPackRefRefsAt(parsed.view, 1), [treeB]);
 });
 
-test("sidecar closure walks a wide graph with a cursor queue", async (t) => {
+test("sidecar closure walks a wide graph with a cursor queue", async () => {
   const packKey = "do/test/objects/pack/wide.pack";
   const packChecksum = hexToBytes(oid("aa"));
   const idxChecksum = hexToBytes(oid("bb"));
@@ -374,7 +374,7 @@ test("sidecar closure walks a wide graph with a cursor queue", async (t) => {
     idxChecksum,
   });
   const parsed = parsePackRefView(packKey, built.bytes, idx);
-  t.is(parsed.type, "Ready");
+  assert.strictEqual(parsed.type, "Ready");
   if (parsed.type !== "Ready") return;
 
   const closure = await computeNeededFromPackRefs({
@@ -384,16 +384,16 @@ test("sidecar closure walks a wide graph with a cursor queue", async (t) => {
     haves: [],
   });
 
-  t.is(closure.type, "Ready");
+  assert.strictEqual(closure.type, "Ready");
   if (closure.type !== "Ready") return;
-  t.is(closure.neededOids.length, objectCount);
-  t.is(new Set(closure.neededOids).size, objectCount);
-  t.true(closure.neededOids.includes(commitOid));
-  t.true(closure.neededOids.includes(treeOid));
-  t.true(closure.neededOids.includes(blobOids[blobOids.length - 1]!));
+  assert.strictEqual(closure.neededOids.length, objectCount);
+  assert.strictEqual(new Set(closure.neededOids).size, objectCount);
+  assert.isTrue(closure.neededOids.includes(commitOid));
+  assert.isTrue(closure.neededOids.includes(treeOid));
+  assert.isTrue(closure.neededOids.includes(blobOids[blobOids.length - 1]!));
 });
 
-test("sidecar closure queues duplicate wants once", async (t) => {
+test("sidecar closure queues duplicate wants once", async () => {
   const blobOid = oid("11");
   const pack = buildPackRefSnapshotEntry({
     packKey: "do/test/objects/pack/duplicate-wants.pack",
@@ -413,17 +413,17 @@ test("sidecar closure queues duplicate wants once", async (t) => {
     haves: [],
   });
 
-  t.is(closure.type, "Ready");
+  assert.strictEqual(closure.type, "Ready");
   if (closure.type !== "Ready") return;
-  t.deepEqual(closure.neededOids, [blobOid]);
-  t.is(closure.stats.indexedObjects, 1);
-  t.is(closure.stats.queued, 1);
-  t.is(closure.stats.seen, 1);
-  t.is(closure.stats.needed, 1);
-  t.is(closure.stats.duplicateQueueSkips, 1);
+  assert.deepEqual(closure.neededOids, [blobOid]);
+  assert.strictEqual(closure.stats.indexedObjects, 1);
+  assert.strictEqual(closure.stats.queued, 1);
+  assert.strictEqual(closure.stats.seen, 1);
+  assert.strictEqual(closure.stats.needed, 1);
+  assert.strictEqual(closure.stats.duplicateQueueSkips, 1);
 });
 
-test("sidecar closure does not grow the queue for duplicate tree edges", async (t) => {
+test("sidecar closure does not grow the queue for duplicate tree edges", async () => {
   const encoder = new TextEncoder();
   const commitOid = oid("10");
   const treeOid = oid("20");
@@ -463,16 +463,16 @@ test("sidecar closure does not grow the queue for duplicate tree edges", async (
     haves: [],
   });
 
-  t.is(closure.type, "Ready");
+  assert.strictEqual(closure.type, "Ready");
   if (closure.type !== "Ready") return;
-  t.is(closure.neededOids.length, 3);
-  t.is(closure.stats.queued, 3);
-  t.is(closure.stats.seen, 3);
-  t.is(closure.stats.edgeVisits, duplicateEntries + 1);
-  t.is(closure.stats.duplicateQueueSkips, duplicateEntries - 1);
+  assert.strictEqual(closure.neededOids.length, 3);
+  assert.strictEqual(closure.stats.queued, 3);
+  assert.strictEqual(closure.stats.seen, 3);
+  assert.strictEqual(closure.stats.edgeVisits, duplicateEntries + 1);
+  assert.strictEqual(closure.stats.duplicateQueueSkips, duplicateEntries - 1);
 });
 
-test("sidecar closure canonicalizes cross-pack duplicate OIDs by snapshot order", async (t) => {
+test("sidecar closure canonicalizes cross-pack duplicate OIDs by snapshot order", async () => {
   const encoder = new TextEncoder();
   const duplicateCommitOid = oid("10");
   const newerTreeOid = oid("20");
@@ -515,16 +515,16 @@ test("sidecar closure canonicalizes cross-pack duplicate OIDs by snapshot order"
     haves: [],
   });
 
-  t.is(closure.type, "Ready");
+  assert.strictEqual(closure.type, "Ready");
   if (closure.type !== "Ready") return;
-  t.true(closure.neededOids.includes(duplicateCommitOid));
-  t.true(closure.neededOids.includes(newerTreeOid));
-  t.false(closure.neededOids.includes(olderTreeOid));
-  t.is(closure.stats.queued, 2);
-  t.is(closure.stats.needed, 2);
+  assert.isTrue(closure.neededOids.includes(duplicateCommitOid));
+  assert.isTrue(closure.neededOids.includes(newerTreeOid));
+  assert.isFalse(closure.neededOids.includes(olderTreeOid));
+  assert.strictEqual(closure.stats.queued, 2);
+  assert.strictEqual(closure.stats.needed, 2);
 });
 
-test("sidecar closure keeps force-push overlap bounded by canonical active objects", async (t) => {
+test("sidecar closure keeps force-push overlap bounded by canonical active objects", async () => {
   const encoder = new TextEncoder();
   const commitOid = oid("10");
   const treeOid = oid("20");
@@ -567,16 +567,16 @@ test("sidecar closure keeps force-push overlap bounded by canonical active objec
     haves: [oid("99")],
   });
 
-  t.is(closure.type, "Ready");
+  assert.strictEqual(closure.type, "Ready");
   if (closure.type !== "Ready") return;
-  t.deepEqual(new Set(closure.neededOids), new Set([commitOid, treeOid, blobOid]));
-  t.is(closure.stats.indexedObjects, 4);
-  t.is(closure.stats.queued, 3);
-  t.is(closure.stats.seen, 3);
-  t.is(closure.stats.needed, 3);
+  assert.deepEqual(new Set(closure.neededOids), new Set([commitOid, treeOid, blobOid]));
+  assert.strictEqual(closure.stats.indexedObjects, 4);
+  assert.strictEqual(closure.stats.queued, 3);
+  assert.strictEqual(closure.stats.seen, 3);
+  assert.strictEqual(closure.stats.needed, 3);
 });
 
-test("sidecar closure returns a retryable budget result at the missing ref cap", async (t) => {
+test("sidecar closure returns a retryable budget result at the missing ref cap", async () => {
   const treeOid = oid("20");
   const missingEntries = 1025;
   const pack = buildPackRefSnapshotEntry({
@@ -603,15 +603,15 @@ test("sidecar closure returns a retryable budget result at the missing ref cap",
     haves: [],
   });
 
-  t.is(closure.type, "BudgetExceeded");
+  assert.strictEqual(closure.type, "BudgetExceeded");
   if (closure.type !== "BudgetExceeded") return;
-  t.is(closure.reason, "missing-ref-budget");
-  t.is(closure.stats.queued, 1);
-  t.is(closure.stats.seen, 1);
-  t.is(closure.stats.missing, 1024);
+  assert.strictEqual(closure.reason, "missing-ref-budget");
+  assert.strictEqual(closure.stats.queued, 1);
+  assert.strictEqual(closure.stats.seen, 1);
+  assert.strictEqual(closure.stats.missing, 1024);
 });
 
-test("pack ref sidecar parser rejects invalid artifacts", (t) => {
+test("pack ref sidecar parser rejects invalid artifacts", () => {
   const { built, idx } = buildSampleRefIndex();
   const cases: Array<{ name: string; mutate: (bytes: Uint8Array) => Uint8Array; reason: string }> =
     [
@@ -704,9 +704,9 @@ test("pack ref sidecar parser rejects invalid artifacts", (t) => {
   for (const entry of cases) {
     const mutated = entry.mutate(new Uint8Array(built.bytes));
     const parsed = parsePackRefView(idx.packKey, mutated, idx);
-    t.is(parsed.type, "Invalid", entry.name);
+    assert.strictEqual(parsed.type, "Invalid", entry.name);
     if (parsed.type === "Invalid") {
-      t.is(parsed.reason, entry.reason, entry.name);
+      assert.strictEqual(parsed.reason, entry.reason, entry.name);
     }
   }
 });

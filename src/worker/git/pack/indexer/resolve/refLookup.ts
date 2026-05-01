@@ -1,7 +1,7 @@
-import type { PackEntryTable, ScanResult } from "../types.ts";
-import { getRefBaseOidAt } from "../types.ts";
+import type { PackEntryTable, ScanResult } from "../types";
+import { getRefBaseOidAt } from "../types";
 
-import { enqueueReadyDeferred, extendDeadlineChain } from "./dependencies.ts";
+import { enqueueReadyDeferred, extendDeadlineChain } from "./dependencies";
 
 export interface RefBaseLookup {
   mask: number;

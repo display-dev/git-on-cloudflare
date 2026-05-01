@@ -1,5 +1,5 @@
 import type { Ref } from "@/worker/git";
-import { classifyRef, formatRefOption } from "@/shared/git/ref-display.ts";
+import { classifyRef, formatRefOption } from "@/shared/git/ref-display";
 import { isValidOwnerRepo } from "@/shared/web";
 import { repoKey } from "@/worker/keys";
 import { loadHeadAndRefsCached } from "./helpers";

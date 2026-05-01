@@ -1,8 +1,8 @@
-import test from "ava";
-import type { PktItem } from "@/worker/git/core/index.ts";
-import { concatChunks, decodePktLines, flushPkt } from "@/worker/git/index.ts";
-import { buildAckSection } from "@/worker/git/operations/fetch/protocol.ts";
-import { createSidebandPacketChunks } from "@/worker/git/operations/fetch/sideband.ts";
+import { assert, test } from "vitest";
+import type { PktItem } from "@/worker/git/core";
+import { concatChunks, decodePktLines, flushPkt } from "@/worker/git";
+import { buildAckSection } from "@/worker/git/operations/fetch/protocol";
+import { createSidebandPacketChunks } from "@/worker/git/operations/fetch/sideband";
 
 function findLine(items: PktItem[], text: string): number {
   return items.findIndex((item) => item.type === "line" && item.text === text);
@@ -27,22 +27,22 @@ function buildPacketizedResponse(
   ]);
 }
 
-test("packetized response emits NAK when no common haves and done=false", (t) => {
+test("packetized response emits NAK when no common haves and done=false", () => {
   const items = decodePktLines(
     buildPacketizedResponse(new Uint8Array([0x50, 0x41, 0x43, 0x4b]), false, [])
   );
 
   const ackIndex = findLine(items, "acknowledgments\n");
-  t.true(ackIndex >= 0);
-  t.is(expectLine(items[ackIndex + 1]).text, "NAK\n");
-  t.is(items[ackIndex + 2]?.type, "delim");
-  t.is(expectLine(items[ackIndex + 3]).text, "packfile\n");
+  assert.isTrue(ackIndex >= 0);
+  assert.strictEqual(expectLine(items[ackIndex + 1]).text, "NAK\n");
+  assert.strictEqual(items[ackIndex + 2]?.type, "delim");
+  assert.strictEqual(expectLine(items[ackIndex + 3]).text, "packfile\n");
   const bandLine = expectLine(items[ackIndex + 4]);
-  t.true((bandLine.raw?.length || 0) >= 1);
-  t.is(bandLine.raw?.[0], 0x01);
+  assert.isTrue((bandLine.raw?.length || 0) >= 1);
+  assert.strictEqual(bandLine.raw?.[0], 0x01);
 });
 
-test("packetized response emits ACK common lines and the final ready line", (t) => {
+test("packetized response emits ACK common lines and the final ready line", () => {
   const firstOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const secondOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
   const items = decodePktLines(
@@ -50,14 +50,14 @@ test("packetized response emits ACK common lines and the final ready line", (t) 
   );
 
   const ackIndex = findLine(items, "acknowledgments\n");
-  t.true(ackIndex >= 0);
-  t.is(expectLine(items[ackIndex + 1]).text, `ACK ${firstOid} common\n`);
-  t.is(expectLine(items[ackIndex + 2]).text, `ACK ${secondOid} ready\n`);
-  t.is(items[ackIndex + 3]?.type, "delim");
+  assert.isTrue(ackIndex >= 0);
+  assert.strictEqual(expectLine(items[ackIndex + 1]).text, `ACK ${firstOid} common\n`);
+  assert.strictEqual(expectLine(items[ackIndex + 2]).text, `ACK ${secondOid} ready\n`);
+  assert.strictEqual(items[ackIndex + 3]?.type, "delim");
 });
 
-test("packetized response omits acknowledgments when done=true", (t) => {
+test("packetized response omits acknowledgments when done=true", () => {
   const items = decodePktLines(buildPacketizedResponse(new Uint8Array([0xff, 0x00]), true, []));
-  t.true(findLine(items, "packfile\n") >= 0);
-  t.is(findLine(items, "acknowledgments\n"), -1);
+  assert.isTrue(findLine(items, "packfile\n") >= 0);
+  assert.strictEqual(findLine(items, "acknowledgments\n"), -1);
 });

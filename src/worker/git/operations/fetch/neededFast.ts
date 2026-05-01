@@ -1,9 +1,9 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
+import type { CacheContext } from "@/worker/cache";
 
-import { createLogger } from "@/worker/common/index.ts";
-import { parseCommitRefs } from "@/worker/git/core/index.ts";
-import { readObject, readObjectRefsBatch } from "@/worker/git/object-store/index.ts";
-import { findCommonHaves } from "../closure.ts";
+import { createLogger } from "@/worker/common";
+import { parseCommitRefs } from "@/worker/git/core";
+import { readObject, readObjectRefsBatch } from "@/worker/git/object-store";
+import { findCommonHaves } from "../closure";
 
 export async function computeNeededFast(
   env: Env,

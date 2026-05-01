@@ -1,9 +1,9 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { TreeEntry } from "./types.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { TreeEntry } from "./types";
 
-import { buildObjectCacheKey, cacheOrLoadObject } from "@/worker/cache/index.ts";
-import { createBlobFromBytes, createLogger } from "@/worker/common/index.ts";
-import { readObject } from "@/worker/git/object-store/index.ts";
+import { buildObjectCacheKey, cacheOrLoadObject } from "@/worker/cache";
+import { createBlobFromBytes, createLogger } from "@/worker/common";
+import { readObject } from "@/worker/git/object-store";
 
 type LooseObjectRead = {
   type: string;

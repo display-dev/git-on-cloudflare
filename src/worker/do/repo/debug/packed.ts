@@ -1,7 +1,7 @@
-import type { IdxView, PackCatalogRow } from "@/worker/git/object-store/types.ts";
+import type { IdxView, PackCatalogRow } from "@/worker/git/object-store/types";
 
-import { inflate } from "@/worker/common/index.ts";
-import { applyGitDelta } from "@/worker/git/object-store/delta.ts";
+import { inflate } from "@/worker/common";
+import { applyGitDelta } from "@/worker/git/object-store/delta";
 import {
   findOidIndex,
   findOffsetIndex,
@@ -9,9 +9,9 @@ import {
   getNextOffsetByIndex,
   getOidHexAt,
   loadIdxView,
-} from "@/worker/git/object-store/idxView.ts";
-import { typeCodeToObjectType } from "@/worker/git/object-store/support.ts";
-import { readPackHeaderExFromBuf, readPackRange } from "@/worker/git/pack/packMeta.ts";
+} from "@/worker/git/object-store/idxView";
+import { typeCodeToObjectType } from "@/worker/git/object-store/support";
+import { readPackHeaderExFromBuf, readPackRange } from "@/worker/git/pack/packMeta";
 
 type DebugResolvedLocation = {
   pack: PackCatalogRow;

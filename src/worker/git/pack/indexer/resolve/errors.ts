@@ -1,4 +1,4 @@
-import type { Logger } from "@/worker/common/logger.ts";
+import type { Logger } from "@/worker/common/logger";
 
 export class ResolveAbortedError extends Error {
   readonly stage: string;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { getDb, supersedePackCatalogRows } from "@/worker/do/repo/db/index.ts";
+import { getDb, supersedePackCatalogRows } from "@/worker/do/repo/db";
 import {
   buildPack,
   callStubWithRetry,
@@ -10,8 +10,8 @@ import {
   seedLegacyPackedRepo,
   seedPackedRepo,
   uniqueRepoId,
-} from "./util/test-helpers.ts";
-import { encodeGitObject } from "@/worker/git/core/index.ts";
+} from "./util/test-helpers";
+import { encodeGitObject } from "@/worker/git/core";
 
 describe("packed object store catalog", () => {
   it("seeds active receive rows for packed repos", async () => {

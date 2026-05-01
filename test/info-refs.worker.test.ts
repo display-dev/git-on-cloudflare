@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
-import { uniqueRepoId } from "./util/test-helpers.ts";
+import { uniqueRepoId } from "./util/test-helpers";
 import { decodePktLines } from "@/worker/git";
 
 it("advertises upload-pack v2 over info/refs", async () => {

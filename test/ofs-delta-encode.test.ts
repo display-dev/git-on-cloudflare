@@ -1,5 +1,5 @@
-import test from "ava";
-import { encodeOfsDeltaDistance } from "@/worker/git/index.ts";
+import { assert, test } from "vitest";
+import { encodeOfsDeltaDistance } from "@/worker/git";
 
 function decodeOfsDeltaDistance(bytes: Uint8Array): number {
   let p = 0;
@@ -14,11 +14,11 @@ function decodeOfsDeltaDistance(bytes: Uint8Array): number {
 
 const cases = [1, 0x7f, 0x80, 0x1234, 0x1ffff, 0x20000, 0x3ffffff, 0x4000000];
 
-test("encodeOfsDeltaDistance round-trips typical values", (t) => {
+test("encodeOfsDeltaDistance round-trips typical values", () => {
   for (const n of cases) {
     const enc = encodeOfsDeltaDistance(n);
     const dec = decodeOfsDeltaDistance(enc);
-    t.is(
+    assert.strictEqual(
       dec,
       n,
       `round-trip failed for ${n} (enc: ${Array.from(enc)

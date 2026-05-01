@@ -1,22 +1,17 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { Logger } from "@/worker/common/logger.ts";
-import type { PackedObjectResult } from "./types.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
+import type { PackedObjectResult } from "./types";
 
-import { createBlobFromBytes } from "@/worker/common/index.ts";
-import { parseCommitRefs, parseTagTarget, parseTreeChildOids } from "@/worker/git/core/index.ts";
+import { createBlobFromBytes } from "@/worker/common";
+import { parseCommitRefs, parseTagTarget, parseTreeChildOids } from "@/worker/git/core";
 import {
   MAX_SIMULTANEOUS_CONNECTIONS,
   countSubrequest,
   getLimiter,
-} from "@/worker/git/operations/limits.ts";
-import { findObject } from "./lookup.ts";
-import { materializePackedObjectCandidate } from "./materialize.ts";
-import {
-  ensureMemo,
-  getPackedObjectStoreLogger,
-  logOnce,
-  type ResolvedLocation,
-} from "./support.ts";
+} from "@/worker/git/operations/limits";
+import { findObject } from "./lookup";
+import { materializePackedObjectCandidate } from "./materialize";
+import { ensureMemo, getPackedObjectStoreLogger, logOnce, type ResolvedLocation } from "./support";
 
 function countPackedSubrequest(
   cacheCtx: CacheContext | undefined,
@@ -197,5 +192,5 @@ export async function readBlobStream(
   });
 }
 
-export { findObject } from "./lookup.ts";
-export { logPackedObjectMismatch } from "./support.ts";
+export { findObject } from "./lookup";
+export { logPackedObjectMismatch } from "./support";

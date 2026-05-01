@@ -2,7 +2,7 @@ import { createExecutionContext, env as testEnv } from "cloudflare:test";
 import {
   handleRepoMaintenanceQueue,
   type RepoMaintenanceQueueMessage,
-} from "@/worker/maintenance/queue.ts";
+} from "@/worker/maintenance/queue";
 
 export type QueueRunResult = {
   acked: boolean;

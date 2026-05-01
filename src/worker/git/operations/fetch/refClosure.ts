@@ -1,12 +1,12 @@
-import type { PackRefSnapshotEntry } from "@/worker/git/pack/refIndex.ts";
+import type { PackRefSnapshotEntry } from "@/worker/git/pack/refIndex";
 
-import { bytesToHex, createLogger, hexToBytes, isValidOid } from "@/worker/common/index.ts";
-import { findOidIndexFromBytes } from "@/worker/git/object-store/index.ts";
+import { bytesToHex, createLogger, hexToBytes, isValidOid } from "@/worker/common";
+import { findOidIndexFromBytes } from "@/worker/git/object-store";
 import {
   getPackRefRawRefAt,
   getPackRefTypeCode,
   visitPackRefRawRefsAt,
-} from "@/worker/git/pack/refIndex.ts";
+} from "@/worker/git/pack/refIndex";
 
 const HAVE_CAP = 128;
 const MAINLINE_ENRICHMENT_BUDGET = 20;

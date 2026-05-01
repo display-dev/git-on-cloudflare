@@ -1,6 +1,6 @@
-import type { GitObjectType } from "@/worker/git/core/index.ts";
-import { objTypeCode, encodeObjHeader, concatChunks } from "@/worker/git/core/index.ts";
-import { asBufferSource, deflate } from "@/worker/common/index.ts";
+import type { GitObjectType } from "@/worker/git/core";
+import { objTypeCode, encodeObjHeader, concatChunks } from "@/worker/git/core";
+import { asBufferSource, deflate } from "@/worker/common";
 
 /**
  * Builds a PACKv2 file from a list of thick objects (no deltas expected here).

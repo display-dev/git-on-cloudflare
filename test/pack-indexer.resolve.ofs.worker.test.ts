@@ -1,29 +1,29 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { buildPack, buildAppendOnlyDelta } from "./util/git-pack.ts";
-import { uniqueRepoId } from "./util/test-helpers.ts";
+import { buildPack, buildAppendOnlyDelta } from "./util/git-pack";
+import { uniqueRepoId } from "./util/test-helpers";
 import {
   makeCountSubrequest,
   makeLimiter,
   makeTracingLimiter,
   packIndexerLog as log,
-} from "./util/pack-indexer.helpers.ts";
+} from "./util/pack-indexer.helpers";
 
 import {
   allocateEntryTable,
   isResolveAbortedError,
   scanPack,
   resolveDeltasAndWriteIdx,
-} from "@/worker/git/pack/indexer/index.ts";
-import { computeOid } from "@/worker/git/core/objects.ts";
-import { bytesToHex } from "@/worker/common/hex.ts";
-import { DEFAULT_SUBREQUEST_BUDGET } from "@/worker/git/operations/limits.ts";
-import { getOidHexAt, parseIdxView } from "@/worker/git/object-store/index.ts";
-import { packIndexKey } from "@/worker/keys.ts";
-import { getBasePayload } from "@/worker/git/pack/indexer/resolve/materialize.ts";
-import { PayloadLRU } from "@/worker/git/pack/indexer/resolve/payloadCache.ts";
-import { SequentialReader } from "@/worker/git/pack/indexer/resolve/reader.ts";
+} from "@/worker/git/pack/indexer";
+import { computeOid } from "@/worker/git/core/objects";
+import { bytesToHex } from "@/worker/common/hex";
+import { DEFAULT_SUBREQUEST_BUDGET } from "@/worker/git/operations/limits";
+import { getOidHexAt, parseIdxView } from "@/worker/git/object-store";
+import { packIndexKey } from "@/worker/keys";
+import { getBasePayload } from "@/worker/git/pack/indexer/resolve/materialize";
+import { PayloadLRU } from "@/worker/git/pack/indexer/resolve/payloadCache";
+import { SequentialReader } from "@/worker/git/pack/indexer/resolve/reader";
 
 async function expectResolveAborted(promise: Promise<unknown>): Promise<void> {
   try {

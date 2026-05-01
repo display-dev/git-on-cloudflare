@@ -2,9 +2,9 @@
  * Shared Git object parsing helpers
  */
 
-import { parseGitObject, type GitObjectType } from "./objects.ts";
-import { parseCommitText } from "./commitParse.ts";
-import { createInflateStream, bytesToHex, createBlobFromBytes } from "@/worker/common/index.ts";
+import { parseGitObject, type GitObjectType } from "./objects";
+import { parseCommitText } from "./commitParse";
+import { createInflateStream, bytesToHex, createBlobFromBytes } from "@/worker/common";
 
 const td = new TextDecoder();
 

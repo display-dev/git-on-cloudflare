@@ -1,6 +1,6 @@
-import type { Head, RepoStateSchema, RepoLease, TypedStorage } from "../repoState.ts";
-import type { PackCatalogRow } from "../db/schema.ts";
-import type { Ref } from "../repoState.ts";
+import type { Head, RepoStateSchema, RepoLease, TypedStorage } from "../repoState";
+import type { PackCatalogRow } from "../db/schema";
+import type { Ref } from "../repoState";
 
 export const RECEIVE_LEASE_TTL_MS = 30 * 60_000;
 export const COMPACT_LEASE_TTL_MS = 20 * 60_000;

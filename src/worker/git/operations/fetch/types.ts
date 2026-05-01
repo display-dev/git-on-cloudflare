@@ -1,5 +1,5 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { IdxView } from "@/worker/git/object-store/types.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { IdxView } from "@/worker/git/object-store/types";
 
 export type OrderedPackSnapshotEntry = {
   packKey: string;

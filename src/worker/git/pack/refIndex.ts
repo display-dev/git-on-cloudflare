@@ -1,13 +1,13 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { GitObjectType } from "@/worker/git/core/index.ts";
-import type { IdxView } from "@/worker/git/object-store/types.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { GitObjectType } from "@/worker/git/core";
+import type { IdxView } from "@/worker/git/object-store/types";
 
-import { bytesEqual, bytesToHex, createLogger } from "@/worker/common/index.ts";
-import { typeCodeToObjectType } from "@/worker/git/object-store/support.ts";
-import { countSubrequest, getLimiter } from "@/worker/git/operations/limits.ts";
-import { packRefsKey } from "@/worker/keys.ts";
-import { buildOidSortedEntryIndices } from "./indexer/writeIdx.ts";
-import type { PackEntryTable } from "./indexer/types.ts";
+import { bytesEqual, bytesToHex, createLogger } from "@/worker/common";
+import { typeCodeToObjectType } from "@/worker/git/object-store/support";
+import { countSubrequest, getLimiter } from "@/worker/git/operations/limits";
+import { packRefsKey } from "@/worker/keys";
+import { buildOidSortedEntryIndices } from "./indexer/writeIdx";
+import type { PackEntryTable } from "./indexer/types";
 
 const PACK_REF_MAGIC = 0x50524546; // "PREF"
 const PACK_REF_VERSION = 1;
@@ -22,7 +22,7 @@ const OBJECT_LINE_PREFIX = [0x6f, 0x62, 0x6a, 0x65, 0x63, 0x74, 0x20]; // "objec
 const TYPE_LINE_PREFIX = [0x74, 0x79, 0x70, 0x65, 0x20]; // "type "
 
 type PackRefValidationKind = "corrupt" | "stale";
-export type { PackRefIndexStatus } from "@/shared/git/types.ts";
+export type { PackRefIndexStatus } from "@/shared/git/types";
 
 type PackRefInvalidResult = {
   type: "Invalid";

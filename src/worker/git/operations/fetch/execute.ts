@@ -1,11 +1,7 @@
-import type { ServeUploadPackPlan } from "./types.ts";
-import type { RewriteOptions } from "@/worker/git/pack/rewrite/shared.ts";
+import type { ServeUploadPackPlan } from "./types";
+import type { RewriteOptions } from "@/worker/git/pack/rewrite/shared";
 
-import {
-  rewritePack,
-  rewritePackResult,
-  type PackRewriteResult,
-} from "@/worker/git/pack/rewrite.ts";
+import { rewritePack, rewritePackResult, type PackRewriteResult } from "@/worker/git/pack/rewrite";
 
 export async function resolvePackStreamResult(
   env: Env,

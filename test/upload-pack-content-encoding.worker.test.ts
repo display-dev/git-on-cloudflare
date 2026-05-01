@@ -1,8 +1,8 @@
 import { it, expect } from "vitest";
 import { SELF, env } from "cloudflare:test";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/worker/git";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { gzip } from "@/worker/common/index.ts";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { gzip } from "@/worker/common";
 
 function buildFetchBody({
   wants,

@@ -1,18 +1,18 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { Logger } from "@/worker/common/logger.ts";
-import type { RepoDurableObject } from "@/worker/do/index.ts";
-import type { PackCatalogRow } from "@/worker/do/repo/db/schema.ts";
-import type { ReceiveCommand, ReceiveStatus } from "@/worker/git/operations/validation.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
+import type { RepoDurableObject } from "@/worker/do";
+import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
+import type { ReceiveCommand, ReceiveStatus } from "@/worker/git/operations/validation";
 
-import { SubrequestLimiter } from "@/worker/git/operations/limits.ts";
+import { SubrequestLimiter } from "@/worker/git/operations/limits";
 import {
   resolveDeltasAndWriteIdx,
   runPackConnectivityCheck,
   scanPack,
-} from "@/worker/git/pack/indexer/index.ts";
-import { doPrefix, r2PackKey } from "@/worker/keys.ts";
-import { deleteStagedPack, stagePackToR2, type StagedPackUpload } from "./r2Upload.ts";
-import { buildReceiveReportStatus, isReceiveAbort, throwIfReceiveAborted } from "./support.ts";
+} from "@/worker/git/pack/indexer";
+import { doPrefix, r2PackKey } from "@/worker/keys";
+import { deleteStagedPack, stagePackToR2, type StagedPackUpload } from "./r2Upload";
+import { buildReceiveReportStatus, isReceiveAbort, throwIfReceiveAborted } from "./support";
 
 type RepoStub = DurableObjectStub<RepoDurableObject>;
 

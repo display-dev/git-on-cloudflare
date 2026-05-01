@@ -1,5 +1,5 @@
-import type { GitObjectType } from "@/worker/git/core/index.ts";
-export type { PackCatalogRow } from "@/worker/do/repo/db/schema.ts";
+import type { GitObjectType } from "@/worker/git/core";
+export type { PackCatalogRow } from "@/worker/do/repo/db/schema";
 
 export type PackedObjectLocation = {
   packKey: string;

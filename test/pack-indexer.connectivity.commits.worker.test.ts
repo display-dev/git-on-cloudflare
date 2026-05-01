@@ -1,23 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { buildPack, makeCommit, makeTree } from "./util/git-pack.ts";
-import { createTestCacheContext } from "./util/pack-first.ts";
-import { uniqueRepoId } from "./util/test-helpers.ts";
+import { buildPack, makeCommit, makeTree } from "./util/git-pack";
+import { createTestCacheContext } from "./util/pack-first";
+import { uniqueRepoId } from "./util/test-helpers";
 import {
   makeActiveCatalogRow,
   makeLimiter,
   makeTracingLimiter,
   packIndexerLog as log,
-} from "./util/pack-indexer.helpers.ts";
+} from "./util/pack-indexer.helpers";
 
 import {
   runPackConnectivityCheck,
   scanPack,
   resolveDeltasAndWriteIdx,
-} from "@/worker/git/pack/indexer/index.ts";
-import { computeOid } from "@/worker/git/core/objects.ts";
-import { findObject } from "@/worker/git/object-store/store.ts";
+} from "@/worker/git/pack/indexer";
+import { computeOid } from "@/worker/git/core/objects";
+import { findObject } from "@/worker/git/object-store/store";
 
 type ConnectivityStatus = { ref: string; ok: boolean; msg?: string };
 

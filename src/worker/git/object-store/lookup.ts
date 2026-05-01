@@ -1,14 +1,9 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
+import type { CacheContext } from "@/worker/cache";
 
-import { loadActivePackCatalog } from "./catalog.ts";
-import { findFirstPackedObjectCandidate, type IndexedPackSource } from "./candidates.ts";
-import { loadIdxView } from "./idxView.ts";
-import {
-  ensureMemo,
-  getPackedObjectStoreLogger,
-  logOnce,
-  type ResolvedLocation,
-} from "./support.ts";
+import { loadActivePackCatalog } from "./catalog";
+import { findFirstPackedObjectCandidate, type IndexedPackSource } from "./candidates";
+import { loadIdxView } from "./idxView";
+import { ensureMemo, getPackedObjectStoreLogger, logOnce, type ResolvedLocation } from "./support";
 
 export async function findObject(
   env: Env,

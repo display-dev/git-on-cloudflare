@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import { asTypedStorage } from "@/worker/do/repo/repoState.ts";
-import type { RepoStateSchema } from "@/worker/do/repo/repoState.ts";
+import { asTypedStorage } from "@/worker/do/repo/repoState";
+import type { RepoStateSchema } from "@/worker/do/repo/repoState";
 import {
   concatChunks,
   delimPkt,
@@ -11,12 +11,12 @@ import {
   pktLine,
   decodePktLines,
 } from "@/worker/git";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db/index.ts";
-import { asBufferSource, deflate } from "@/worker/common/index.ts";
-import { doPrefix, r2PackKey } from "@/worker/keys.ts";
-import { indexTestPack } from "./util/test-indexer.ts";
-import { bytesToHex } from "@/worker/common/hex.ts";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db";
+import { asBufferSource, deflate } from "@/worker/common";
+import { doPrefix, r2PackKey } from "@/worker/keys";
+import { indexTestPack } from "./util/test-indexer";
+import { bytesToHex } from "@/worker/common/hex";
 
 async function buildPack(objs: { type: string; payload: Uint8Array }[]): Promise<Uint8Array> {
   const hdr = new Uint8Array(12);

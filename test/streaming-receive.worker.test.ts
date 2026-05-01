@@ -1,27 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { createExecutionContext, env, SELF } from "cloudflare:test";
 
-import { concatChunks, flushPkt, pktLine } from "@/worker/git/core/index.ts";
-import { computeOid, encodeGitObject } from "@/worker/git/core/objects.ts";
-import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack.ts";
-import { buildFetchBody } from "./util/fetch-protocol.ts";
-import { buildAppendOnlyDelta, buildPack, zero40 } from "./util/git-pack.ts";
-import { buildTreePayload } from "./util/packed-repo.ts";
+import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
+import { computeOid, encodeGitObject } from "@/worker/git/core/objects";
+import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
+import { buildFetchBody } from "./util/fetch-protocol";
+import { buildAppendOnlyDelta, buildPack, zero40 } from "./util/git-pack";
+import { buildTreePayload } from "./util/packed-repo";
 import {
   callStubWithRetry,
   deleteLooseObjectCopies,
   toRequestBody,
   uniqueRepoId,
-} from "./util/test-helpers.ts";
-import { seedPackFirstRepo } from "./util/pack-first.ts";
-import { doPrefix, packRefsKey, r2PackDirPrefix } from "@/worker/keys.ts";
+} from "./util/test-helpers";
+import { seedPackFirstRepo } from "./util/pack-first";
+import { doPrefix, packRefsKey, r2PackDirPrefix } from "@/worker/keys";
 import {
   buildStreamingReceiveBody,
   decodeReceiveSideband,
   decodeReportStatus,
   promoteToStreaming,
   pushStreamingUpdate,
-} from "./util/streaming-helpers.ts";
+} from "./util/streaming-helpers";
 
 function streamBody(bytes: Uint8Array, chunkSize = 1024): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({

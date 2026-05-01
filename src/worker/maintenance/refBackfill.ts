@@ -1,16 +1,16 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { Logger } from "@/worker/common/logger.ts";
-import type { RepoDurableObject } from "@/worker/do/repo/repoDO.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
+import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
 
-import { createLogger, getRepoStubByDoId } from "@/worker/common/index.ts";
+import { createLogger, getRepoStubByDoId } from "@/worker/common";
 import {
   MAX_SIMULTANEOUS_CONNECTIONS,
   SubrequestLimiter,
   countSubrequest,
-} from "@/worker/git/operations/limits.ts";
-import { loadIdxView } from "@/worker/git/object-store/index.ts";
-import { resolveDeltasAndWriteIdx, scanPack } from "@/worker/git/pack/indexer/index.ts";
-import { loadPackRefView } from "@/worker/git/pack/refIndex.ts";
+} from "@/worker/git/operations/limits";
+import { loadIdxView } from "@/worker/git/object-store";
+import { resolveDeltasAndWriteIdx, scanPack } from "@/worker/git/pack/indexer";
+import { loadPackRefView } from "@/worker/git/pack/refIndex";
 
 const REF_BACKFILL_SUBREQUEST_BUDGET = 7_500;
 const REF_BACKFILL_RETRY_DELAY_SECONDS = 30;

@@ -1,9 +1,9 @@
-import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types.ts";
-import type { Logger } from "@/worker/common/logger.ts";
+import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
+import type { Logger } from "@/worker/common/logger";
 
-import { clonePackHeader, type DuplicateHeaderCache } from "./ownership.ts";
-import { pruneUnsafeDeadSlotRedirects } from "./selectionCompact.ts";
-import { resolveDeltaBaseFromHeader } from "./selectionResolve.ts";
+import { clonePackHeader, type DuplicateHeaderCache } from "./ownership";
+import { pruneUnsafeDeadSlotRedirects } from "./selectionCompact";
+import { resolveDeltaBaseFromHeader } from "./selectionResolve";
 import {
   ensurePackReadState,
   readSelectedHeader,
@@ -11,7 +11,7 @@ import {
   type PackReadState,
   type RewriteOptions,
   type SelectionTable,
-} from "./shared.ts";
+} from "./shared";
 
 export function collectRetainedRedirectsNeedingBaseResolution(
   table: SelectionTable,

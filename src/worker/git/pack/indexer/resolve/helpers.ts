@@ -1,15 +1,15 @@
-import { computeOidBytes, objTypeCode } from "@/worker/git/core/objects.ts";
-import { applyGitDelta } from "@/worker/git/object-store/delta.ts";
+import { computeOidBytes, objTypeCode } from "@/worker/git/core/objects";
+import { applyGitDelta } from "@/worker/git/object-store/delta";
 
-import type { PackEntryTable, ResolveOptions } from "../types.ts";
+import type { PackEntryTable, ResolveOptions } from "../types";
 
-import { typeCodeToObjectType } from "@/worker/git/object-store/support.ts";
-import { getBasePayload } from "./materialize.ts";
-import { promoteReadyInPackDependents, type InPackDependencyQueue } from "./dependencies.ts";
-import { throwIfAborted } from "./errors.ts";
-import type { PayloadLRU } from "./payloadCache.ts";
-import { inflateFromReader, type SequentialReader } from "./reader.ts";
-import { promoteWaitingRefDeltas, type RefBaseLookup } from "./refLookup.ts";
+import { typeCodeToObjectType } from "@/worker/git/object-store/support";
+import { getBasePayload } from "./materialize";
+import { promoteReadyInPackDependents, type InPackDependencyQueue } from "./dependencies";
+import { throwIfAborted } from "./errors";
+import type { PayloadLRU } from "./payloadCache";
+import { inflateFromReader, type SequentialReader } from "./reader";
+import { promoteWaitingRefDeltas, type RefBaseLookup } from "./refLookup";
 
 export function storeOid(table: PackEntryTable, index: number, oidBytes: Uint8Array): void {
   table.oids.set(oidBytes, index * 20);

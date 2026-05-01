@@ -1,9 +1,9 @@
-import { asBodyInit } from "@/worker/common/index.ts";
-import { concatChunks, flushPkt } from "@/worker/git/core/pktline.ts";
+import { asBodyInit } from "@/worker/common";
+import { concatChunks, flushPkt } from "@/worker/git/core/pktline";
 import {
   createSidebandPacketChunks,
   enqueueSidebandPayload,
-} from "@/worker/git/operations/fetch/sideband.ts";
+} from "@/worker/git/operations/fetch/sideband";
 
 export type ReceiveResponseMode = "plain" | "side-band-64k";
 

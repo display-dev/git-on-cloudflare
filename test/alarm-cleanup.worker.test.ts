@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { env, runDurableObjectAlarm } from "cloudflare:test";
-import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState.ts";
-import { runDOWithRetry } from "./util/test-helpers.ts";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
+import { runDOWithRetry } from "./util/test-helpers";
 
 function makeRepoId(suffix: string) {
   return `alarm/${suffix}-${Math.random().toString(36).slice(2, 8)}`;

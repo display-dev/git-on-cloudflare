@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
 import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/worker/git";
-import { buildPack } from "./util/test-helpers.ts";
+import { buildPack } from "./util/test-helpers";
 
 function zero40() {
   return "0".repeat(40);

@@ -1,13 +1,13 @@
-import type { Head } from "./repoState.ts";
-import type { RepoActivity } from "@/worker/common/index.ts";
-import type { PackCatalogRow } from "./db/schema.ts";
+import type { Head } from "./repoState";
+import type { RepoActivity } from "@/worker/common";
+import type { PackCatalogRow } from "./db/schema";
 
 import { DurableObject } from "cloudflare:workers";
 import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 
-import { doPrefix } from "@/worker/keys.ts";
-import { text, createLogger } from "@/worker/common/index.ts";
-import { purgeRepo, removePack, type RemovePackResult } from "./packOperations.ts";
+import { doPrefix } from "@/worker/keys";
+import { text, createLogger } from "@/worker/common";
+import { purgeRepo, removePack, type RemovePackResult } from "./packOperations";
 import {
   abortCompactionLease,
   abortReceiveLease,
@@ -27,9 +27,9 @@ import {
   rearmCompactionQueueFromAlarm,
   getActivePackCatalogSnapshot,
   getRepoActivitySnapshot,
-} from "./catalog.ts";
-import { getRefs, setRefs, resolveHead, setHead, getHeadAndRefs } from "./refs.ts";
-import { handleIdleAndMaintenance } from "./maintenance.ts";
+} from "./catalog";
+import { getRefs, setRefs, resolveHead, setHead, getHeadAndRefs } from "./refs";
+import { handleIdleAndMaintenance } from "./maintenance";
 import {
   debugState,
   debugCheckCommit,
@@ -37,16 +37,16 @@ import {
   type DebugCommitCheck,
   type DebugOidCheck,
   type DebugStateSnapshot,
-} from "./debug.ts";
+} from "./debug";
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
-import { getDb } from "./db/index.ts";
+import { getDb } from "./db";
 import migrations from "../../../../drizzle/repo-do/migrations.js";
 import {
   ensureAccessAndAlarm,
   touchAndMaybeSchedule,
   type RepoDOAccessContext,
-} from "./repoDO/access.ts";
-import { seedMinimalRepoState } from "./repoDO/seeding.ts";
+} from "./repoDO/access";
+import { seedMinimalRepoState } from "./repoDO/seeding";
 
 /**
  * Repository Durable Object (per-repo authority)

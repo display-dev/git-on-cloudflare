@@ -1,7 +1,7 @@
-import { bytesToHex, createDigestStream } from "@/worker/common/index.ts";
-import { packIndexKey, packRefsKey } from "@/worker/keys.ts";
-import { SubrequestLimiter } from "../operations/limits.ts";
-import { appendBytes, cloneBytes } from "./bytes.ts";
+import { bytesToHex, createDigestStream } from "@/worker/common";
+import { packIndexKey, packRefsKey } from "@/worker/keys";
+import { SubrequestLimiter } from "../operations/limits";
+import { appendBytes, cloneBytes } from "./bytes";
 
 const MULTIPART_PART_BYTES = 8 * 1024 * 1024;
 const PACK_HEADER_BYTES = 12;

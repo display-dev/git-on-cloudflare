@@ -1,10 +1,10 @@
-import test from "ava";
+import { assert, test } from "vitest";
 
-import { createLogger } from "@/worker/common/index.ts";
-import { buildOutputOrder, compactDeadSlots } from "@/worker/git/pack/rewrite/plan.ts";
-import { allocateSelectionTable } from "@/worker/git/pack/rewrite/shared.ts";
+import { createLogger } from "@/worker/common";
+import { buildOutputOrder, compactDeadSlots } from "@/worker/git/pack/rewrite/plan";
+import { allocateSelectionTable } from "@/worker/git/pack/rewrite/shared";
 
-test("compactDeadSlots preserves base slots for live rows that move", (t) => {
+test("compactDeadSlots preserves base slots for live rows that move", () => {
   const table = allocateSelectionTable(4);
   table.count = 4;
 
@@ -40,11 +40,11 @@ test("compactDeadSlots preserves base slots for live rows that move", (t) => {
 
   compactDeadSlots(table, new Map([[1, 0]]), createLogger("error", { service: "test" }));
 
-  t.is(table.count, 3);
-  t.deepEqual(Array.from(table.entryIndices.subarray(0, 3)), [0, 2, 3]);
-  t.deepEqual(Array.from(table.baseSlots.subarray(0, 3)), [-1, -1, 1]);
-  t.deepEqual([table.oidsRaw[0], table.oidsRaw[20], table.oidsRaw[40]], [0x10, 0x30, 0x40]);
+  assert.strictEqual(table.count, 3);
+  assert.deepEqual(Array.from(table.entryIndices.subarray(0, 3)), [0, 2, 3]);
+  assert.deepEqual(Array.from(table.baseSlots.subarray(0, 3)), [-1, -1, 1]);
+  assert.deepEqual([table.oidsRaw[0], table.oidsRaw[20], table.oidsRaw[40]], [0x10, 0x30, 0x40]);
 
-  t.true(buildOutputOrder(table, createLogger("error", { service: "test" })));
-  t.deepEqual(Array.from(table.outputOrder.subarray(0, 3)), [0, 1, 2]);
+  assert.isTrue(buildOutputOrder(table, createLogger("error", { service: "test" })));
+  assert.deepEqual(Array.from(table.outputOrder.subarray(0, 3)), [0, 1, 2]);
 });

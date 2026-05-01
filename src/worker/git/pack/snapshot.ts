@@ -1,15 +1,11 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { Logger } from "@/worker/common/logger.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
 import type {
   OrderedPackSnapshot,
   OrderedPackSnapshotEntry,
-} from "@/worker/git/operations/fetch/types.ts";
+} from "@/worker/git/operations/fetch/types";
 
-import {
-  getOidHexAt,
-  loadActivePackCatalog,
-  loadIdxView,
-} from "@/worker/git/object-store/index.ts";
+import { getOidHexAt, loadActivePackCatalog, loadIdxView } from "@/worker/git/object-store";
 
 export type SnapshotLoadResult =
   | {

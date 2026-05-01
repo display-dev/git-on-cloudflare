@@ -1,6 +1,6 @@
-import type { PackCatalogRow } from "../db/schema.ts";
+import type { PackCatalogRow } from "../db/schema";
 
-import { getDb, listActivePackCatalog } from "../db/index.ts";
+import { getDb, listActivePackCatalog } from "../db";
 
 export async function getActivePackCatalogSnapshot(
   ctx: DurableObjectState

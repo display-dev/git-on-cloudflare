@@ -1,11 +1,11 @@
-import type { Logger } from "@/worker/common/logger.ts";
+import type { Logger } from "@/worker/common/logger";
 
 import {
   compareSelectionSlots,
   copySelectionRow,
   selectionDependsOn,
   type SelectionTable,
-} from "./shared.ts";
+} from "./shared";
 
 export function collapseUnsafeRedirectOwners(
   table: SelectionTable,

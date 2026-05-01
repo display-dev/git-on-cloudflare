@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { concatChunks, encodeGitObject } from "@/worker/git/core/index.ts";
-import { readObject } from "@/worker/git/object-store/index.ts";
+import { concatChunks, encodeGitObject } from "@/worker/git/core";
+import { readObject } from "@/worker/git/object-store";
 import {
   buildAppendOnlyDelta,
   buildPack,
   callStubWithRetry,
   seedLegacyPackedRepo,
   uniqueRepoId,
-} from "./util/test-helpers.ts";
+} from "./util/test-helpers";
 
 describe("packed object store deltas", () => {
   it("resolves OFS_DELTA blobs from pack-only storage", async () => {

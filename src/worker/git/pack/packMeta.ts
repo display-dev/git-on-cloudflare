@@ -1,4 +1,4 @@
-import { bytesToHex } from "@/worker/common/index.ts";
+import { bytesToHex } from "@/worker/common";
 
 export type PackReadOptions = {
   limiter?: { run<T>(label: string, fn: () => Promise<T>): Promise<T> };

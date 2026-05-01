@@ -1,15 +1,15 @@
-import { bytesToHex } from "@/worker/common/hex.ts";
-import { applyGitDelta } from "@/worker/git/object-store/delta.ts";
-import { typeCodeToObjectType } from "@/worker/git/object-store/support.ts";
+import { bytesToHex } from "@/worker/common/hex";
+import { applyGitDelta } from "@/worker/git/object-store/delta";
+import { typeCodeToObjectType } from "@/worker/git/object-store/support";
 
-import { getRefBaseOidAt } from "../types.ts";
-import type { PackEntryTable, ResolveOptions } from "../types.ts";
+import { getRefBaseOidAt } from "../types";
+import type { PackEntryTable, ResolveOptions } from "../types";
 
-import { throwIfAborted } from "./errors.ts";
-import { readExternalBaseObject } from "./externalBase.ts";
-import type { CacheEntry } from "./payloadCache.ts";
-import { PayloadLRU } from "./payloadCache.ts";
-import { inflateFromReader, type SequentialReader } from "./reader.ts";
+import { throwIfAborted } from "./errors";
+import { readExternalBaseObject } from "./externalBase";
+import type { CacheEntry } from "./payloadCache";
+import { PayloadLRU } from "./payloadCache";
+import { inflateFromReader, type SequentialReader } from "./reader";
 
 /**
  * Get a resolved base payload from the LRU cache, or rematerialize it from the

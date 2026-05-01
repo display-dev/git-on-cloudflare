@@ -1,5 +1,5 @@
-import { asTypedStorage } from "../repoState.ts";
-import type { RepoLease, RepoStateSchema } from "../repoState.ts";
+import { asTypedStorage } from "../repoState";
+import type { RepoLease, RepoStateSchema } from "../repoState";
 
 export type RepoActivitySnapshot =
   | { state: "idle"; compactionWantedAt?: number }

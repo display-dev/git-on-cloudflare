@@ -2,7 +2,7 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { readFileSync, existsSync } from "node:fs";
 import path from "path";
-import { BASE_TEST_BINDINGS } from "./test/vitest.bindings.ts";
+import { BASE_TEST_BINDINGS } from "./test/vitest.bindings";
 import { defineConfig } from "vitest/config";
 
 const AUTH_TEST_FILE = "test/auth.worker.test.ts";

@@ -8,19 +8,19 @@ import {
   parseIdxView,
   readObject,
   getNextOffsetByIndex,
-} from "@/worker/git/object-store/index.ts";
-import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast.ts";
-import { hexToBytes } from "@/worker/common/hex.ts";
+} from "@/worker/git/object-store";
+import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast";
+import { hexToBytes } from "@/worker/common/hex";
 import {
   callStubWithRetry,
   deleteLooseObjectCopies,
   seedLegacyPackedRepo,
   uniqueRepoId,
-} from "./util/test-helpers.ts";
-import { buildPack } from "./util/git-pack.ts";
-import { buildTreePayload } from "./util/packed-repo.ts";
-import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first.ts";
-import { encodeGitObject } from "@/worker/git/core/index.ts";
+} from "./util/test-helpers";
+import { buildPack } from "./util/git-pack";
+import { buildTreePayload } from "./util/packed-repo";
+import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first";
+import { encodeGitObject } from "@/worker/git/core";
 
 const UINT32_SPAN = 0x1_0000_0000;
 

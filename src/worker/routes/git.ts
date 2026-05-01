@@ -9,11 +9,11 @@ import {
   concatChunks,
   getHeadAndRefs,
 } from "@/worker/git";
-import { loadPeeledTagTargets } from "@/worker/git/object-store/index.ts";
-import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream/index.ts";
-import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack.ts";
+import { loadPeeledTagTargets } from "@/worker/git/object-store";
+import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream";
+import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
 import { asBodyInit, gunzip, unauthorizedBasic } from "@/worker/common";
-import type { CacheContext } from "@/worker/cache/cache.ts";
+import type { CacheContext } from "@/worker/cache/cache";
 import { repoKey } from "@/worker/keys";
 import { verifyAuth } from "@/worker/auth";
 import { addRepoToOwner, removeRepoFromOwner } from "@/worker/registry";

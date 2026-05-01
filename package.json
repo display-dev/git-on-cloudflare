@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy",
-    "test": "ava",
+    "test": "vitest run --config vitest.unit.config.ts",
     "test:workers": "vitest run --config vitest.config.ts",
     "test:auth": "vitest run --config vitest.config.ts test/auth.worker.test.ts",
     "format": "prettier --write .",
@@ -28,7 +28,6 @@
     "@types/react-dom": "^19.2.3",
     "@types/sanitize-html": "^2.16.1",
     "@vitejs/plugin-react": "^6.0.0",
-    "ava": "^7.0.0",
     "drizzle-kit": "^0.31.4",
     "prettier": "^3.6.2",
     "tailwindcss": "^4.1.13",
@@ -48,19 +47,5 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "sanitize-html": "^2.17.1"
-  },
-  "ava": {
-    "files": [
-      "test/**/*.test.ts",
-      "!test/**/*.worker.test.ts"
-    ],
-    "extensions": {
-      "ts": "module"
-    },
-    "nodeArguments": [
-      "--import=tsx",
-      "--import=./test/register.js"
-    ],
-    "timeout": "30s"
   }
 }

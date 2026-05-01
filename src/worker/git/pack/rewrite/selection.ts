@@ -1,22 +1,18 @@
-import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types.ts";
-import type { Logger } from "@/worker/common/logger.ts";
+import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
+import type { Logger } from "@/worker/common/logger";
 
-import { hexToBytes } from "@/worker/common/index.ts";
+import { hexToBytes } from "@/worker/common";
 import {
   createSelectedOidLookup,
   type DuplicateHeaderCache,
   type SelectionStats,
-} from "./ownership.ts";
-import { collapseUnsafeRedirectOwners, compactDeadSlots } from "./selectionCompact.ts";
+} from "./ownership";
+import { collapseUnsafeRedirectOwners, compactDeadSlots } from "./selectionCompact";
 import {
   collectRetainedRedirectsNeedingBaseResolution,
   resolveRetainedRedirectBase,
-} from "./selectionRetained.ts";
-import {
-  addEntry,
-  readHeaderAndResolveBase,
-  type HeaderResolveResult,
-} from "./selectionResolve.ts";
+} from "./selectionRetained";
+import { addEntry, readHeaderAndResolveBase, type HeaderResolveResult } from "./selectionResolve";
 import {
   allocateSelectionTable,
   resolveOrderedEntryByOid,
@@ -24,7 +20,7 @@ import {
   type PackReadState,
   type RewriteOptions,
   type SelectionTable,
-} from "./shared.ts";
+} from "./shared";
 
 export type BuildSelectionResult = {
   table: SelectionTable;

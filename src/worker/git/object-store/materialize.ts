@@ -1,13 +1,13 @@
-import type { Logger } from "@/worker/common/logger.ts";
-import type { Limiter } from "@/worker/git/operations/limits.ts";
-import type { PackedObjectResult } from "./types.ts";
-import type { PackedObjectCandidate } from "./candidates.ts";
+import type { Logger } from "@/worker/common/logger";
+import type { Limiter } from "@/worker/git/operations/limits";
+import type { PackedObjectResult } from "./types";
+import type { PackedObjectCandidate } from "./candidates";
 
-import { inflate } from "@/worker/common/index.ts";
-import { readPackHeaderExFromBuf, readPackRange } from "@/worker/git/pack/packMeta.ts";
-import { applyGitDelta } from "./delta.ts";
-import { findOffsetIndex, getNextOffsetByIndex, getOidHexAt } from "./idxView.ts";
-import { toPackedObjectResult, typeCodeToObjectType } from "./support.ts";
+import { inflate } from "@/worker/common";
+import { readPackHeaderExFromBuf, readPackRange } from "@/worker/git/pack/packMeta";
+import { applyGitDelta } from "./delta";
+import { findOffsetIndex, getNextOffsetByIndex, getOidHexAt } from "./idxView";
+import { toPackedObjectResult, typeCodeToObjectType } from "./support";
 
 export type PackedMaterializerCyclePolicy = "throw" | "miss";
 

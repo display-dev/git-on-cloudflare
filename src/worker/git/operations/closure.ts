@@ -1,7 +1,7 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
+import type { CacheContext } from "@/worker/cache";
 
-import { createLogger } from "@/worker/common/index.ts";
-import { hasObjectsBatch } from "@/worker/git/object-store/index.ts";
+import { createLogger } from "@/worker/common";
+import { hasObjectsBatch } from "@/worker/git/object-store";
 
 /**
  * Finds the subset of client-advertised haves that the server can already

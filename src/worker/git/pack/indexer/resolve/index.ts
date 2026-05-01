@@ -15,32 +15,32 @@
  * requires zero extra reads beyond the sequential pass.
  */
 
-import type { CacheContext } from "@/worker/cache/index.ts";
-import { bytesEqual } from "@/worker/common/bytes.ts";
-import { bytesToHex } from "@/worker/common/hex.ts";
-import { computeOidBytes, objTypeCode } from "@/worker/git/core/objects.ts";
-import { applyGitDelta } from "@/worker/git/object-store/delta.ts";
-import { findOidIndexFromBytes, parseIdxView } from "@/worker/git/object-store/idxView.ts";
-import type { IdxView } from "@/worker/git/object-store/types.ts";
-import { ensureMemo, typeCodeToObjectType } from "@/worker/git/object-store/support.ts";
-import { packIndexKey, packRefsKey } from "@/worker/keys.ts";
+import type { CacheContext } from "@/worker/cache";
+import { bytesEqual } from "@/worker/common/bytes";
+import { bytesToHex } from "@/worker/common/hex";
+import { computeOidBytes, objTypeCode } from "@/worker/git/core/objects";
+import { applyGitDelta } from "@/worker/git/object-store/delta";
+import { findOidIndexFromBytes, parseIdxView } from "@/worker/git/object-store/idxView";
+import type { IdxView } from "@/worker/git/object-store/types";
+import { ensureMemo, typeCodeToObjectType } from "@/worker/git/object-store/support";
+import { packIndexKey, packRefsKey } from "@/worker/keys";
 
-import { searchOffsetIndex, getRefBaseOidAt } from "../types.ts";
-import type { ResolveOptions, ResolveResult } from "../types.ts";
-import { writeIdxV2 } from "../writeIdx.ts";
+import { searchOffsetIndex, getRefBaseOidAt } from "../types";
+import type { ResolveOptions, ResolveResult } from "../types";
+import { writeIdxV2 } from "../writeIdx";
 
-import { drainReadyDeferredQueue } from "./deferred.ts";
+import { drainReadyDeferredQueue } from "./deferred";
 import {
   createInPackDependencyQueue,
   enqueueReadyDeferred,
   promoteReadyInPackDependents,
   registerInPackDependency,
-} from "./dependencies.ts";
-import { throwIfAborted } from "./errors.ts";
-import { readExternalBaseObject } from "./externalBase.ts";
-import { resolveDeltaEntry, storeOid } from "./helpers.ts";
-import { PayloadLRU } from "./payloadCache.ts";
-import { inflateFromReader, SequentialReader } from "./reader.ts";
+} from "./dependencies";
+import { throwIfAborted } from "./errors";
+import { readExternalBaseObject } from "./externalBase";
+import { resolveDeltaEntry, storeOid } from "./helpers";
+import { PayloadLRU } from "./payloadCache";
+import { inflateFromReader, SequentialReader } from "./reader";
 import {
   createRefBaseLookup,
   enqueueWaitingRefDelta,
@@ -48,8 +48,8 @@ import {
   noteResolvedEntry,
   promoteWaitingRefDeltas,
   type RefBaseLookup,
-} from "./refLookup.ts";
-import type { InPackDependencyQueue } from "./dependencies.ts";
+} from "./refLookup";
+import type { InPackDependencyQueue } from "./dependencies";
 
 const DEFAULT_LRU_BUDGET = 32 * 1024 * 1024; // 32 MiB
 const DEFAULT_CHUNK_SIZE = 4_194_304; // 4 MiB — larger chunks reduce R2 reads during resolve

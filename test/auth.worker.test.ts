@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
 import { pktLine, flushPkt, concatChunks } from "@/worker/git";
-import { asBufferSource, deflate } from "@/worker/common/index.ts";
+import { asBufferSource, deflate } from "@/worker/common";
 
 function encodeObjHeader(type: number, size: number): Uint8Array {
   let first = (type << 4) | (size & 0x0f);

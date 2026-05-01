@@ -1,8 +1,8 @@
 import { it, expect, describe } from "vitest";
 import { env } from "cloudflare:test";
-import type { CacheContext } from "@/worker/cache/index.ts";
-import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast.ts";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
+import type { CacheContext } from "@/worker/cache";
+import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
 
 describe("computeNeededFast", () => {
   it("computes minimal closure with stop set", async () => {

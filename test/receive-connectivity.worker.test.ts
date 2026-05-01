@@ -1,9 +1,9 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
 import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/worker/git";
-import { uniqueRepoId } from "./util/test-helpers.ts";
-import { buildPack, zero40 } from "./util/test-helpers.ts";
-import { bytesToHex } from "@/worker/common/hex.ts";
+import { uniqueRepoId } from "./util/test-helpers";
+import { buildPack, zero40 } from "./util/test-helpers";
+import { bytesToHex } from "@/worker/common/hex";
 
 it("receive-pack connectivity: rejects commit whose root tree is missing", async () => {
   const owner = "o";

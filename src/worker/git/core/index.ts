@@ -2,8 +2,8 @@
  * Core git utilities and parsers
  */
 
-export * from "./commitParse.ts";
-export * from "./objects.ts";
-export * from "./pktline.ts";
-export * from "./protocol.ts";
-export * from "./object-parse.ts";
+export * from "./commitParse";
+export * from "./objects";
+export * from "./pktline";
+export * from "./protocol";
+export * from "./object-parse";

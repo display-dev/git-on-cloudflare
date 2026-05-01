@@ -1,19 +1,19 @@
-import type { Head, Ref, RepoStateSchema } from "@/worker/do/repo/repoState.ts";
-import type { TreeEntry } from "@/worker/git/operations/read/types.ts";
+import type { Head, Ref, RepoStateSchema } from "@/worker/do/repo/repoState";
+import type { TreeEntry } from "@/worker/git/operations/read/types";
 
-import { concatChunks, encodeGitObject } from "@/worker/git/core/index.ts";
-import { hexToBytes } from "@/worker/common/index.ts";
-import { asTypedStorage, objKey } from "@/worker/do/repo/repoState.ts";
-import { doPrefix, r2LooseKey, r2PackKey } from "@/worker/keys.ts";
+import { concatChunks, encodeGitObject } from "@/worker/git/core";
+import { hexToBytes } from "@/worker/common";
+import { asTypedStorage, objKey } from "@/worker/do/repo/repoState";
+import { doPrefix, r2LooseKey, r2PackKey } from "@/worker/keys";
 import {
   getDb,
   listActivePackCatalog,
   listPackCatalog,
   upsertPackCatalogRow,
-} from "@/worker/do/repo/db/index.ts";
-import { buildPack } from "./git-pack.ts";
-import { indexTestPack } from "./test-indexer.ts";
-import { runDOWithRetry, type RepoDOStubFactory } from "./do-retry.ts";
+} from "@/worker/do/repo/db";
+import { buildPack } from "./git-pack";
+import { indexTestPack } from "./test-indexer";
+import { runDOWithRetry, type RepoDOStubFactory } from "./do-retry";
 
 export type EncodedGitObject = Awaited<ReturnType<typeof encodeGitObject>>;
 
@@ -84,7 +84,7 @@ export async function seedPackedRepoState(
     }
 
     let nextSeq = (await store.get("nextPackSeq")) || 1;
-    const catalogSoFar: import("@/worker/do/repo/db/schema.ts").PackCatalogRow[] = [];
+    const catalogSoFar: import("@/worker/do/repo/db/schema").PackCatalogRow[] = [];
     // Historical test helpers passed packs newest-first because `packList`
     // mirrored that ordering. Preserve that caller contract for assertions and
     // returned `packKeys`, but index oldest-to-newest so REF_DELTA bases in
@@ -101,7 +101,7 @@ export async function seedPackedRepoState(
       );
 
       const seq = nextSeq++;
-      const row: import("@/worker/do/repo/db/schema.ts").PackCatalogRow = {
+      const row: import("@/worker/do/repo/db/schema").PackCatalogRow = {
         packKey: pack.packKey,
         kind: "receive",
         state: "active",

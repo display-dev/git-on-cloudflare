@@ -6,11 +6,11 @@
  * are materialized lazily when needed.
  */
 
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { Logger } from "@/worker/common/logger.ts";
-import type { IdxView, PackCatalogRow } from "@/worker/git/object-store/types.ts";
-import type { Limiter } from "@/worker/git/operations/limits.ts";
-import type { PackRefsBuilder } from "@/worker/git/pack/refIndex.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
+import type { IdxView, PackCatalogRow } from "@/worker/git/object-store/types";
+import type { Limiter } from "@/worker/git/operations/limits";
+import type { PackRefsBuilder } from "@/worker/git/pack/refIndex";
 
 // ---------------------------------------------------------------------------
 // Entry table – struct-of-arrays backed by typed arrays

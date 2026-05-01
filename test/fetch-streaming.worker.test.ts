@@ -1,21 +1,21 @@
 import { it, expect, describe } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/worker/git";
-import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream.ts";
+import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream";
 import {
   buildServeUploadPackPlan,
   loadUploadPackSnapshot,
   planUploadPack,
-} from "@/worker/git/operations/fetch/plan.ts";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { asBufferSource } from "@/worker/common/index.ts";
-import { packRefsKey } from "@/worker/keys.ts";
-import { runQueueMessage } from "./util/queue.ts";
-import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first.ts";
-import { makeTracingLimiter } from "./util/pack-indexer.helpers.ts";
-import { buildAppendOnlyDelta, buildCopyPrefixDelta, buildPack } from "./util/git-pack.ts";
-import { seedPackedRepoState } from "./util/packed-repo.ts";
-import { computeOid, encodeGitObject } from "@/worker/git/core/objects.ts";
+} from "@/worker/git/operations/fetch/plan";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { asBufferSource } from "@/worker/common";
+import { packRefsKey } from "@/worker/keys";
+import { runQueueMessage } from "./util/queue";
+import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first";
+import { makeTracingLimiter } from "./util/pack-indexer.helpers";
+import { buildAppendOnlyDelta, buildCopyPrefixDelta, buildPack } from "./util/git-pack";
+import { seedPackedRepoState } from "./util/packed-repo";
+import { computeOid, encodeGitObject } from "@/worker/git/core/objects";
 
 function buildFetchBody({
   wants,

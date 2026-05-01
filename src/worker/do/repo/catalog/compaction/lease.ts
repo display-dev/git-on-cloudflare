@@ -5,28 +5,28 @@
  * acquires a lease via `beginCompactionState`, performs the pack rewrite in
  * worker code, and then atomically commits the result via `commitCompactionState`.
  */
-import type { Logger } from "@/worker/common/logger.ts";
-import type { PackCatalogRow } from "../../db/schema.ts";
-import type { RepoLease, RepoStateSchema } from "../../repoState.ts";
+import type { Logger } from "@/worker/common/logger";
+import type { PackCatalogRow } from "../../db/schema";
+import type { RepoLease, RepoStateSchema } from "../../repoState";
 
-import { asTypedStorage } from "../../repoState.ts";
+import { asTypedStorage } from "../../repoState";
 import {
   getDb,
   getPackCatalogRow,
   listActivePackCatalog,
   supersedePackCatalogRows,
   upsertPackCatalogRow,
-} from "../../db/index.ts";
-import { clearExpiredLeases } from "../leases.ts";
-import { getActivePackCatalogSnapshot } from "../state.ts";
+} from "../../db";
+import { clearExpiredLeases } from "../leases";
+import { getActivePackCatalogSnapshot } from "../state";
 import {
   bumpPacksetVersion,
   COMPACT_LEASE_TTL_MS,
   COMPACTION_REARM_DELAY_MS,
   ensureRepoMetadataDefaults,
   LEASE_RETRY_AFTER_SECONDS,
-} from "../shared.ts";
-import { activeLeaseOrUndefined } from "../activity.ts";
+} from "../shared";
+import { activeLeaseOrUndefined } from "../activity";
 import {
   selectCompactionPlan,
   catalogNeedsCompaction,
@@ -35,7 +35,7 @@ import {
   rowsMatchForCommit,
   type BeginCompactionResult,
   type CommitCompactionResult,
-} from "./plan.ts";
+} from "./plan";
 
 /**
  * Acquire a compaction lease and select source packs for compaction.

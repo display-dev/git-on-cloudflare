@@ -1,7 +1,7 @@
 import type { HeadInfo, Ref } from "@/worker/git";
 import type { CacheContext } from "@/worker/cache";
 import { readPath } from "@/worker/git";
-import { classifyRef, formatRefOption, shortRefName } from "@/shared/git/ref-display.ts";
+import { classifyRef, formatRefOption, shortRefName } from "@/shared/git/ref-display";
 import { isValidOwnerRepo, bytesToText } from "@/shared/web";
 import { renderUiView } from "@/client/server/render";
 import { listReposForOwner } from "@/worker/registry";

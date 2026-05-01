@@ -1,5 +1,5 @@
-import test from "ava";
-import { pktLine, delimPkt, flushPkt, parseFetchArgs } from "@/worker/git/index.ts";
+import { assert, test } from "vitest";
+import { pktLine, delimPkt, flushPkt, parseFetchArgs } from "@/worker/git";
 
 function buildFetchBody({
   wants,
@@ -30,18 +30,18 @@ function buildFetchBody({
 const O1 = "0123456789abcdef0123456789abcdef01234567";
 const O2 = "89abcdef0123456789abcdef0123456789abcdef";
 
-test("parseFetchArgs extracts wants/haves/done after delim", (t) => {
+test("parseFetchArgs extracts wants/haves/done after delim", () => {
   const body = buildFetchBody({ wants: [O1], haves: [O2], done: true });
   const res = parseFetchArgs(body);
-  t.deepEqual(res.wants, [O1]);
-  t.deepEqual(res.haves, [O2]);
-  t.true(res.done);
+  assert.deepEqual(res.wants, [O1]);
+  assert.deepEqual(res.haves, [O2]);
+  assert.isTrue(res.done);
 });
 
-test("parseFetchArgs handles multiple wants/haves and missing done", (t) => {
+test("parseFetchArgs handles multiple wants/haves and missing done", () => {
   const body = buildFetchBody({ wants: [O1, O2], haves: [O2, O1], done: false });
   const res = parseFetchArgs(body);
-  t.deepEqual(new Set(res.wants), new Set([O1, O2]));
-  t.deepEqual(res.haves, [O2, O1]);
-  t.false(res.done);
+  assert.deepEqual(new Set(res.wants), new Set([O1, O2]));
+  assert.deepEqual(res.haves, [O2, O1]);
+  assert.isFalse(res.done);
 });

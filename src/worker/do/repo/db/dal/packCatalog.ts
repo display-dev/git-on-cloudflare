@@ -1,9 +1,9 @@
 import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
-import type { PackCatalogRow } from "../schema.ts";
+import type { PackCatalogRow } from "../schema";
 
 import { desc, eq, inArray, sql } from "drizzle-orm";
-import { packCatalog } from "../schema.ts";
-import { SAFE_ROWS_1COL } from "./shared.ts";
+import { packCatalog } from "../schema";
+import { SAFE_ROWS_1COL } from "./shared";
 
 export async function getPackCatalogCount(db: DrizzleSqliteDODatabase): Promise<number> {
   return await db.$count(packCatalog);

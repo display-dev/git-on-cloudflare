@@ -8,16 +8,16 @@
  * time before being discarded.
  */
 
-import { bytesToHex } from "@/worker/common/hex.ts";
-import { createDigestStream } from "@/worker/common/webtypes.ts";
-import { computeOidBytes } from "@/worker/git/core/objects.ts";
-import { readPackRange } from "@/worker/git/pack/packMeta.ts";
-import { typeCodeToObjectType } from "@/worker/git/object-store/support.ts";
-import { PackRefsBuilder } from "@/worker/git/pack/refIndex.ts";
+import { bytesToHex } from "@/worker/common/hex";
+import { createDigestStream } from "@/worker/common/webtypes";
+import { computeOidBytes } from "@/worker/git/core/objects";
+import { readPackRange } from "@/worker/git/pack/packMeta";
+import { typeCodeToObjectType } from "@/worker/git/object-store/support";
+import { PackRefsBuilder } from "@/worker/git/pack/refIndex";
 
-import { InflateCursor, CRC32_INIT, crc32Update, crc32Finish } from "./inflateCursor.ts";
-import { allocateEntryTable } from "./types.ts";
-import type { IndexerOptions, ScanResult, RefBaseOids } from "./types.ts";
+import { InflateCursor, CRC32_INIT, crc32Update, crc32Finish } from "./inflateCursor";
+import { allocateEntryTable } from "./types";
+import type { IndexerOptions, ScanResult, RefBaseOids } from "./types";
 
 const DEFAULT_CHUNK_SIZE = 1_048_576; // 1 MiB
 const DELTA_HEADER_CAPTURE_LIMIT = 16;

@@ -1,9 +1,9 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { IdxView } from "./types.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { IdxView } from "./types";
 
-import { bytesToHex, createLogger, hexToBytes } from "@/worker/common/index.ts";
-import { packIndexKey } from "@/worker/keys.ts";
-import { countSubrequest, getLimiter } from "@/worker/git/operations/limits.ts";
+import { bytesToHex, createLogger, hexToBytes } from "@/worker/common";
+import { packIndexKey } from "@/worker/keys";
+import { countSubrequest, getLimiter } from "@/worker/git/operations/limits";
 
 const IDX_VIEW_CACHE_MAX_BYTES = 16 * 1024 * 1024;
 const IDX_TRAILER_BYTES = 40;

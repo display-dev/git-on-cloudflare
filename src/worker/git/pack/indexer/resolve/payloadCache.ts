@@ -1,4 +1,4 @@
-import type { GitObjectType } from "@/worker/git/core/objects.ts";
+import type { GitObjectType } from "@/worker/git/core/objects";
 
 const LIST_END = -1;
 

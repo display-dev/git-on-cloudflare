@@ -1,5 +1,5 @@
-import test from "ava";
-import { encodeOfsDeltaDistance } from "@/worker/git/index.ts";
+import { assert, test } from "vitest";
+import { encodeOfsDeltaDistance } from "@/worker/git";
 
 const toHex = (u8: Uint8Array) =>
   Array.from(u8)
@@ -30,14 +30,14 @@ const known: { n: number; hex: string }[] = [
   { n: 0x20000, hex: "86ff00" },
 ];
 
-test("ofs-delta encoder encodes known values to expected bytes", (t) => {
+test("ofs-delta encoder encodes known values to expected bytes", () => {
   for (const { n, hex } of known) {
     const enc = encodeOfsDeltaDistance(n);
-    t.is(toHex(enc), hex, `encoding mismatch for ${n}`);
+    assert.strictEqual(toHex(enc), hex, `encoding mismatch for ${n}`);
   }
 });
 
-test("ofs-delta encoder round-trips a range of values", (t) => {
+test("ofs-delta encoder round-trips a range of values", () => {
   const values = [
     1, 2, 3, 10, 0x7e, 0x7f, 0x80, 0x81, 0xff, 0x100, 0x1234, 0x3fff, 0x4000, 0x1ffff, 0x20000,
     0x1fffff, 0x200000,
@@ -45,6 +45,6 @@ test("ofs-delta encoder round-trips a range of values", (t) => {
   for (const n of values) {
     const enc = encodeOfsDeltaDistance(n);
     const dec = decodeOfsDeltaDistance(enc);
-    t.is(dec, n, `round-trip failed for ${n} (enc=${toHex(enc)})`);
+    assert.strictEqual(dec, n, `round-trip failed for ${n} (enc=${toHex(enc)})`);
   }
 });

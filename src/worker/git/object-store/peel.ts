@@ -1,22 +1,17 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { GitObjectType } from "@/worker/git/core/index.ts";
-import type { IdxView, PackCatalogRow } from "./types.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { GitObjectType } from "@/worker/git/core";
+import type { IdxView, PackCatalogRow } from "./types";
 
-import { inflate } from "@/worker/common/index.ts";
-import { parseTagTarget } from "@/worker/git/core/index.ts";
-import { countSubrequest, getLimiter } from "@/worker/git/operations/limits.ts";
-import { SequentialReader } from "@/worker/git/pack/indexer/resolve/reader.ts";
-import { readPackHeaderExFromBuf } from "@/worker/git/pack/packMeta.ts";
-import { loadActivePackCatalog } from "./catalog.ts";
-import { applyGitDelta } from "./delta.ts";
-import { findOidIndex, findOffsetIndex, getNextOffsetByIndex, loadIdxView } from "./idxView.ts";
-import { readObject } from "./store.ts";
-import {
-  ensureMemo,
-  getPackedObjectStoreLogger,
-  logOnce,
-  typeCodeToObjectType,
-} from "./support.ts";
+import { inflate } from "@/worker/common";
+import { parseTagTarget } from "@/worker/git/core";
+import { countSubrequest, getLimiter } from "@/worker/git/operations/limits";
+import { SequentialReader } from "@/worker/git/pack/indexer/resolve/reader";
+import { readPackHeaderExFromBuf } from "@/worker/git/pack/packMeta";
+import { loadActivePackCatalog } from "./catalog";
+import { applyGitDelta } from "./delta";
+import { findOidIndex, findOffsetIndex, getNextOffsetByIndex, loadIdxView } from "./idxView";
+import { readObject } from "./store";
+import { ensureMemo, getPackedObjectStoreLogger, logOnce, typeCodeToObjectType } from "./support";
 
 type TagRef = {
   name: string;

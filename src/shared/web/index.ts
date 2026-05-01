@@ -2,9 +2,9 @@
  * Web utilities for formatting, syntax, validation, HTTP, and MIME helpers.
  */
 
-export * from "./format.ts";
-export * from "./syntax.ts";
-export * from "./validation.ts";
-export * from "./http.ts";
-export * from "./json.ts";
-export * from "./mime.ts";
+export * from "./format";
+export * from "./syntax";
+export * from "./validation";
+export * from "./http";
+export * from "./json";
+export * from "./mime";

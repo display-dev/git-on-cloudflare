@@ -3,7 +3,7 @@ export type {
   CommitDiffEntry,
   CommitDiffResult,
   CommitFilePatchResult,
-} from "@/shared/git/types.ts";
+} from "@/shared/git/types";
 
 export interface TreeEntry {
   /** File mode (e.g., "100644" for regular file, "40000" for directory) */

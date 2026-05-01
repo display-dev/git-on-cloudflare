@@ -7,13 +7,9 @@
  * - Only cache GET responses.
  */
 
-import { asBodyInit } from "@/worker/common/webtypes.ts";
-import type {
-  IdxView,
-  PackCatalogRow,
-  PackedObjectResult,
-} from "@/worker/git/object-store/types.ts";
-import type { PackRefView, PackRefViewLoadResult } from "@/worker/git/pack/refIndex.ts";
+import { asBodyInit } from "@/worker/common/webtypes";
+import type { IdxView, PackCatalogRow, PackedObjectResult } from "@/worker/git/object-store/types";
+import type { PackRefView, PackRefViewLoadResult } from "@/worker/git/pack/refIndex";
 
 const CACHE_NAME_JSON = "git-on-cf:json";
 const CACHE_NAME_OBJECTS = "git-on-cf:objects";

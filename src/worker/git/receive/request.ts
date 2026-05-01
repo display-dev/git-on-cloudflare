@@ -1,4 +1,4 @@
-import type { ReceiveCommand } from "@/worker/git/operations/validation.ts";
+import type { ReceiveCommand } from "@/worker/git/operations/validation";
 
 export type ReceiveNegotiatedCapabilities = {
   reportStatus: boolean;

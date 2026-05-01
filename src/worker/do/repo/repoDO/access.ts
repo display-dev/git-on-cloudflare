@@ -1,8 +1,8 @@
-import type { Logger } from "@/worker/common/logger.ts";
+import type { Logger } from "@/worker/common/logger";
 
-import { asTypedStorage } from "../repoState.ts";
-import type { RepoStateSchema } from "../repoState.ts";
-import { ensureScheduled } from "../scheduler.ts";
+import { asTypedStorage } from "../repoState";
+import type { RepoStateSchema } from "../repoState";
+import { ensureScheduled } from "../scheduler";
 
 export type RepoDOAccessContext = {
   ctx: DurableObjectState;

@@ -1,11 +1,11 @@
-import type { RepoStateSchema } from "../repoState.ts";
-import type { DebugStateSnapshot } from "./types.ts";
+import type { RepoStateSchema } from "../repoState";
+import type { DebugStateSnapshot } from "./types";
 
-import { asTypedStorage } from "../repoState.ts";
-import { doPrefix, r2LooseKey } from "@/worker/keys.ts";
-import { getDb, listPackCatalog } from "../db/index.ts";
-import { activeLeaseOrUndefined, getActivePackCatalogSnapshot } from "../catalog.ts";
-import { toDebugPackState } from "./types.ts";
+import { asTypedStorage } from "../repoState";
+import { doPrefix, r2LooseKey } from "@/worker/keys";
+import { getDb, listPackCatalog } from "../db";
+import { activeLeaseOrUndefined, getActivePackCatalogSnapshot } from "../catalog";
+import { toDebugPackState } from "./types";
 
 async function listLooseSample(ctx: DurableObjectState): Promise<string[]> {
   const out: string[] = [];

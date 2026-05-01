@@ -2,4 +2,4 @@
  * Authentication module
  */
 
-export * from "./verify.ts";
+export * from "./verify";

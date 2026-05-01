@@ -1,4 +1,4 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
+import type { CacheContext } from "@/worker/cache";
 
 // Global caps
 export const MAX_SIMULTANEOUS_CONNECTIONS = 6; // Cloudflare per-request connection limit

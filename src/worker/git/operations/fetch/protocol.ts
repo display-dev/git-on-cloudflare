@@ -1,5 +1,5 @@
-import { asBodyInit } from "@/worker/common/index.ts";
-import { pktLine, delimPkt, flushPkt, concatChunks } from "@/worker/git/core/index.ts";
+import { asBodyInit } from "@/worker/common";
+import { pktLine, delimPkt, flushPkt, concatChunks } from "@/worker/git/core";
 
 /**
  * Builds acknowledgment section for git protocol v2.

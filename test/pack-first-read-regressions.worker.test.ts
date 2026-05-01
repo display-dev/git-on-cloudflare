@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import { encodeGitObject } from "@/worker/git/core/index.ts";
+import { encodeGitObject } from "@/worker/git/core";
 import {
   buildPack,
   callStubWithRetry,
@@ -9,8 +9,8 @@ import {
   seedPackedRepo,
   toRequestBody,
   uniqueRepoId,
-} from "./util/test-helpers.ts";
-import { buildFetchBody, findBytes } from "./util/fetch-protocol.ts";
+} from "./util/test-helpers";
+import { buildFetchBody, findBytes } from "./util/fetch-protocol";
 
 describe("pack-first read-path regressions", () => {
   it("serves UI routes from packs after all loose copies are deleted", async () => {

@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
-import { packIndexKey, packRefsKey } from "@/worker/keys.ts";
-import { pushStreamingUpdate } from "./streaming-helpers.ts";
-import { runQueueMessage, type QueueRunResult } from "./queue.ts";
+import { packIndexKey, packRefsKey } from "@/worker/keys";
+import { pushStreamingUpdate } from "./streaming-helpers";
+import { runQueueMessage, type QueueRunResult } from "./queue";
 
 export async function compactOnce(repoId: string): Promise<QueueRunResult> {
   const doId = env.REPO_DO.idFromName(repoId).toString();

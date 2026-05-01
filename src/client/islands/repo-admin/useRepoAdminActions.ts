@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { safeReadJson } from "@/client/json.ts";
+import { safeReadJson } from "@/client/json";
 import { isJsonObject, type JsonValue } from "@/shared/web";
 
 export function useRepoAdminActions(owner: string, repo: string) {

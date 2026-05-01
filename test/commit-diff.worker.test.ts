@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import { encodeGitObject, listCommitChangedFiles, readCommitFilePatch } from "@/worker/git";
-import { uniqueRepoId, runDOWithRetry, type RepoDOStubFactory } from "./util/test-helpers.ts";
-import { registerTestPack } from "./util/packed-repo.ts";
+import { uniqueRepoId, runDOWithRetry, type RepoDOStubFactory } from "./util/test-helpers";
+import { registerTestPack } from "./util/packed-repo";
 
 type TreeSpec = {
   mode: string;

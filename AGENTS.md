@@ -109,7 +109,7 @@ Write changes against the current source tree, not the docs alone. Some document
 - `src/client/entries/`: Vite client entrypoints used by SSR pages
 - `src/shared/web/`: browser-safe request parsing, formatting, MIME/JSON helpers
 - `src/worker/common/`: Worker response, logging, compression, stubs, progress helpers
-- `test/`: Vitest worker integration tests and AVA unit tests
+- `test/`: Vitest worker integration tests and Node unit tests
 - `docs/`: architecture and API notes; useful, but verify against source before relying on path details
 
 ## Core Invariants
@@ -159,7 +159,7 @@ npm run format
 
 ### Tests
 
-`npm run test` runs AVA tests for non-worker units in `test/**/*.test.ts` excluding `*.worker.test.ts`.
+`npm run test` runs Node Vitest tests for non-worker units in `test/**/*.test.ts` excluding `*.worker.test.ts`.
 
 `npm run test:workers` runs Vitest against Cloudflare worker integration tests.
 
@@ -170,7 +170,7 @@ The 42 MiB pack-indexer fixture test is opt-in. Use `PACK_INDEXER_FIXTURE=1 npx 
 Targeted commands:
 
 ```bash
-npx ava test/object-parse.test.ts
+npx vitest run --config vitest.unit.config.ts test/object-parse.test.ts
 npx vitest run --config vitest.config.ts test/streaming-receive.worker.test.ts
 npx vitest run --config vitest.config.ts test/auth.worker.test.ts
 ```
@@ -191,7 +191,7 @@ Do not edit generated migrations under `drizzle/repo-do/` manually. Treat `src/w
 - Auth changes:
   run `npm run test:auth`
 - Pure parsing or helper changes:
-  run the targeted AVA test plus `npm run typecheck`
+  run the targeted Node Vitest test plus `npm run typecheck`
 - UI-only SSR/component changes:
   run `npm run typecheck`; if route behavior changed, add relevant worker coverage
 - SQLite schema or DAL changes:
@@ -208,10 +208,10 @@ Do not edit generated migrations under `drizzle/repo-do/` manually. Treat `src/w
 
 ## Testing Notes
 
-- Vitest uses `@cloudflare/vitest-pool-workers` and points at `src/worker/index.ts`.
+- Worker Vitest uses `@cloudflare/vitest-pool-workers` and points at `src/worker/index.ts`.
+- Node unit tests use `vitest.unit.config.ts`.
 - The Vitest pool compatibility date should stay aligned with `wrangler.jsonc`.
 - Stable test env vars are defined in `test/vitest.bindings.ts`.
-- AVA relies on `test/register.js` and `test/loader.js` to resolve the `@/` alias.
 
 ## Good Change Patterns
 

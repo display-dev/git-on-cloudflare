@@ -1,5 +1,5 @@
-import { pktLine, flushPkt } from "@/worker/git/core/index.ts";
-import type { Logger } from "@/worker/common/logger.ts";
+import { pktLine, flushPkt } from "@/worker/git/core";
+import type { Logger } from "@/worker/common/logger";
 
 export const SIDEBAND_PAYLOAD_MAX_BYTES = 65_515;
 

@@ -1,16 +1,16 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
+import type { CacheContext } from "@/worker/cache";
 import type {
   CommitDiffChangeType,
   CommitDiffEntry,
   CommitDiffResult,
   CommitFilePatchResult,
   TreeEntry,
-} from "./types.ts";
-import { readTree, isTreeMode, joinTreePath } from "./tree.ts";
-import { readCommitInfo } from "./commits.ts";
-import { readBlob } from "./objects.ts";
-import { bytesToText, detectBinary } from "@/shared/web/index.ts";
-import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache/index.ts";
+} from "./types";
+import { readTree, isTreeMode, joinTreePath } from "./tree";
+import { readCommitInfo } from "./commits";
+import { readBlob } from "./objects";
+import { bytesToText, detectBinary } from "@/shared/web";
+import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
 
 export async function listCommitChangedFiles(
   env: Env,

@@ -1,10 +1,10 @@
 import { expect } from "vitest";
 import { SELF } from "cloudflare:test";
 
-import { concatChunks, flushPkt, pktLine, decodePktLines } from "@/worker/git/core/index.ts";
-import { encodeGitObject } from "@/worker/git/core/objects.ts";
-import { buildPack } from "./git-pack.ts";
-import { buildTreePayload } from "./packed-repo.ts";
+import { concatChunks, flushPkt, pktLine, decodePktLines } from "@/worker/git/core";
+import { encodeGitObject } from "@/worker/git/core/objects";
+import { buildPack } from "./git-pack";
+import { buildTreePayload } from "./packed-repo";
 
 /**
  * No-op: all repos are now implicitly streaming.

@@ -1,11 +1,11 @@
-import type { PackEntryTable, ResolveOptions } from "../types.ts";
+import type { PackEntryTable, ResolveOptions } from "../types";
 
-import type { InPackDependencyQueue } from "./dependencies.ts";
-import { throwIfAborted } from "./errors.ts";
-import { resolveDeltaEntry } from "./helpers.ts";
-import type { PayloadLRU } from "./payloadCache.ts";
-import { type SequentialReader } from "./reader.ts";
-import type { RefBaseLookup } from "./refLookup.ts";
+import type { InPackDependencyQueue } from "./dependencies";
+import { throwIfAborted } from "./errors";
+import { resolveDeltaEntry } from "./helpers";
+import type { PayloadLRU } from "./payloadCache";
+import { type SequentialReader } from "./reader";
+import type { RefBaseLookup } from "./refLookup";
 
 interface DrainReadyDeferredQueueArgs {
   readyDeferred: number[];

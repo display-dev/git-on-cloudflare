@@ -1,7 +1,7 @@
-import type { IdxView } from "./types.ts";
+import type { IdxView } from "./types";
 
-import { bytesToHex, hexToBytes } from "@/worker/common/hex.ts";
-import { findOidIndexFromBytes, getNextOffsetByIndex, getOidHexAt } from "./idxView.ts";
+import { bytesToHex, hexToBytes } from "@/worker/common/hex";
+import { findOidIndexFromBytes, getNextOffsetByIndex, getOidHexAt } from "./idxView";
 
 export type IndexedPackSource = {
   packKey: string;

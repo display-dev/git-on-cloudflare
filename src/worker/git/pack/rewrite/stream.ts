@@ -1,12 +1,12 @@
 import type {
   OrderedPackSnapshot,
   OrderedPackSnapshotEntry,
-} from "@/worker/git/operations/fetch/types.ts";
-import type { Logger } from "@/worker/common/logger.ts";
+} from "@/worker/git/operations/fetch/types";
+import type { Logger } from "@/worker/common/logger";
 
-import { createDigestStream } from "@/worker/common/index.ts";
-import { isResolveAbortedError } from "@/worker/git/pack/indexer/resolve/errors.ts";
-import { encodeOfsDeltaDistance } from "../packMeta.ts";
+import { createDigestStream } from "@/worker/common";
+import { isResolveAbortedError } from "@/worker/git/pack/indexer/resolve/errors";
+import { encodeOfsDeltaDistance } from "../packMeta";
 import {
   WHOLE_PACK_MAX_BYTES,
   buildPackHeader,
@@ -14,7 +14,7 @@ import {
   type PackReadState,
   type RewriteOptions,
   type SelectionTable,
-} from "./shared.ts";
+} from "./shared";
 
 // ---------------------------------------------------------------------------
 // Entry header construction

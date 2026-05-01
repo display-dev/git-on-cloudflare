@@ -1,9 +1,9 @@
-import type { RepoStateSchema } from "./repoState.ts";
-import { asTypedStorage } from "./repoState.ts";
-import { getConfig } from "./repoConfig.ts";
-import { createLogger } from "@/worker/common/index.ts";
-import { activeLeaseOrUndefined } from "./catalog/activity.ts";
-import { COMPACTION_REARM_DELAY_MS } from "./catalog/shared.ts";
+import type { RepoStateSchema } from "./repoState";
+import { asTypedStorage } from "./repoState";
+import { getConfig } from "./repoConfig";
+import { createLogger } from "@/worker/common";
+import { activeLeaseOrUndefined } from "./catalog/activity";
+import { COMPACTION_REARM_DELAY_MS } from "./catalog/shared";
 
 /**
  * Plan the next alarm time purely from existing DO state and repo config.

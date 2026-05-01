@@ -1,8 +1,8 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { PackedObjectCandidate } from "./candidates.ts";
-import type { PackedObjectResult } from "./types.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { PackedObjectCandidate } from "./candidates";
+import type { PackedObjectResult } from "./types";
 
-import { createLogger } from "@/worker/common/index.ts";
+import { createLogger } from "@/worker/common";
 
 export type ResolvedLocation = PackedObjectCandidate;
 

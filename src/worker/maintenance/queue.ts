@@ -3,8 +3,8 @@ import {
   type CompactionQueueMessage,
   handleCompactionDeleteMessage,
   handleCompactionMessage,
-} from "./compaction.ts";
-import { handlePackRefBackfillMessage, type PackRefBackfillQueueMessage } from "./refBackfill.ts";
+} from "./compaction";
+import { handlePackRefBackfillMessage, type PackRefBackfillQueueMessage } from "./refBackfill";
 
 export type RepoMaintenanceQueueMessage =
   | CompactionDeleteQueueMessage

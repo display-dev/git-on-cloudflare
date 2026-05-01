@@ -5,17 +5,17 @@
  * They read or mutate `compactionWantedAt` in DO storage but never
  * acquire or release compaction leases.
  */
-import type { Logger } from "@/worker/common/logger.ts";
-import type { RepoStateSchema } from "../../repoState.ts";
+import type { Logger } from "@/worker/common/logger";
+import type { RepoStateSchema } from "../../repoState";
 
-import { asTypedStorage } from "../../repoState.ts";
+import { asTypedStorage } from "../../repoState";
 import {
   loadCompactionContext,
   scheduleCompactionWake,
   type PreviewCompactionResult,
   type RequestCompactionResult,
   type ClearCompactionRequestResult,
-} from "./plan.ts";
+} from "./plan";
 
 /**
  * Preview the current compaction plan without recording a request.

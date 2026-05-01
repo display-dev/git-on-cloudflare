@@ -8,8 +8,8 @@ import {
   decodePktLines,
   encodeGitObject,
 } from "@/worker/git";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { registerTestPack } from "./util/packed-repo.ts";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { registerTestPack } from "./util/packed-repo";
 
 function buildLsRefsBody(args: string[] = []) {
   const chunks: Uint8Array[] = [];

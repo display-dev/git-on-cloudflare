@@ -1,17 +1,17 @@
-import type { PackedObjectResult, PackCatalogRow } from "@/worker/git/object-store/types.ts";
+import type { PackedObjectResult, PackCatalogRow } from "@/worker/git/object-store/types";
 import type {
   IndexedPackSource,
   PackedObjectCandidate,
-} from "@/worker/git/object-store/candidates.ts";
+} from "@/worker/git/object-store/candidates";
 
-import { bytesToHex } from "@/worker/common/index.ts";
-import { collectPackedObjectCandidates, loadIdxView } from "@/worker/git/object-store/index.ts";
-import { materializePackedObjectCandidate } from "@/worker/git/object-store/materialize.ts";
-import { readObject } from "@/worker/git/object-store/store.ts";
+import { bytesToHex } from "@/worker/common";
+import { collectPackedObjectCandidates, loadIdxView } from "@/worker/git/object-store";
+import { materializePackedObjectCandidate } from "@/worker/git/object-store/materialize";
+import { readObject } from "@/worker/git/object-store/store";
 
-import type { ResolveOptions } from "../types.ts";
+import type { ResolveOptions } from "../types";
 
-import { throwIfAborted } from "./errors.ts";
+import { throwIfAborted } from "./errors";
 
 function normalizeOidHex(oid: string | Uint8Array): string {
   return typeof oid === "string" ? oid.toLowerCase() : bytesToHex(oid);

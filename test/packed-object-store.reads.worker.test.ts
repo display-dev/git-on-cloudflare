@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
 
-import { objKey } from "@/worker/do/repo/repoState.ts";
-import { readLooseObjectRaw } from "@/worker/git/operations/read/objects.ts";
-import { readObject } from "@/worker/git/object-store/index.ts";
-import { runDOWithRetry, seedPackedRepo, uniqueRepoId } from "./util/test-helpers.ts";
+import { objKey } from "@/worker/do/repo/repoState";
+import { readLooseObjectRaw } from "@/worker/git/operations/read/objects";
+import { readObject } from "@/worker/git/object-store";
+import { runDOWithRetry, seedPackedRepo, uniqueRepoId } from "./util/test-helpers";
 
 describe("packed object store reads", () => {
   it("matches legacy reads and still works after loose objects are deleted", async () => {

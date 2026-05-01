@@ -1,6 +1,6 @@
-import type { OrderedPackSnapshotEntry } from "@/worker/git/operations/fetch/types.ts";
+import type { OrderedPackSnapshotEntry } from "@/worker/git/operations/fetch/types";
 
-import { BinaryHeap, bytesToHex } from "@/worker/common/index.ts";
+import { BinaryHeap, bytesToHex } from "@/worker/common";
 
 type CompactionHeapEntry = {
   packSlot: number;

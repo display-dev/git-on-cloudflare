@@ -2,7 +2,7 @@
 
 import { TriangleAlert } from "lucide-react";
 import { hydrateIsland } from "@/client/hydrate";
-import { countRefsByKind } from "@/shared/git/ref-display.ts";
+import { countRefsByKind } from "@/shared/git/ref-display";
 
 export type { RepoAdminProps } from "./types";
 import type { RepoAdminProps } from "./types";

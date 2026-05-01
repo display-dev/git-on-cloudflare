@@ -1,36 +1,36 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { Logger } from "@/worker/common/logger.ts";
-import type { RepoDurableObject } from "@/worker/do/index.ts";
-import type { PackCatalogRow } from "@/worker/do/repo/db/schema.ts";
-import type { ReceiveStatus } from "@/worker/git/operations/validation.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
+import type { RepoDurableObject } from "@/worker/do";
+import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
+import type { ReceiveStatus } from "@/worker/git/operations/validation";
 
-import { clientAbortedResponse, createLogger, getRepoStub } from "@/worker/common/index.ts";
+import { clientAbortedResponse, createLogger, getRepoStub } from "@/worker/common";
 import {
   MAX_SIMULTANEOUS_CONNECTIONS,
   SubrequestLimiter,
   countSubrequest,
-} from "@/worker/git/operations/limits.ts";
-import { isValidRefName, validateReceiveCommands } from "@/worker/git/operations/validation.ts";
-import { logOnce } from "@/worker/git/object-store/support.ts";
-import { executeReceivePipeline, ReceivePipelineHttpError } from "./pipeline.ts";
-import { readPktSectionStream } from "./pktSectionStream.ts";
+} from "@/worker/git/operations/limits";
+import { isValidRefName, validateReceiveCommands } from "@/worker/git/operations/validation";
+import { logOnce } from "@/worker/git/object-store/support";
+import { executeReceivePipeline, ReceivePipelineHttpError } from "./pipeline";
+import { readPktSectionStream } from "./pktSectionStream";
 import {
   parseReceiveRequest,
   type ParsedReceiveRequest,
   type ReceiveCommandList,
   type ReceiveNegotiatedCapabilities,
-} from "./request.ts";
+} from "./request";
 import {
   buildReceiveResultResponse,
   ReceiveSidebandWriter,
   type ReceiveResponseMode,
-} from "./response.ts";
+} from "./response";
 import {
   buildReceiveReportStatus,
   buildReceiveUnpackFailureReport,
   isReceiveAbort,
   throwIfReceiveAborted,
-} from "./support.ts";
+} from "./support";
 
 const RECEIVE_SUBREQUEST_BUDGET = 5_000;
 

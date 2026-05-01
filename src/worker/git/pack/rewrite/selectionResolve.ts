@@ -1,23 +1,23 @@
-import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types.ts";
-import type { IdxView, PackedObjectResult } from "@/worker/git/object-store/types.ts";
-import type { Logger } from "@/worker/common/logger.ts";
-import type { PackHeaderEx } from "../packMeta.ts";
+import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
+import type { IdxView, PackedObjectResult } from "@/worker/git/object-store/types";
+import type { Logger } from "@/worker/common/logger";
+import type { PackHeaderEx } from "../packMeta";
 
-import { bytesToHex, deflate, hexToBytes } from "@/worker/common/index.ts";
-import { encodeObjHeader, objTypeCode } from "@/worker/git/core/objects.ts";
+import { bytesToHex, deflate, hexToBytes } from "@/worker/common";
+import { encodeObjHeader, objTypeCode } from "@/worker/git/core/objects";
 import {
   collectPackedObjectCandidates,
   findOffsetIndex,
   findOidRunInIdx,
-} from "@/worker/git/object-store/index.ts";
-import { materializePackedObjectCandidate } from "@/worker/git/object-store/materialize.ts";
+} from "@/worker/git/object-store";
+import { materializePackedObjectCandidate } from "@/worker/git/object-store/materialize";
 import {
   claimCanonicalOwner,
   clonePackHeader,
   type DuplicateHeaderCache,
   type SelectedOidLookup,
   type SelectionStats,
-} from "./ownership.ts";
+} from "./ownership";
 import {
   ensurePackReadState,
   growSelectionTable,
@@ -30,7 +30,7 @@ import {
   type PackReadState,
   type RewriteOptions,
   type SelectionTable,
-} from "./shared.ts";
+} from "./shared";
 
 const SYNTHETIC_OBJECT_MAX_BYTES = 8 * 1024 * 1024;
 const SYNTHETIC_PAYLOAD_TOTAL_MAX_BYTES = 32 * 1024 * 1024;

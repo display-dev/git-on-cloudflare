@@ -1,17 +1,17 @@
-import type { Logger } from "@/worker/common/logger.ts";
-import type { RepoStateSchema } from "../repoState.ts";
+import type { Logger } from "@/worker/common/logger";
+import type { RepoStateSchema } from "../repoState";
 
-import { asTypedStorage } from "../repoState.ts";
+import { asTypedStorage } from "../repoState";
 import {
   applyReceiveCommands,
   isValidRefName,
   type ReceiveCommand,
   type ReceiveStatus,
   validateReceiveCommands,
-} from "@/worker/git/operations/validation.ts";
-import { getDb, listActivePackCatalog, upsertPackCatalogRow } from "../db/index.ts";
-import { DEFAULT_HEAD, bumpPacksetVersion, ensureRepoMetadataDefaults } from "./shared.ts";
-import { catalogNeedsCompaction, scheduleCompactionWake } from "./compaction/plan.ts";
+} from "@/worker/git/operations/validation";
+import { getDb, listActivePackCatalog, upsertPackCatalogRow } from "../db";
+import { DEFAULT_HEAD, bumpPacksetVersion, ensureRepoMetadataDefaults } from "./shared";
+import { catalogNeedsCompaction, scheduleCompactionWake } from "./compaction/plan";
 
 export type FinalizeReceiveResult =
   | {

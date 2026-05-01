@@ -1,5 +1,5 @@
 import type { CacheContext } from "@/worker/cache";
-import type { CommitDiffResult, CommitFilePatchResult } from "@/shared/git/types.ts";
+import type { CommitDiffResult, CommitFilePatchResult } from "@/shared/git/types";
 import {
   listCommitsFirstParentRange,
   listMergeSideFirstParent,

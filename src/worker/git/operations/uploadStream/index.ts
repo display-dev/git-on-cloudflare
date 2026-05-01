@@ -1,27 +1,27 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { ServeUploadPackPlan } from "../fetch/types.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { ServeUploadPackPlan } from "../fetch/types";
 
-import { pktLine } from "@/worker/git/core/index.ts";
-import { createLogger } from "@/worker/common/index.ts";
-import { getLimiter, countSubrequest } from "../limits.ts";
-import { parseFetchArgs } from "../args.ts";
-import { findCommonHaves } from "../closure.ts";
-import { buildAckOnlyResponse } from "../fetch/protocol.ts";
-import { repositoryNotReadyResponse } from "../fetch/responses.ts";
+import { pktLine } from "@/worker/git/core";
+import { createLogger } from "@/worker/common";
+import { getLimiter, countSubrequest } from "../limits";
+import { parseFetchArgs } from "../args";
+import { findCommonHaves } from "../closure";
+import { buildAckOnlyResponse } from "../fetch/protocol";
+import { repositoryNotReadyResponse } from "../fetch/responses";
 import {
   buildServeUploadPackPlan,
   FetchPlanRetryError,
   loadUploadPackSnapshot,
-} from "../fetch/plan.ts";
-import { resolvePackStreamResult } from "../fetch/execute.ts";
+} from "../fetch/plan";
+import { resolvePackStreamResult } from "../fetch/execute";
 import {
   SidebandProgressMux,
   emitProgress,
   emitFatal,
   pipePackWithSideband,
-} from "../fetch/sideband.ts";
+} from "../fetch/sideband";
 
-export * from "../fetch/types.ts";
+export * from "../fetch/types";
 
 function fetchPlanRetryResponse(error: FetchPlanRetryError): Response {
   return new Response("Repository fetch planning is not ready, please retry in a few moments.\n", {

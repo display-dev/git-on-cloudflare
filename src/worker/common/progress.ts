@@ -1,4 +1,4 @@
-import { getRepoStub } from "./stub.ts";
+import { getRepoStub } from "./stub";
 
 export interface RepoActivity {
   state: "receiving" | "compacting";

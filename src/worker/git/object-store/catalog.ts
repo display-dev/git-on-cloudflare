@@ -1,9 +1,9 @@
-import type { CacheContext } from "@/worker/cache/index.ts";
-import type { PackCatalogRow } from "./types.ts";
+import type { CacheContext } from "@/worker/cache";
+import type { PackCatalogRow } from "./types";
 
-import { createLogger, getRepoStub } from "@/worker/common/index.ts";
-import { countSubrequest, getLimiter } from "@/worker/git/operations/limits.ts";
-import { ensureMemo, logOnce } from "./support.ts";
+import { createLogger, getRepoStub } from "@/worker/common";
+import { countSubrequest, getLimiter } from "@/worker/git/operations/limits";
+import { ensureMemo, logOnce } from "./support";
 
 export async function loadActivePackCatalog(
   env: Env,
