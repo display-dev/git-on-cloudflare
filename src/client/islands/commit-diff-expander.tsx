@@ -1,10 +1,10 @@
 /// <reference lib="dom" />
 
-import type { CommitFilePatchResult } from "@/git";
-import { Fragment, useEffect, useState } from "react";
+import type { CommitFilePatchResult } from "@/shared/git/types.ts";
+import { useEffect, useState } from "react";
 
 import { hydrateIsland } from "@/client/hydrate";
-import { inferHljsLang } from "@/web/syntax.ts";
+import { inferHljsLang } from "@/shared/web/syntax.ts";
 
 export type CommitDiffEntryView = {
   path: string;

@@ -1,7 +1,6 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { decodePktLines } from "@/git";
+import { decodePktLines } from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 function buildFetchBody({
@@ -67,8 +66,8 @@ it("findCommonHaves batches and ACKs present haves preserving order and de-dup",
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
   const { commitOid, treeOid } = await runDOWithRetry(
-    () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-    async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+    () => env.REPO_DO.get(id),
+    async (instance) => instance.seedMinimalRepo()
   );
 
   // Build haves list with duplicates and missing entries interleaved

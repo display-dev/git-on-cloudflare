@@ -1,13 +1,11 @@
-import type { RepoDurableObject } from "@/index";
-
 import { describe, expect, it, vi } from "vitest";
 import { env, SELF } from "cloudflare:test";
 
-import { getRepoStub } from "@/common/index.ts";
-import { bytesToHex } from "@/common/hex.ts";
-import { encodeGitObject } from "@/git/core/objects.ts";
-import { concatChunks, decodePktLines } from "@/git";
-import { packIndexKey, packRefsKey } from "@/keys.ts";
+import { getRepoStub } from "@/worker/common/index.ts";
+import { bytesToHex } from "@/worker/common/hex.ts";
+import { encodeGitObject } from "@/worker/git/core/objects.ts";
+import { concatChunks, decodePktLines } from "@/worker/git";
+import { packIndexKey, packRefsKey } from "@/worker/keys.ts";
 import { buildFetchBody } from "./util/fetch-protocol.ts";
 import {
   deleteLooseObjectCopies,
@@ -21,7 +19,7 @@ import {
 import { seedPackFirstRepo } from "./util/pack-first.ts";
 import { indexTestPack } from "./util/test-indexer.ts";
 import { decodeReportStatus, promoteToStreaming } from "./util/streaming-helpers.ts";
-import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState.ts";
 import {
   compactOnce,
   deleteSupersededOnce,
@@ -223,7 +221,7 @@ describe("streaming compaction", () => {
     const repo = uniqueRepoId("stream-compaction-run");
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
-    const stub = getRepoStub(env, repoId) as DurableObjectStub<RepoDurableObject>;
+    const stub = getRepoStub(env, repoId);
     await promoteToStreaming(owner, repo);
 
     const pushed = await pushOverflowingStreamingHistory({
@@ -353,8 +351,7 @@ describe("streaming compaction", () => {
     const repo = uniqueRepoId("stream-compaction-receive-priority");
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
-    const getStub = () =>
-      env.REPO_DO.get(env.REPO_DO.idFromName(repoId)) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(env.REPO_DO.idFromName(repoId));
     await promoteToStreaming(owner, repo);
 
     await pushOverflowingStreamingHistory({
@@ -408,8 +405,7 @@ describe("streaming compaction", () => {
     const repo = uniqueRepoId("stream-compaction-packset-changed");
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
-    const getStub = () =>
-      env.REPO_DO.get(env.REPO_DO.idFromName(repoId)) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(env.REPO_DO.idFromName(repoId));
     await promoteToStreaming(owner, repo);
 
     await pushOverflowingStreamingHistory({
@@ -471,7 +467,7 @@ describe("streaming compaction", () => {
     const repo = uniqueRepoId("stream-compaction-self-ref");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const author = "You <you@example.com> 0 +0000";
 
@@ -581,7 +577,7 @@ describe("streaming compaction", () => {
     const repo = uniqueRepoId("stream-compaction-fetch-dup");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const author = "You <you@example.com> 0 +0000";
 

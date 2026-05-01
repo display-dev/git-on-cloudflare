@@ -1,5 +1,5 @@
 import test from "ava";
-import { formatWhen } from "@/web/index.ts";
+import { formatWhen } from "@/shared/web/index.ts";
 
 const SAMPLE_EPOCH = 1774136183; // 2026-03-21 23:36:23 UTC
 

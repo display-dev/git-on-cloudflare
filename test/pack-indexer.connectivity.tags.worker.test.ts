@@ -10,8 +10,8 @@ import {
   runPackConnectivityCheck,
   scanPack,
   resolveDeltasAndWriteIdx,
-} from "@/git/pack/indexer/index.ts";
-import { computeOid } from "@/git/core/objects.ts";
+} from "@/worker/git/pack/indexer/index.ts";
+import { computeOid } from "@/worker/git/core/objects.ts";
 
 type ConnectivityStatus = { ref: string; ok: boolean; msg?: string };
 

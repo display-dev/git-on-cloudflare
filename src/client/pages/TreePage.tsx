@@ -1,4 +1,4 @@
-import type { FileIconName } from "@/web";
+import type { FileIconName } from "@/shared/web";
 import { Breadcrumbs } from "@/client/components/Breadcrumbs";
 import { EmptyState } from "@/client/components/EmptyState";
 import { FileIcon } from "@/client/components/FileIcon";

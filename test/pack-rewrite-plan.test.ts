@@ -1,8 +1,8 @@
 import test from "ava";
 
-import { createLogger } from "@/common/index.ts";
-import { buildOutputOrder, compactDeadSlots } from "@/git/pack/rewrite/plan.ts";
-import { allocateSelectionTable } from "@/git/pack/rewrite/shared.ts";
+import { createLogger } from "@/worker/common/index.ts";
+import { buildOutputOrder, compactDeadSlots } from "@/worker/git/pack/rewrite/plan.ts";
+import { allocateSelectionTable } from "@/worker/git/pack/rewrite/shared.ts";
 
 test("compactDeadSlots preserves base slots for live rows that move", (t) => {
   const table = allocateSelectionTable(4);

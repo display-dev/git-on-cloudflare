@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Clipboard } from "lucide-react";
-import { shortRefName } from "@/git/refDisplay.ts";
+import { shortRefName } from "@/shared/git/ref-display.ts";
 import { Card } from "@/client/components/ui/card";
 import { formatSampleBytes, shortValue } from "./format";
 import type { AdminState } from "./types";

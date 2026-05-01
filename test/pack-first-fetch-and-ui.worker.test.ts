@@ -1,20 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import type { RepoStateSchema } from "@/do/repo/repoState.ts";
+import type { RepoStateSchema } from "@/worker/do/repo/repoState.ts";
 
 import { buildPack, callStubWithRetry, runDOWithRetry, uniqueRepoId } from "./util/test-helpers.ts";
-import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
-import { encodeGitObject, concatChunks } from "@/git/core/index.ts";
-import { doPrefix, r2LooseKey, r2PackKey } from "@/keys.ts";
+import { asTypedStorage, objKey } from "@/worker/do/repo/repoState.ts";
+import { encodeGitObject } from "@/worker/git/core/index.ts";
+import { doPrefix, r2LooseKey, r2PackKey } from "@/worker/keys.ts";
 import { buildTreePayload } from "./util/packed-repo.ts";
 import { indexTestPack } from "./util/test-indexer.ts";
-import { getDb, upsertPackCatalogRow } from "@/do/repo/db/index.ts";
+import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db/index.ts";
 import { buildFetchBody, findBytes } from "./util/fetch-protocol.ts";
 
 async function seedPackedOnlyRepo(repoId: string) {
   const id = env.REPO_DO.idFromName(repoId);
-  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+  const getStub = () => env.REPO_DO.get(id);
   const encoder = new TextEncoder();
   const author = "You <you@example.com> 0 +0000";
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { safeReadJson } from "@/client/json.ts";
-import { isJsonObject, type JsonValue } from "@/web";
+import { isJsonObject, type JsonValue } from "@/shared/web";
 
 export function useRepoAdminActions(owner: string, repo: string) {
   const [compactionResult, setCompactionResult] = useState<JsonValue | null>(null);

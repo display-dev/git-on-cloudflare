@@ -2,7 +2,7 @@ import { Marked } from "marked";
 import sanitize from "sanitize-html";
 
 import { highlightCode } from "@/client/components/highlight";
-import { escapeHtml } from "@/web/format.ts";
+import { escapeHtml } from "@/shared/web/format.ts";
 
 type MarkdownContext = {
   owner: string;

@@ -1,18 +1,16 @@
-import type { RepoDurableObject } from "@/index";
-
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { listCommitChangedFiles } from "@/git";
+import { listCommitChangedFiles } from "@/worker/git";
 import {
   hasObjectsBatch,
   loadIdxView,
   parseIdxView,
   readObject,
   getNextOffsetByIndex,
-} from "@/git/object-store/index.ts";
-import { computeNeededFast } from "@/git/operations/fetch/neededFast.ts";
-import { hexToBytes } from "@/common/hex.ts";
+} from "@/worker/git/object-store/index.ts";
+import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast.ts";
+import { hexToBytes } from "@/worker/common/hex.ts";
 import {
   callStubWithRetry,
   deleteLooseObjectCopies,
@@ -22,7 +20,7 @@ import {
 import { buildPack } from "./util/git-pack.ts";
 import { buildTreePayload } from "./util/packed-repo.ts";
 import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first.ts";
-import { encodeGitObject } from "@/git/core/index.ts";
+import { encodeGitObject } from "@/worker/git/core/index.ts";
 
 const UINT32_SPAN = 0x1_0000_0000;
 
@@ -101,8 +99,7 @@ describe("pack-first read path closure", () => {
   it("keeps loose-only wants as partial results instead of inventing compatibility refs", async () => {
     const repo = uniqueRepoId("pack-needed-fast-pack-only");
     const repoId = `o/${repo}`;
-    const getStub = () =>
-      env.REPO_DO.get(env.REPO_DO.idFromName(repoId)) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(env.REPO_DO.idFromName(repoId));
     const author = "You <you@example.com> 0 +0000";
 
     const blobPayload = new TextEncoder().encode("pack only\n");

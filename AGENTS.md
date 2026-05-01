@@ -29,8 +29,8 @@ Write changes against the current source tree, not the docs alone. Some document
 ### No ad-hoc or duplicated types
 
 - Before introducing a type, check whether a canonical one already exists. Key hubs:
-  `src/git/core/objects.ts` (GitObjectType), `src/common/hex.ts` (OID helpers, zeroOid),
-  `src/git/object-store/support.ts` (typeCodeToObjectType), `src/git/operations/limits.ts` (Limiter).
+  `src/worker/git/core/objects.ts` (GitObjectType), `src/worker/common/hex.ts` (OID helpers, zeroOid),
+  `src/worker/git/object-store/support.ts` (typeCodeToObjectType), `src/worker/git/operations/limits.ts` (Limiter).
 - Do not use `ReturnType<>`, `Awaited<ReturnType<>>`, or inline union literals when a named
   type already covers the shape. Extract a named type alias if one doesn't exist yet.
 - Do not duplicate helpers. If you need `isZeroOid` or `typeCodeToObjectType`, import the
@@ -54,7 +54,7 @@ Write changes against the current source tree, not the docs alone. Some document
 ### Visibility logging on new code paths
 
 - Every non-trivial code path that touches R2, DO RPC, or background work must include
-  structured logging using `createLogger` from `src/common/logger.ts` (or the DO's
+  structured logging using `createLogger` from `src/worker/common/logger.ts` (or the DO's
   `this.logger`).
 - Follow the established conventions: kebab-case message identifiers scoped by component
   (e.g. `"receive:finalize-committed"`), appropriate log level (debug for flow, info for
@@ -66,7 +66,7 @@ Write changes against the current source tree, not the docs alone. Some document
 ### Limiter usage on platform-bound calls
 
 - Every R2 read/write and outbound DO RPC in a request-scoped code path must go through
-  the `Limiter` from `src/git/operations/limits.ts` via `limiter.run(label, fn)`.
+  the `Limiter` from `src/worker/git/operations/limits.ts` via `limiter.run(label, fn)`.
   Obtain the limiter with `getLimiter(cacheCtx)` or pass it through options.
 - Use a descriptive label prefixed by target (e.g. `"r2:get-pack"`, `"do:get-object-compat"`).
 - Respect the subrequest budget (`DEFAULT_SUBREQUEST_BUDGET = 900`). If the code path has
@@ -86,29 +86,29 @@ Write changes against the current source tree, not the docs alone. Some document
 
 ## First Files To Read
 
-- `src/index.ts`: top-level router registration and route ordering
-- `src/routes/git.ts`: Git Smart HTTP endpoints, upload-pack/receive-pack behavior
-- `src/routes/admin.ts`: owner-authenticated admin JSON endpoints
-- `src/routes/auth.ts`: auth UI and auth API endpoints
-- `src/do/repo/repoDO.ts`: repository Durable Object — metadata authority, receive leases, compaction, and background work
-- `src/do/repo/db/dal.ts`: the required access layer for SQLite-backed repo metadata
+- `src/worker/index.ts`: top-level router registration and route ordering
+- `src/worker/routes/git.ts`: Git Smart HTTP endpoints, upload-pack/receive-pack behavior
+- `src/worker/routes/admin.ts`: owner-authenticated admin JSON endpoints
+- `src/worker/routes/auth.ts`: auth UI and auth API endpoints
+- `src/worker/do/repo/repoDO.ts`: repository Durable Object — metadata authority, receive leases, compaction, and background work
+- `src/worker/do/repo/db/dal.ts`: the required access layer for SQLite-backed repo metadata
 - `src/client/server/render.tsx` and `src/client/server/registry.tsx`: SSR view registration and rendering
 - `wrangler.jsonc`: bindings, vars, assets handling, compatibility date
 
 ## Directory Map
 
-- `src/routes/`: HTTP route registration and route handlers
-- `src/do/repo/`: repository Durable Object, receive, compaction, idle cleanup, storage, DB
-- `src/do/auth/`: authentication Durable Object
-- `src/git/core/`: low-level Git protocol parsing and object helpers
-- `src/git/operations/`: fetch, read-path logic, streaming upload-pack implementation
-- `src/git/pack/`: pack assembly, pack indexing, pack metadata helpers
+- `src/worker/routes/`: HTTP route registration and route handlers
+- `src/worker/do/repo/`: repository Durable Object, receive, compaction, idle cleanup, storage, DB
+- `src/worker/do/auth/`: authentication Durable Object
+- `src/worker/git/core/`: low-level Git protocol parsing and object helpers
+- `src/worker/git/operations/`: fetch, read-path logic, streaming upload-pack implementation
+- `src/worker/git/pack/`: pack assembly, pack indexing, pack metadata helpers
 - `src/client/pages/`: route-level React pages
 - `src/client/components/`: shared SSR components
 - `src/client/islands/`: client-only interactive modules
 - `src/client/entries/`: Vite client entrypoints used by SSR pages
-- `src/web/`: request parsing, formatting, MIME/JSON helpers
-- `src/common/`: shared response, logging, compression, stubs, progress helpers
+- `src/shared/web/`: browser-safe request parsing, formatting, MIME/JSON helpers
+- `src/worker/common/`: Worker response, logging, compression, stubs, progress helpers
 - `test/`: Vitest worker integration tests and AVA unit tests
 - `docs/`: architecture and API notes; useful, but verify against source before relying on path details
 
@@ -117,7 +117,7 @@ Write changes against the current source tree, not the docs alone. Some document
 - Route order matters. `registerAuthRoutes(router)` must stay before `registerUiRoutes(router)` so `/auth` is not shadowed by `/:owner`.
 - The Worker owns HTML routing. `wrangler.jsonc` sets `assets.html_handling` to `"none"`; do not move page ownership into the assets layer by accident.
 - The repo Durable Object is the source of truth for a single repository. Keep refs/HEAD authority there.
-- SQLite access for repo metadata must go through `src/do/repo/db/dal.ts`. Do not add ad hoc raw Drizzle queries in unrelated files.
+- SQLite access for repo metadata must go through `src/worker/do/repo/db/dal.ts`. Do not add ad hoc raw Drizzle queries in unrelated files.
 - `RepoDurableObject.fetch()` intentionally exposes only a small HTTP surface. Keep typed RPC methods as the default internal interface.
 - Receive uses a lease model: one active receive lease at a time, acquired via `beginReceive()` and committed via `finalizeReceive()`. Concurrent pushes receive `503 Retry-After: 10`.
 - Git fetch paths are streaming-sensitive. Avoid unnecessary buffering on upload-pack and pack assembly paths.
@@ -182,7 +182,7 @@ npm run cf-typegen
 npm run db:gen
 ```
 
-Do not edit generated migrations under `src/drizzle/` manually. Treat `src/do/repo/db/schema.ts` as the source of truth: make the schema change there first, then run `npm run db:gen` to generate the migration.
+Do not edit generated migrations under `drizzle/repo-do/` manually. Treat `src/worker/do/repo/db/schema.ts` as the source of truth: make the schema change there first, then run `npm run db:gen` to generate the migration.
 
 ## Validation By Change Type
 
@@ -208,14 +208,14 @@ Do not edit generated migrations under `src/drizzle/` manually. Treat `src/do/re
 
 ## Testing Notes
 
-- Vitest uses `@cloudflare/vitest-pool-workers` and points at `src/index.ts`.
+- Vitest uses `@cloudflare/vitest-pool-workers` and points at `src/worker/index.ts`.
 - The Vitest pool compatibility date should stay aligned with `wrangler.jsonc`.
 - Stable test env vars are defined in `test/vitest.bindings.ts`.
 - AVA relies on `test/register.js` and `test/loader.js` to resolve the `@/` alias.
 
 ## Good Change Patterns
 
-- When adding a route, modify the owning module under `src/routes/` and keep registration order safe.
+- When adding a route, modify the owning module under `src/worker/routes/` and keep registration order safe.
 - When adding repo metadata, decide whether it belongs in DO storage or SQLite; if SQLite, add schema and DAL changes together.
 - When adding a new page, register it in `src/client/server/registry.tsx` and add a client entrypoint only if hydration is actually needed.
 - When changing pack or fetch behavior, look for existing worker tests before writing new code; the repo already has strong coverage for those paths.

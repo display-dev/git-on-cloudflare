@@ -1,6 +1,6 @@
 import hljs from "highlight.js";
 
-import { escapeHtml } from "@/web/format.ts";
+import { escapeHtml } from "@/shared/web/format.ts";
 
 type HighlightedCode = {
   html: string;

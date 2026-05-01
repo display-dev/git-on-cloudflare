@@ -1,7 +1,6 @@
 import { it, expect } from "vitest";
 import { env, runDurableObjectAlarm } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState.ts";
 import { runDOWithRetry } from "./util/test-helpers.ts";
 
 function makeRepoId(suffix: string) {
@@ -11,7 +10,7 @@ function makeRepoId(suffix: string) {
 it("alarm: deletes empty repo storage and R2 objects when idle", async () => {
   const repoId = makeRepoId("empty");
   const id = env.REPO_DO.idFromName(repoId);
-  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+  const getStub = () => env.REPO_DO.get(id);
 
   // Discover prefix from the instance and prepare state as empty but with stale access
   const { prefix } = await runDOWithRetry(
@@ -64,10 +63,10 @@ it("alarm: deletes empty repo storage and R2 objects when idle", async () => {
 it("alarm: does not delete a non-empty repo", async () => {
   const repoId = makeRepoId("nonempty");
   const id = env.REPO_DO.idFromName(repoId);
-  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+  const getStub = () => env.REPO_DO.get(id);
 
   // Seed the repo to create refs/head and objects
-  await runDOWithRetry(getStub, async (instance: RepoDurableObject) => {
+  await runDOWithRetry(getStub, async (instance) => {
     await instance.seedMinimalRepo();
   });
 
@@ -110,10 +109,10 @@ it("alarm: does not delete a non-empty repo", async () => {
 it("alarm: does not delete repo with no refs but active pack catalog rows", async () => {
   const repoId = makeRepoId("packs-no-refs");
   const id = env.REPO_DO.idFromName(repoId);
-  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+  const getStub = () => env.REPO_DO.get(id);
 
   // Seed a repo with pack data via seedMinimalRepo (creates refs, head, pack catalog)
-  await runDOWithRetry(getStub, async (instance: RepoDurableObject) => {
+  await runDOWithRetry(getStub, async (instance) => {
     await instance.seedMinimalRepo();
   });
 
@@ -154,10 +153,10 @@ it("alarm: does not delete repo with no refs but active pack catalog rows", asyn
 it("alarm: re-arms compaction via queue when compactionWantedAt is set", async () => {
   const repoId = makeRepoId("compact-rearm");
   const id = env.REPO_DO.idFromName(repoId);
-  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+  const getStub = () => env.REPO_DO.get(id);
 
   // Seed a repo so it has refs/head/packs (non-empty, won't idle-purge)
-  await runDOWithRetry(getStub, async (instance: RepoDurableObject) => {
+  await runDOWithRetry(getStub, async (instance) => {
     await instance.seedMinimalRepo();
   });
 

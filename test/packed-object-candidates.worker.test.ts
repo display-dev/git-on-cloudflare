@@ -9,7 +9,7 @@ import {
   packIndexerLog as log,
 } from "./util/pack-indexer.helpers.ts";
 
-import { computeOid } from "@/git/core/objects.ts";
+import { computeOid } from "@/worker/git/core/objects.ts";
 import {
   collectPackedObjectCandidates,
   findFirstPackedObjectCandidate,
@@ -19,9 +19,9 @@ import {
   type IndexedPackSource,
   type PackedMaterializerCyclePolicy,
   type PackedObjectCandidate,
-} from "@/git/object-store/index.ts";
-import type { PackedObjectResult, PackCatalogRow } from "@/git/object-store/types.ts";
-import { scanPack, resolveDeltasAndWriteIdx } from "@/git/pack/indexer/index.ts";
+} from "@/worker/git/object-store/index.ts";
+import type { PackedObjectResult, PackCatalogRow } from "@/worker/git/object-store/types.ts";
+import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/index.ts";
 
 type IndexedTestPack = {
   packKey: string;

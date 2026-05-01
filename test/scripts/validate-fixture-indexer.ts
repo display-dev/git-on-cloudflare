@@ -46,9 +46,10 @@ if (!(globalThis.crypto as unknown as Record<string, unknown>).DigestStream) {
 }
 
 // Dynamic import to pick up the project's path aliases via tsx
-const { scanPack, resolveDeltasAndWriteIdx } = await import("../../src/git/pack/indexer/index.ts");
-const { SubrequestLimiter } = await import("../../src/git/operations/limits.ts");
-const { createLogger } = await import("../../src/common/logger.ts");
+const { scanPack, resolveDeltasAndWriteIdx } =
+  await import("../../src/worker/git/pack/indexer/index.ts");
+const { SubrequestLimiter } = await import("../../src/worker/git/operations/limits.ts");
+const { createLogger } = await import("../../src/worker/common/logger.ts");
 
 const FIXTURE_DIR = path.resolve(import.meta.dirname ?? ".", "../../uncommitted-fixture");
 const PACK_NAME = "pack-395a180893e59dad8ef9d7fa135ecd8b1b399bb1";

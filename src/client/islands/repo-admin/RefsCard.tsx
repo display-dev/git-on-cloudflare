@@ -1,7 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/client/components/ui/button";
 import { Card } from "@/client/components/ui/card";
-import { classifyRef, shortRefName } from "@/git/refDisplay.ts";
+import { classifyRef, shortRefName } from "@/shared/git/ref-display.ts";
 import { shortValue } from "./format";
 
 export type RefsCardProps = {

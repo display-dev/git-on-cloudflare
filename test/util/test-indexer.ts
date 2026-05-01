@@ -5,11 +5,11 @@
  * Uses a no-op limiter and a minimal logger since tests run in miniflare
  * with no real concurrency or subrequest limits.
  */
-import { scanPack, resolveDeltasAndWriteIdx } from "@/git/pack/indexer/index.ts";
-import { createLogger } from "@/common/logger.ts";
-import type { Limiter } from "@/git/operations/limits.ts";
-import type { ResolveResult } from "@/git/pack/indexer/types.ts";
-import type { PackCatalogRow } from "@/do/repo/db/schema.ts";
+import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/index.ts";
+import { createLogger } from "@/worker/common/logger.ts";
+import type { Limiter } from "@/worker/git/operations/limits.ts";
+import type { ResolveResult } from "@/worker/git/pack/indexer/types.ts";
+import type { PackCatalogRow } from "@/worker/do/repo/db/schema.ts";
 
 const noopLimiter: Limiter = { run: (_label, fn) => fn() };
 const testLog = createLogger(undefined, { service: "test-seed" });

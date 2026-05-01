@@ -16,13 +16,13 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { scanPack, resolveDeltasAndWriteIdx } from "@/git/pack/indexer/index.ts";
-import { SubrequestLimiter, DEFAULT_SUBREQUEST_BUDGET } from "@/git/operations/limits.ts";
-import { createLogger } from "@/common/logger.ts";
-import { packIndexKey } from "@/keys.ts";
+import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/index.ts";
+import { SubrequestLimiter, DEFAULT_SUBREQUEST_BUDGET } from "@/worker/git/operations/limits.ts";
+import { createLogger } from "@/worker/common/logger.ts";
+import { packIndexKey } from "@/worker/keys.ts";
 import { buildPack, buildAppendOnlyDelta, makeCommit, makeTree } from "./util/git-pack.ts";
-import { computeOid } from "@/git/core/objects.ts";
-import { bytesToHex } from "@/common/hex.ts";
+import { computeOid } from "@/worker/git/core/objects.ts";
+import { bytesToHex } from "@/worker/common/hex.ts";
 
 const log = createLogger("debug", { service: "PackIndexerFixture" });
 const fixtureEnv = env as unknown as {

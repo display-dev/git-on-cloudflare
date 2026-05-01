@@ -4,9 +4,9 @@ import {
   parseCommitRefs,
   parseTreeChildOids,
   parseTagTarget,
-} from "@/git/core/index.ts";
-import { encodeGitObject, type GitObjectType } from "@/git/core/objects.ts";
-import { deflate } from "@/common/compression.ts";
+} from "@/worker/git/core/index.ts";
+import { encodeGitObject, type GitObjectType } from "@/worker/git/core/objects.ts";
+import { deflate } from "@/worker/common/compression.ts";
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(20);

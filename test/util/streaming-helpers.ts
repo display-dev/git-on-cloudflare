@@ -1,8 +1,8 @@
 import { expect } from "vitest";
 import { SELF } from "cloudflare:test";
 
-import { concatChunks, flushPkt, pktLine, decodePktLines } from "@/git/core/index.ts";
-import { encodeGitObject } from "@/git/core/objects.ts";
+import { concatChunks, flushPkt, pktLine, decodePktLines } from "@/worker/git/core/index.ts";
+import { encodeGitObject } from "@/worker/git/core/objects.ts";
 import { buildPack } from "./git-pack.ts";
 import { buildTreePayload } from "./packed-repo.ts";
 

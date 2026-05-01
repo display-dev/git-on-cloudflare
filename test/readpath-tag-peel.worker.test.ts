@@ -1,10 +1,9 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { readPath } from "@/git/operations/read.ts";
-import { encodeGitObject } from "@/git/core/objects.ts";
+import { readPath } from "@/worker/git/operations/read.ts";
+import { encodeGitObject } from "@/worker/git/core/objects.ts";
 import { seedPackFirstRepo } from "./util/pack-first.ts";
 import { registerTestPack } from "./util/packed-repo.ts";
 
@@ -14,7 +13,7 @@ it("readPath resolves tag to its target commit tree (tag peel)", async () => {
   const repoId = `${owner}/${repo}`;
   const seeded = await seedPackFirstRepo(repoId);
   const id = env.REPO_DO.idFromName(repoId);
-  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+  const getStub = () => env.REPO_DO.get(id);
 
   // Create an annotated tag object pointing to the seeded commit
   const commitOid = seeded.nextCommit.oid;

@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
-import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/git";
+import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/worker/git";
 import { buildPack } from "./util/test-helpers.ts";
 
 function zero40() {

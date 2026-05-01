@@ -15,9 +15,9 @@ import {
   runPackConnectivityCheck,
   scanPack,
   resolveDeltasAndWriteIdx,
-} from "@/git/pack/indexer/index.ts";
-import { computeOid } from "@/git/core/objects.ts";
-import { findObject } from "@/git/object-store/store.ts";
+} from "@/worker/git/pack/indexer/index.ts";
+import { computeOid } from "@/worker/git/core/objects.ts";
+import { findObject } from "@/worker/git/object-store/store.ts";
 
 type ConnectivityStatus = { ref: string; ok: boolean; msg?: string };
 

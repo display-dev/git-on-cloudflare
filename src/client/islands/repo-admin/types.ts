@@ -1,4 +1,4 @@
-import type { PackRefIndexStatus } from "@/git/pack/refIndex.ts";
+import type { PackRefIndexStatus } from "@/shared/git/types.ts";
 
 export type { PackRefIndexStatus };
 

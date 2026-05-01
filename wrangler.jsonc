@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "git-on-cloudflare",
-  "main": "src/index.ts",
+  "main": "src/worker/index.ts",
   "compatibility_date": "2025-09-02",
   "compatibility_flags": [
     "nodejs_compat"

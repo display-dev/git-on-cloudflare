@@ -1,5 +1,5 @@
 import test from "ava";
-import { pktLine, delimPkt, flushPkt, parseFetchArgs } from "@/git/index.ts";
+import { pktLine, delimPkt, flushPkt, parseFetchArgs } from "@/worker/git/index.ts";
 
 function buildFetchBody({
   wants,

@@ -1,9 +1,8 @@
-import type { CacheContext } from "@/cache";
-import type { RepoDurableObject } from "@/index";
+import type { CacheContext } from "@/worker/cache";
 
 import { buildPack } from "./git-pack.ts";
 import { buildTreePayload, seedPackedRepoState } from "./packed-repo.ts";
-import { encodeGitObject } from "@/git/core/index.ts";
+import { encodeGitObject } from "@/worker/git/core/index.ts";
 import { env } from "cloudflare:test";
 
 export function createTestCacheContext(url: string, subreqBudget?: number): CacheContext {
@@ -20,7 +19,7 @@ export function createTestCacheContext(url: string, subreqBudget?: number): Cach
 
 export async function seedPackFirstRepo(repoId: string) {
   const id = env.REPO_DO.idFromName(repoId);
-  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+  const getStub = () => env.REPO_DO.get(id);
   const author = "You <you@example.com> 0 +0000";
   const baseBlobPayload = new TextEncoder().encode("version one\n");
   const nextBlobPayload = new TextEncoder().encode("version two\n");

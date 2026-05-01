@@ -15,15 +15,15 @@ import {
   isResolveAbortedError,
   scanPack,
   resolveDeltasAndWriteIdx,
-} from "@/git/pack/indexer/index.ts";
-import { computeOid } from "@/git/core/objects.ts";
-import { bytesToHex } from "@/common/hex.ts";
-import { DEFAULT_SUBREQUEST_BUDGET } from "@/git/operations/limits.ts";
-import { getOidHexAt, parseIdxView } from "@/git/object-store/index.ts";
-import { packIndexKey } from "@/keys.ts";
-import { getBasePayload } from "@/git/pack/indexer/resolve/materialize.ts";
-import { PayloadLRU } from "@/git/pack/indexer/resolve/payloadCache.ts";
-import { SequentialReader } from "@/git/pack/indexer/resolve/reader.ts";
+} from "@/worker/git/pack/indexer/index.ts";
+import { computeOid } from "@/worker/git/core/objects.ts";
+import { bytesToHex } from "@/worker/common/hex.ts";
+import { DEFAULT_SUBREQUEST_BUDGET } from "@/worker/git/operations/limits.ts";
+import { getOidHexAt, parseIdxView } from "@/worker/git/object-store/index.ts";
+import { packIndexKey } from "@/worker/keys.ts";
+import { getBasePayload } from "@/worker/git/pack/indexer/resolve/materialize.ts";
+import { PayloadLRU } from "@/worker/git/pack/indexer/resolve/payloadCache.ts";
+import { SequentialReader } from "@/worker/git/pack/indexer/resolve/reader.ts";
 
 async function expectResolveAborted(promise: Promise<unknown>): Promise<void> {
   try {

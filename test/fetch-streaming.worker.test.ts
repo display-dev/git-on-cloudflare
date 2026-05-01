@@ -1,22 +1,21 @@
 import { it, expect, describe } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/git";
-import { handleFetchV2Streaming } from "@/git/operations/uploadStream.ts";
+import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/worker/git";
+import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream.ts";
 import {
   buildServeUploadPackPlan,
   loadUploadPackSnapshot,
   planUploadPack,
-} from "@/git/operations/fetch/plan.ts";
+} from "@/worker/git/operations/fetch/plan.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { asBufferSource } from "@/common/index.ts";
-import { packRefsKey } from "@/keys.ts";
+import { asBufferSource } from "@/worker/common/index.ts";
+import { packRefsKey } from "@/worker/keys.ts";
 import { runQueueMessage } from "./util/queue.ts";
 import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first.ts";
 import { makeTracingLimiter } from "./util/pack-indexer.helpers.ts";
 import { buildAppendOnlyDelta, buildCopyPrefixDelta, buildPack } from "./util/git-pack.ts";
 import { seedPackedRepoState } from "./util/packed-repo.ts";
-import { computeOid, encodeGitObject } from "@/git/core/objects.ts";
+import { computeOid, encodeGitObject } from "@/worker/git/core/objects.ts";
 
 function buildFetchBody({
   wants,
@@ -50,16 +49,7 @@ function findBytes(haystack: Uint8Array, needle: Uint8Array): number {
   return -1;
 }
 
-async function seedTwoCommitRepo(
-  owner: string,
-  repo: string
-): Promise<{
-  repoId: string;
-  doId: DurableObjectId;
-  getStub: () => DurableObjectStub<RepoDurableObject>;
-  firstCommit: string;
-  secondCommit: string;
-}> {
+async function seedTwoCommitRepo(owner: string, repo: string) {
   const repoId = `${owner}/${repo}`;
   const doId = env.REPO_DO.idFromName(repoId);
   const seeded = await seedPackFirstRepo(repoId);
@@ -142,8 +132,8 @@ describe("git fetch streaming (default)", () => {
     // Seed a repository with some commits
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
+      () => env.REPO_DO.get(id),
+      async (instance) => await instance.seedMinimalRepo()
     );
 
     const body = buildFetchBody({ wants: [commitOid], done: true });
@@ -236,8 +226,8 @@ describe("git fetch streaming (default)", () => {
     // Seed repository and get multiple commits
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid, parentOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => {
+      () => env.REPO_DO.get(id),
+      async (instance) => {
         const firstResult = await instance.seedMinimalRepo();
         const secondResult = await instance.seedMinimalRepo();
         return {
@@ -352,14 +342,14 @@ describe("git fetch streaming (default)", () => {
     const repo = uniqueRepoId("missing-ref-sidecar");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
     const { commitOid: firstCommit } = await runDOWithRetry(
       getStub,
-      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
+      async (instance) => await instance.seedMinimalRepo()
     );
     const { commitOid: secondCommit } = await runDOWithRetry(
       getStub,
-      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
+      async (instance) => await instance.seedMinimalRepo()
     );
 
     const activeCatalog = await getStub().getActivePackCatalog();
@@ -413,7 +403,7 @@ describe("git fetch streaming (default)", () => {
     const repo = uniqueRepoId("missing-ref-sidecar-ref-delta");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const baseBlobPayload = new TextEncoder().encode("base\n");
     const midSuffix = new TextEncoder().encode("mid\n");
@@ -471,7 +461,7 @@ describe("git fetch streaming (default)", () => {
     const repo = uniqueRepoId("missing-ref-sidecar-external-duplicate-cycle");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const targetPayload = new TextEncoder().encode("target prefix\n");
     const duplicateSuffix = new TextEncoder().encode("duplicate suffix\n");
@@ -621,14 +611,14 @@ describe("git fetch streaming (default)", () => {
     const repo = uniqueRepoId("negotiation-ref-sidecar");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
     const { commitOid: firstCommit } = await runDOWithRetry(
       getStub,
-      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
+      async (instance) => await instance.seedMinimalRepo()
     );
     const { commitOid: secondCommit } = await runDOWithRetry(
       getStub,
-      async (instance: RepoDurableObject) => await instance.seedMinimalRepo()
+      async (instance) => await instance.seedMinimalRepo()
     );
 
     const activeCatalog = await getStub().getActivePackCatalog();
@@ -651,8 +641,8 @@ describe("git fetch streaming (default)", () => {
     // Seed a repository
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo()
     );
 
     // Clone with no haves
@@ -710,8 +700,8 @@ describe("git fetch streaming (default)", () => {
     // Seed repository with packed objects (default behavior)
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => instance.seedMinimalRepo() // Default: withPack=true
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo() // Default: withPack=true
     );
 
     const body = buildFetchBody({ wants: [commitOid], done: true });
@@ -764,7 +754,6 @@ describe("git fetch streaming (default)", () => {
   it("returns 503 when pack assembly fails", async () => {
     const owner = "o";
     const repo = uniqueRepoId("fail");
-    const repoId = `${owner}/${repo}`;
 
     // Request fetch for non-existent objects
     const body = buildFetchBody({
@@ -797,8 +786,8 @@ describe("git fetch streaming (default)", () => {
     const commits: string[] = [];
 
     await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => {
+      () => env.REPO_DO.get(id),
+      async (instance) => {
         // Create multiple commits to ensure pack has content
         for (let i = 0; i < 5; i++) {
           const result = await instance.seedMinimalRepo();
@@ -854,8 +843,8 @@ describe("git fetch streaming (default)", () => {
     // Seed repository
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo()
     );
 
     // To truly test band-3 fatal, we'd need to inject an R2 failure
@@ -895,10 +884,8 @@ describe("git fetch streaming (default)", () => {
       const lines = decodePktLines(bytes);
 
       // Check if there's a band-3 fatal message
-      let hasFatal = false;
       for (const line of lines) {
         if (line.type === "line" && line.raw?.[0] === 0x03) {
-          hasFatal = true;
           const fatalMsg = new TextDecoder().decode(line.raw.subarray(1));
           expect(fatalMsg).toContain("fatal:");
         }
@@ -916,8 +903,8 @@ describe("git fetch streaming (default)", () => {
     // Seed repository with commits
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid, parentOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => {
+      () => env.REPO_DO.get(id),
+      async (instance) => {
         const first = await instance.seedMinimalRepo();
         const second = await instance.seedMinimalRepo();
         return {
@@ -953,8 +940,8 @@ describe("git fetch streaming (default)", () => {
     const commits: string[] = [];
 
     await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => {
+      () => env.REPO_DO.get(id),
+      async (instance) => {
         // Create multiple commits
         for (let i = 0; i < 3; i++) {
           const result = await instance.seedMinimalRepo();
@@ -1011,8 +998,8 @@ describe("git fetch streaming (default)", () => {
     // Seed repository with some commits and ensure they're packed
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo()
     );
 
     const body = buildFetchBody({ wants: [commitOid], done: true });
@@ -1073,8 +1060,8 @@ describe("git fetch streaming (default)", () => {
 
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid, parentOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => {
+      () => env.REPO_DO.get(id),
+      async (instance) => {
         const first = await instance.seedMinimalRepo();
         const second = await instance.seedMinimalRepo();
         return {

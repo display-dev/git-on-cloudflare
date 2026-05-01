@@ -1,12 +1,11 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
 import { uniqueRepoId } from "./util/test-helpers.ts";
-import { decodePktLines } from "@/git";
+import { decodePktLines } from "@/worker/git";
 
 it("advertises upload-pack v2 over info/refs", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-info-refs");
-  const repoId = `${owner}/${repo}`;
 
   const url = new URL(`https://example.com/${owner}/${repo}/info/refs`);
   url.searchParams.set("service", "git-upload-pack");

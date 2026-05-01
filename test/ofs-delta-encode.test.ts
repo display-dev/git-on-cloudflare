@@ -1,5 +1,5 @@
 import test from "ava";
-import { encodeOfsDeltaDistance } from "@/git/index.ts";
+import { encodeOfsDeltaDistance } from "@/worker/git/index.ts";
 
 function decodeOfsDeltaDistance(bytes: Uint8Array): number {
   let p = 0;

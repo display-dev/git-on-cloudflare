@@ -1,5 +1,5 @@
 import { it, expect } from "vitest";
-import { encodeOfsDeltaDistance } from "@/git";
+import { encodeOfsDeltaDistance } from "@/worker/git";
 
 /**
  * This is a logic-level test that simulates the header-length/offset

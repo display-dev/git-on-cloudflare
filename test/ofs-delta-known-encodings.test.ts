@@ -1,12 +1,12 @@
 import test from "ava";
-import { encodeOfsDeltaDistance } from "@/git/index.ts";
+import { encodeOfsDeltaDistance } from "@/worker/git/index.ts";
 
 const toHex = (u8: Uint8Array) =>
   Array.from(u8)
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
-// Mirror of the decoder in src/git/pack/assembler.ts for verification
+// Mirror of the decoder in src/worker/git/pack/assembler.ts for verification
 function decodeOfsDeltaDistance(bytes: Uint8Array): number {
   let p = 0;
   let b = bytes[p++];

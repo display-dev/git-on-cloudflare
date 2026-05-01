@@ -9,9 +9,9 @@ import {
   setSingleBytePackHeaderSize,
 } from "./util/pack-indexer.helpers.ts";
 
-import { scanPack } from "@/git/pack/indexer/index.ts";
-import { computeOid } from "@/git/core/objects.ts";
-import { bytesToHex } from "@/common/hex.ts";
+import { scanPack } from "@/worker/git/pack/indexer/index.ts";
+import { computeOid } from "@/worker/git/core/objects.ts";
+import { bytesToHex } from "@/worker/common/hex.ts";
 
 describe("scanPack", () => {
   it("indexes a pack with non-delta objects", async () => {

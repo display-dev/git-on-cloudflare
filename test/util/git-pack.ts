@@ -1,11 +1,11 @@
-import { asBufferSource, deflate, hexToBytes, zeroOid } from "@/common/index.ts";
+import { asBufferSource, deflate, hexToBytes, zeroOid } from "@/worker/common/index.ts";
+import type { GitObjectType } from "@/worker/git/index.ts";
 import {
   concatChunks,
   encodeObjHeader,
   encodeOfsDeltaDistance,
-  GitObjectType,
   objTypeCode,
-} from "@/git/index.ts";
+} from "@/worker/git/index.ts";
 
 type PackObjectEntry = {
   type: GitObjectType;
@@ -206,4 +206,4 @@ export function zero40(): string {
   return zeroOid();
 }
 
-export { encodeObjHeader } from "@/git/index.ts";
+export { encodeObjHeader } from "@/worker/git/index.ts";

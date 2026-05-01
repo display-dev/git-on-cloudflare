@@ -1,8 +1,8 @@
 import test from "ava";
-import type { PktItem } from "@/git/core/index.ts";
-import { concatChunks, decodePktLines, flushPkt } from "@/git/index.ts";
-import { buildAckSection } from "@/git/operations/fetch/protocol.ts";
-import { createSidebandPacketChunks } from "@/git/operations/fetch/sideband.ts";
+import type { PktItem } from "@/worker/git/core/index.ts";
+import { concatChunks, decodePktLines, flushPkt } from "@/worker/git/index.ts";
+import { buildAckSection } from "@/worker/git/operations/fetch/protocol.ts";
+import { createSidebandPacketChunks } from "@/worker/git/operations/fetch/sideband.ts";
 
 function findLine(items: PktItem[], text: string): number {
   return items.findIndex((item) => item.type === "line" && item.text === text);

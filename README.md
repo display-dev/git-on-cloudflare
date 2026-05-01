@@ -93,7 +93,8 @@ To enable push protection, set `AUTH_ADMIN_TOKEN`:
 
 ```bash
 # Development
-echo "AUTH_ADMIN_TOKEN=secret123" > .dev.vars
+cp .dev.vars.example .dev.vars
+# Then set AUTH_ADMIN_TOKEN in .dev.vars
 
 # Production
 wrangler secret put AUTH_ADMIN_TOKEN
@@ -123,11 +124,12 @@ Admin endpoints for compaction and repository management are protected via owner
 Environment variables:
 
 ```bash
+AUTH_ADMIN_TOKEN=           # Optional; leave empty to disable local auth
 REPO_DO_IDLE_MINUTES=30      # Cleanup idle repos after 30 min
 LOG_LEVEL=info               # debug|info|warn|error
 ```
 
-See `wrangler.jsonc` for the complete configuration.
+See `.dev.vars.example` and `wrangler.jsonc` for the complete configuration.
 
 ## Documentation
 

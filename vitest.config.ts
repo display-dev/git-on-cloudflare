@@ -23,7 +23,7 @@ const VITEST_POOL_COMPATIBILITY_FLAGS = [
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      main: "./src/index.ts",
+      main: "./src/worker/index.ts",
       wrangler: {
         configPath: "./wrangler.jsonc",
       },

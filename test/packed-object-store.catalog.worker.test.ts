@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { getDb, supersedePackCatalogRows } from "@/do/repo/db/index.ts";
-import type { RepoDurableObject } from "@/index";
+import { getDb, supersedePackCatalogRows } from "@/worker/do/repo/db/index.ts";
 import {
   buildPack,
   callStubWithRetry,
@@ -12,13 +11,13 @@ import {
   seedPackedRepo,
   uniqueRepoId,
 } from "./util/test-helpers.ts";
-import { encodeGitObject } from "@/git/core/index.ts";
+import { encodeGitObject } from "@/worker/git/core/index.ts";
 
 describe("packed object store catalog", () => {
   it("seeds active receive rows for packed repos", async () => {
     const repoId = `o/${uniqueRepoId("pack-catalog")}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
     const { getStub: seededStub } = await seedPackedRepo({ env, repoId, getStub });
 
     const catalog = await callStubWithRetry(seededStub, (stub) => stub.getActivePackCatalog());
@@ -33,7 +32,7 @@ describe("packed object store catalog", () => {
   it("repeated catalog snapshots stay read-only after initial seed", async () => {
     const repoId = `o/${uniqueRepoId("pack-catalog-snapshot")}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
     const seeded = await seedPackedRepo({ env, repoId, getStub });
 
     const first = await callStubWithRetry(seeded.getStub, (stub) => stub.getActivePackCatalog());
@@ -57,7 +56,7 @@ describe("packed object store catalog", () => {
     const olderBlob = await encodeGitObject("blob", olderPayload);
     const newerBlob = await encodeGitObject("blob", newerPayload);
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const { packKeys, getStub: seededStub } = await seedLegacyPackedRepo({
       env,
@@ -79,13 +78,10 @@ describe("packed object store catalog", () => {
     const seeded = await callStubWithRetry(seededStub, (stub) => stub.getActivePackCatalog());
     expect(seeded.map((row) => row.packKey)).toEqual(packKeys);
 
-    await runDOWithRetry(
-      seededStub,
-      async (_instance: RepoDurableObject, state: DurableObjectState) => {
-        const db = getDb(state.storage);
-        await supersedePackCatalogRows(db, [packKeys[1]], packKeys[0] || null);
-      }
-    );
+    await runDOWithRetry(seededStub, async (_instance, state: DurableObjectState) => {
+      const db = getDb(state.storage);
+      await supersedePackCatalogRows(db, [packKeys[1]], packKeys[0] || null);
+    });
 
     const beforeSnapshot = await readRepoCatalogState(seededStub);
     expect(beforeSnapshot.activeCatalog.map((row) => row.packKey)).toEqual([packKeys[0]]);

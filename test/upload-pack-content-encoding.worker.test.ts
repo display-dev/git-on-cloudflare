@@ -1,9 +1,8 @@
 import { it, expect } from "vitest";
 import { SELF, env } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/git";
+import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { gzip } from "@/common/index.ts";
+import { gzip } from "@/worker/common/index.ts";
 
 function buildFetchBody({
   wants,
@@ -39,8 +38,8 @@ it("upload-pack fetch accepts gzip-encoded request bodies", async () => {
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
   const { commitOid } = await runDOWithRetry(
-    () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-    async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+    () => env.REPO_DO.get(id),
+    async (instance) => instance.seedMinimalRepo()
   );
 
   const body = await gzip(buildFetchBody({ wants: [commitOid], done: true }));

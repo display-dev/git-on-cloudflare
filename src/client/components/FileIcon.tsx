@@ -1,4 +1,4 @@
-import type { FileIconName } from "@/web";
+import type { FileIconName } from "@/shared/web";
 import {
   Database,
   File,

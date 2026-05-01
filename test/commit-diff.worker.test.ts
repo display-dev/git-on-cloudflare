@@ -1,8 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { encodeGitObject, listCommitChangedFiles, readCommitFilePatch } from "@/git";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
+import { encodeGitObject, listCommitChangedFiles, readCommitFilePatch } from "@/worker/git";
+import { uniqueRepoId, runDOWithRetry, type RepoDOStubFactory } from "./util/test-helpers.ts";
 import { registerTestPack } from "./util/packed-repo.ts";
 
 type TreeSpec = {
@@ -72,7 +71,7 @@ async function createCommit(args: {
 /** Register all accumulated objects as a pack so the pack-first read path can find them. */
 async function packAll(
   repoId: string,
-  getStub: () => DurableObjectStub<RepoDurableObject>,
+  getStub: RepoDOStubFactory,
   objects: GitObject[]
 ): Promise<void> {
   await registerTestPack({
@@ -84,11 +83,8 @@ async function packAll(
   });
 }
 
-async function setMainRef(
-  getStub: () => DurableObjectStub<RepoDurableObject>,
-  oid: string
-): Promise<void> {
-  await runDOWithRetry(getStub, async (instance: RepoDurableObject) => {
+async function setMainRef(getStub: RepoDOStubFactory, oid: string): Promise<void> {
+  await runDOWithRetry(getStub, async (instance) => {
     await instance.setRefs([{ name: "refs/heads/main", oid }]);
     await instance.setHead({ target: "refs/heads/main" });
   });
@@ -100,7 +96,7 @@ describe("commit diff v1", () => {
     const repo = uniqueRepoId("r-diff-root");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const readme = await createBlob("hello\n");
 
@@ -136,7 +132,7 @@ describe("commit diff v1", () => {
     const repo = uniqueRepoId("r-diff-transition");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const oldFile = await createBlob("before\n");
     const oldConfig = await createBlob("legacy\n");
@@ -200,7 +196,7 @@ describe("commit diff v1", () => {
     const repo = uniqueRepoId("r-diff-truncate-files");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const alpha = await createBlob("a\n");
     const beta = await createBlob("b\n");
@@ -230,7 +226,7 @@ describe("commit diff v1", () => {
     const repo = uniqueRepoId("r-diff-truncate-time");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const alpha = await createBlob("a\n");
     const beta = await createBlob("b\n");
@@ -265,7 +261,7 @@ describe("commit diff v1", () => {
     const repo = uniqueRepoId("r-diff-patch");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const before = await createBlob("before\nshared\n");
     const after = await createBlob("after\nshared\n");
@@ -296,7 +292,7 @@ describe("commit diff v1", () => {
     const repo = uniqueRepoId("r-diff-binary");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const before = await createBlob("\u0000old");
     const after = await createBlob("\u0000new");
@@ -325,7 +321,7 @@ describe("commit diff v1", () => {
     const repo = uniqueRepoId("r-diff-route-patch");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const readme = await createBlob("hello\n");
 
@@ -358,7 +354,7 @@ describe("commit diff v1", () => {
     const repo = uniqueRepoId("r-diff-route");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const alpha = await createBlob("alpha\n");
     const beta = await createBlob("beta\n");

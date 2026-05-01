@@ -1,8 +1,7 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { asTypedStorage } from "@/do/repo/repoState.ts";
-import type { RepoStateSchema } from "@/do/repo/repoState.ts";
+import { asTypedStorage } from "@/worker/do/repo/repoState.ts";
+import type { RepoStateSchema } from "@/worker/do/repo/repoState.ts";
 import {
   concatChunks,
   delimPkt,
@@ -11,13 +10,13 @@ import {
   flushPkt,
   pktLine,
   decodePktLines,
-} from "@/git";
+} from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { getDb, upsertPackCatalogRow } from "@/do/repo/db/index.ts";
-import { asBufferSource, deflate } from "@/common/index.ts";
-import { doPrefix, r2PackKey } from "@/keys.ts";
+import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db/index.ts";
+import { asBufferSource, deflate } from "@/worker/common/index.ts";
+import { doPrefix, r2PackKey } from "@/worker/keys.ts";
 import { indexTestPack } from "./util/test-indexer.ts";
-import { bytesToHex } from "@/common/hex.ts";
+import { bytesToHex } from "@/worker/common/hex.ts";
 
 async function buildPack(objs: { type: string; payload: Uint8Array }[]): Promise<Uint8Array> {
   const hdr = new Uint8Array(12);
@@ -63,7 +62,7 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
   const repo = uniqueRepoId("r-multipack");
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
-  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+  const getStub = () => env.REPO_DO.get(id);
 
   // Create objects directly — no seedMinimalRepo needed
   const treePayload = new Uint8Array(0); // empty tree

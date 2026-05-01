@@ -1,8 +1,8 @@
 import test from "ava";
 
-import { hexToBytes } from "@/common/index.ts";
-import { objTypeCode, type GitObjectType } from "@/git/core/index.ts";
-import type { IdxView } from "@/git/object-store/types.ts";
+import { hexToBytes } from "@/worker/common/index.ts";
+import { objTypeCode, type GitObjectType } from "@/worker/git/core/index.ts";
+import type { IdxView } from "@/worker/git/object-store/types.ts";
 import {
   getPackRefObjectType,
   getPackRefRefsAt,
@@ -10,9 +10,9 @@ import {
   parsePackRefView,
   parseTreeClosureRefs,
   type PackRefSnapshotEntry,
-} from "@/git/pack/refIndex.ts";
-import { allocateEntryTable, type PackEntryTable } from "@/git/pack/indexer/index.ts";
-import { computeNeededFromPackRefs } from "@/git/operations/fetch/refClosure.ts";
+} from "@/worker/git/pack/refIndex.ts";
+import { allocateEntryTable, type PackEntryTable } from "@/worker/git/pack/indexer/index.ts";
+import { computeNeededFromPackRefs } from "@/worker/git/operations/fetch/refClosure.ts";
 
 const HEADER_BYTES = 60;
 

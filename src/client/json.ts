@@ -1,4 +1,4 @@
-import type { JsonValue } from "@/web";
+import type { JsonValue } from "@/shared/web";
 
 export async function safeReadJson(response: Response): Promise<JsonValue | null> {
   try {

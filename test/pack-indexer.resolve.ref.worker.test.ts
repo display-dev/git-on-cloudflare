@@ -12,11 +12,11 @@ import {
   packIndexerLog as log,
 } from "./util/pack-indexer.helpers.ts";
 
-import { scanPack, resolveDeltasAndWriteIdx } from "@/git/pack/indexer/index.ts";
-import { computeOid, encodeGitObject } from "@/git/core/objects.ts";
-import { bytesToHex } from "@/common/hex.ts";
-import { findOidIndex } from "@/git/object-store/idxView.ts";
-import { packIndexKey } from "@/keys.ts";
+import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/index.ts";
+import { computeOid, encodeGitObject } from "@/worker/git/core/objects.ts";
+import { bytesToHex } from "@/worker/common/hex.ts";
+import { findOidIndex } from "@/worker/git/object-store/idxView.ts";
+import { packIndexKey } from "@/worker/keys.ts";
 
 describe("resolveDeltasAndWriteIdx REF_DELTA", () => {
   it("resolves REF_DELTA with external base from the provided active catalog snapshot", async () => {

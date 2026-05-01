@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createExecutionContext, env, SELF } from "cloudflare:test";
 
-import { concatChunks, flushPkt, pktLine } from "@/git/core/index.ts";
-import { computeOid, encodeGitObject } from "@/git/core/objects.ts";
-import { handleStreamingReceivePackPOST } from "@/git/receive/streamReceivePack.ts";
+import { concatChunks, flushPkt, pktLine } from "@/worker/git/core/index.ts";
+import { computeOid, encodeGitObject } from "@/worker/git/core/objects.ts";
+import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack.ts";
 import { buildFetchBody } from "./util/fetch-protocol.ts";
 import { buildAppendOnlyDelta, buildPack, zero40 } from "./util/git-pack.ts";
 import { buildTreePayload } from "./util/packed-repo.ts";
@@ -14,7 +14,7 @@ import {
   uniqueRepoId,
 } from "./util/test-helpers.ts";
 import { seedPackFirstRepo } from "./util/pack-first.ts";
-import { doPrefix, packRefsKey, r2PackDirPrefix } from "@/keys.ts";
+import { doPrefix, packRefsKey, r2PackDirPrefix } from "@/worker/keys.ts";
 import {
   buildStreamingReceiveBody,
   decodeReceiveSideband,

@@ -13,9 +13,10 @@
     "test:auth": "vitest run --config vitest.config.ts test/auth.worker.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc -p test/tsconfig.json --noEmit",
-    "cf-typegen": "wrangler types --strict-vars false",
-    "db:gen": "drizzle-kit generate --config drizzle.config.ts"
+    "types:generate": "wrangler types --env-file .dev.vars.example",
+    "typecheck": "npm run types:generate && tsc -p test/tsconfig.json --noEmit",
+    "cf-typegen": "npm run types:generate",
+    "db:gen": "drizzle-kit generate --config drizzle-repo-do.config.ts"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.30.3",

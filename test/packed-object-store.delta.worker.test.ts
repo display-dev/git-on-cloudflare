@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { concatChunks, encodeGitObject } from "@/git/core/index.ts";
-import { readObject } from "@/git/object-store/index.ts";
+import { concatChunks, encodeGitObject } from "@/worker/git/core/index.ts";
+import { readObject } from "@/worker/git/object-store/index.ts";
 import {
   buildAppendOnlyDelta,
   buildPack,
@@ -10,7 +10,6 @@ import {
   seedLegacyPackedRepo,
   uniqueRepoId,
 } from "./util/test-helpers.ts";
-import type { RepoDurableObject } from "@/index";
 
 describe("packed object store deltas", () => {
   it("resolves OFS_DELTA blobs from pack-only storage", async () => {
@@ -21,7 +20,7 @@ describe("packed object store deltas", () => {
     const baseBlob = await encodeGitObject("blob", basePayload);
     const deltaBlob = await encodeGitObject("blob", resultPayload);
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const packBytes = await buildPack([
       { type: "blob", payload: basePayload },
@@ -58,7 +57,7 @@ describe("packed object store deltas", () => {
     const baseBlob = await encodeGitObject("blob", basePayload);
     const deltaBlob = await encodeGitObject("blob", resultPayload);
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const basePackBytes = await buildPack([{ type: "blob", payload: basePayload }]);
     const refPackBytes = await buildPack([

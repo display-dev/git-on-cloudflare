@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { encodeGitObject } from "@/git/core/index.ts";
+import { encodeGitObject } from "@/worker/git/core/index.ts";
 import {
   buildPack,
   callStubWithRetry,
@@ -19,7 +18,7 @@ describe("pack-first read-path regressions", () => {
     const repo = uniqueRepoId("pack-first-ui");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const seeded = await seedPackedRepo(env, repoId, getStub, { mirrorLooseToR2: true });
     await callStubWithRetry(getStub, (stub) => stub.getActivePackCatalog());
@@ -76,7 +75,7 @@ describe("pack-first read-path regressions", () => {
     const repo = uniqueRepoId("pack-first-fetch");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const seeded = await seedPackedRepo(env, repoId, getStub, { mirrorLooseToR2: true });
     await callStubWithRetry(getStub, (stub) => stub.getActivePackCatalog());
@@ -103,7 +102,7 @@ describe("pack-first read-path regressions", () => {
     const repo = uniqueRepoId("pack-first-commits");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
 
     const author = "You <you@example.com> 0 +0000";
     const tree = await encodeGitObject("tree", new Uint8Array(0));

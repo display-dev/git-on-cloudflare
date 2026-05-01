@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { packIndexKey, packRefsKey } from "@/keys.ts";
+import { packIndexKey, packRefsKey } from "@/worker/keys.ts";
 import { pushStreamingUpdate } from "./streaming-helpers.ts";
 import { runQueueMessage, type QueueRunResult } from "./queue.ts";
 

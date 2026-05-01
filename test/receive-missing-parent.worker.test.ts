@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
-import { pktLine, flushPkt, concatChunks } from "@/git";
+import { pktLine, flushPkt, concatChunks } from "@/worker/git";
 import { buildPack, makeTree, zero40 } from "./util/test-helpers.ts";
 
 it("receive-pack connectivity: rejects commit whose parent is missing", async () => {
@@ -44,7 +44,7 @@ it("receive-pack connectivity: rejects commit whose parent is missing", async ()
   } as any);
   expect(res.status).toBe(200);
   const bytes = new Uint8Array(await res.arrayBuffer());
-  const lines = (await import("@/git"))
+  const lines = (await import("@/worker/git"))
     .decodePktLines(bytes)
     .filter((i: any) => i.type === "line")
     .map((i: any) => i.text.trim());

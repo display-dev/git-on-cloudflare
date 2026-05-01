@@ -1,8 +1,7 @@
 import { it, expect, describe } from "vitest";
 import { env } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import type { CacheContext } from "@/cache/index.ts";
-import { computeNeededFast } from "@/git/operations/fetch/neededFast.ts";
+import type { CacheContext } from "@/worker/cache/index.ts";
+import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 describe("computeNeededFast", () => {
@@ -14,8 +13,8 @@ describe("computeNeededFast", () => {
     // Create a repo with a commit
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid, treeOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => {
+      () => env.REPO_DO.get(id),
+      async (instance) => {
         return await instance.seedMinimalRepo();
       }
     );
@@ -78,8 +77,8 @@ describe("computeNeededFast", () => {
     // Create a large chain of commits
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo()
     );
 
     const realNow = Date.now;
@@ -105,8 +104,8 @@ describe("computeNeededFast", () => {
 
     const id = env.REPO_DO.idFromName(repoId);
     const { commitOid } = await runDOWithRetry(
-      () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-      async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+      () => env.REPO_DO.get(id),
+      async (instance) => instance.seedMinimalRepo()
     );
 
     const cacheCtx: CacheContext = {

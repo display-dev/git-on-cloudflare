@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
 import { uniqueRepoId } from "./util/test-helpers.ts";
-import { decodePktLines } from "@/git";
+import { decodePktLines } from "@/worker/git";
 import { seedPackFirstRepo } from "./util/pack-first.ts";
 
 it("advertises streaming receive-pack capabilities including side-band-64k", async () => {

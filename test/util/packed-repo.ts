@@ -1,27 +1,26 @@
-import type { Head, Ref, RepoStateSchema } from "@/do/repo/repoState.ts";
-import type { TreeEntry } from "@/git/operations/read/types.ts";
-import type { RepoDurableObject } from "@/index";
+import type { Head, Ref, RepoStateSchema } from "@/worker/do/repo/repoState.ts";
+import type { TreeEntry } from "@/worker/git/operations/read/types.ts";
 
-import { concatChunks, encodeGitObject } from "@/git/core/index.ts";
-import { hexToBytes } from "@/common/index.ts";
-import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
-import { doPrefix, r2LooseKey, r2PackKey } from "@/keys.ts";
+import { concatChunks, encodeGitObject } from "@/worker/git/core/index.ts";
+import { hexToBytes } from "@/worker/common/index.ts";
+import { asTypedStorage, objKey } from "@/worker/do/repo/repoState.ts";
+import { doPrefix, r2LooseKey, r2PackKey } from "@/worker/keys.ts";
 import {
   getDb,
   listActivePackCatalog,
   listPackCatalog,
   upsertPackCatalogRow,
-} from "@/do/repo/db/index.ts";
+} from "@/worker/do/repo/db/index.ts";
 import { buildPack } from "./git-pack.ts";
 import { indexTestPack } from "./test-indexer.ts";
-import { runDOWithRetry } from "./do-retry.ts";
+import { runDOWithRetry, type RepoDOStubFactory } from "./do-retry.ts";
 
 export type EncodedGitObject = Awaited<ReturnType<typeof encodeGitObject>>;
 
 export type SeedLegacyPackedRepoArgs = {
   env: Env;
   repoId: string;
-  getStub: () => DurableObjectStub<RepoDurableObject>;
+  getStub: RepoDOStubFactory;
   packs: Array<{ name: string; packBytes: Uint8Array }>;
   refs?: Ref[];
   head?: Head;
@@ -30,7 +29,7 @@ export type SeedLegacyPackedRepoArgs = {
 };
 
 export type SeedPackedRepoResult = {
-  getStub: () => DurableObjectStub<RepoDurableObject>;
+  getStub: RepoDOStubFactory;
   packKeys: string[];
   blob: EncodedGitObject;
   tree: EncodedGitObject;
@@ -61,7 +60,7 @@ export function buildTreePayload(entries: TreeEntry[]): Uint8Array {
 
 export async function seedPackedRepoState(
   args: SeedLegacyPackedRepoArgs
-): Promise<{ getStub: () => DurableObjectStub<RepoDurableObject>; packKeys: string[] }> {
+): Promise<{ getStub: RepoDOStubFactory; packKeys: string[] }> {
   const packKeys: string[] = [];
 
   await runDOWithRetry(args.getStub, async (_instance, state) => {
@@ -85,7 +84,7 @@ export async function seedPackedRepoState(
     }
 
     let nextSeq = (await store.get("nextPackSeq")) || 1;
-    const catalogSoFar: import("@/do/repo/db/schema.ts").PackCatalogRow[] = [];
+    const catalogSoFar: import("@/worker/do/repo/db/schema.ts").PackCatalogRow[] = [];
     // Historical test helpers passed packs newest-first because `packList`
     // mirrored that ordering. Preserve that caller contract for assertions and
     // returned `packKeys`, but index oldest-to-newest so REF_DELTA bases in
@@ -102,7 +101,7 @@ export async function seedPackedRepoState(
       );
 
       const seq = nextSeq++;
-      const row: import("@/do/repo/db/schema.ts").PackCatalogRow = {
+      const row: import("@/worker/do/repo/db/schema.ts").PackCatalogRow = {
         packKey: pack.packKey,
         kind: "receive",
         state: "active",
@@ -139,7 +138,7 @@ export const seedLegacyPackedRepo = seedPackedRepoState;
 type SeedPackedRepoArgs = {
   env: Env;
   repoId: string;
-  getStub: () => DurableObjectStub<RepoDurableObject>;
+  getStub: RepoDOStubFactory;
   options?: { mirrorLooseToR2?: boolean };
 };
 
@@ -147,13 +146,13 @@ export async function seedPackedRepo(args: SeedPackedRepoArgs): Promise<SeedPack
 export async function seedPackedRepo(
   env: Env,
   repoId: string,
-  getStub: () => DurableObjectStub<RepoDurableObject>,
+  getStub: RepoDOStubFactory,
   options?: { mirrorLooseToR2?: boolean }
 ): Promise<SeedPackedRepoResult>;
 export async function seedPackedRepo(
   envOrArgs: Env | SeedPackedRepoArgs,
   repoId?: string,
-  getStub?: () => DurableObjectStub<RepoDurableObject>,
+  getStub?: RepoDOStubFactory,
   options?: { mirrorLooseToR2?: boolean }
 ): Promise<SeedPackedRepoResult> {
   const args =
@@ -216,31 +215,28 @@ export async function seedPackedRepo(
 }
 
 export async function readRepoCatalogState(
-  getStub: () => DurableObjectStub<RepoDurableObject>
+  getStub: RepoDOStubFactory
 ): Promise<RepoCatalogStateSnapshot> {
-  return await runDOWithRetry(
-    getStub,
-    async (_instance: RepoDurableObject, state: DurableObjectState) => {
-      const store = asTypedStorage<RepoStateSchema>(state.storage);
-      const db = getDb(state.storage);
-      return {
-        packsetVersion: (await store.get("packsetVersion")) || 0,
-        nextPackSeq: (await store.get("nextPackSeq")) || 0,
-        activeCatalog: await listActivePackCatalog(db),
-        catalog: await listPackCatalog(db),
-      };
-    }
-  );
+  return await runDOWithRetry(getStub, async (_instance, state: DurableObjectState) => {
+    const store = asTypedStorage<RepoStateSchema>(state.storage);
+    const db = getDb(state.storage);
+    return {
+      packsetVersion: (await store.get("packsetVersion")) || 0,
+      nextPackSeq: (await store.get("nextPackSeq")) || 0,
+      activeCatalog: await listActivePackCatalog(db),
+      catalog: await listPackCatalog(db),
+    };
+  });
 }
 
 export async function deleteLooseObjectCopies(args: {
   env: Env;
-  getStub: () => DurableObjectStub<RepoDurableObject>;
+  getStub: RepoDOStubFactory;
   objectOids: string[];
 }): Promise<void>;
 export async function deleteLooseObjectCopies(
   env: Env,
-  getStub: () => DurableObjectStub<RepoDurableObject>,
+  getStub: RepoDOStubFactory,
   objectOids: string[]
 ): Promise<void>;
 export async function deleteLooseObjectCopies(
@@ -248,10 +244,10 @@ export async function deleteLooseObjectCopies(
     | Env
     | {
         env: Env;
-        getStub: () => DurableObjectStub<RepoDurableObject>;
+        getStub: RepoDOStubFactory;
         objectOids: string[];
       },
-  getStub?: () => DurableObjectStub<RepoDurableObject>,
+  getStub?: RepoDOStubFactory,
   objectOids?: string[]
 ): Promise<void> {
   const args =
@@ -279,7 +275,7 @@ export async function deleteLooseObjectCopies(
 export async function registerTestPack(args: {
   env: Env;
   repoId: string;
-  getStub: () => DurableObjectStub<RepoDurableObject>;
+  getStub: RepoDOStubFactory;
   packName: string;
   objects: Array<{ type: "commit" | "tree" | "blob" | "tag"; payload: Uint8Array }>;
 }): Promise<string> {

@@ -1,7 +1,13 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines, encodeGitObject } from "@/git";
+import {
+  pktLine,
+  delimPkt,
+  flushPkt,
+  concatChunks,
+  decodePktLines,
+  encodeGitObject,
+} from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 import { registerTestPack } from "./util/packed-repo.ts";
 
@@ -28,8 +34,8 @@ it("ls-refs: ref-prefix filters refs and peel adds peeled attribute for annotate
   // Seed minimal repo to create HEAD -> refs/heads/main
   const id = env.REPO_DO.idFromName(repoId);
   const { commitOid } = await runDOWithRetry(
-    () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-    async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+    () => env.REPO_DO.get(id),
+    async (instance) => instance.seedMinimalRepo()
   );
 
   // Create an annotated tag pointing to the commit
@@ -45,14 +51,14 @@ it("ls-refs: ref-prefix filters refs and peel adds peeled attribute for annotate
   await registerTestPack({
     env,
     repoId,
-    getStub: () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
+    getStub: () => env.REPO_DO.get(id),
     packName: `pack-tag-${Date.now()}.pack`,
     objects: [{ type: "tag" as const, payload: tagPayload }],
   });
   // Add the tag ref
   await runDOWithRetry(
-    () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
-    async (instance: RepoDurableObject) => {
+    () => env.REPO_DO.get(id),
+    async (instance) => {
       const { refs } = await instance.getHeadAndRefs();
       refs.push({ name: "refs/tags/v1", oid: tagOid });
       await instance.setRefs(refs);
@@ -90,9 +96,9 @@ it("ls-refs: peel resolves many annotated tags stored across multiple packs", as
   const repo = uniqueRepoId("r-lsrefs-many-tags");
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
-  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+  const getStub = () => env.REPO_DO.get(id);
 
-  const { commitOid } = await runDOWithRetry(getStub, async (instance: RepoDurableObject) =>
+  const { commitOid } = await runDOWithRetry(getStub, async (instance) =>
     instance.seedMinimalRepo()
   );
 
@@ -134,7 +140,7 @@ it("ls-refs: peel resolves many annotated tags stored across multiple packs", as
     objects: secondPackObjects,
   });
 
-  await runDOWithRetry(getStub, async (instance: RepoDurableObject) => {
+  await runDOWithRetry(getStub, async (instance) => {
     const current = await instance.getHeadAndRefs();
     await instance.setRefs([...current.refs, ...refs]);
   });

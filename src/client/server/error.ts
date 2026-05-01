@@ -1,6 +1,6 @@
 import { renderUiView } from "@/client/server/render";
-import { escapeHtml } from "@/web/format";
-import { isHttpError } from "@/web/http";
+import { escapeHtml } from "@/shared/web/format";
+import { isHttpError } from "@/shared/web/http";
 
 export async function handleError(
   env: Env,

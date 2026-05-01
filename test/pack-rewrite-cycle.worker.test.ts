@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 
-import { concatChunks } from "@/git";
-import { bytesToHex, createLogger } from "@/common/index.ts";
-import { computeOid } from "@/git/core/objects.ts";
-import { rewritePack } from "@/git/pack/rewrite.ts";
-import { buildOutputOrder, buildSelection } from "@/git/pack/rewrite/plan.ts";
-import type { PackCatalogRow } from "@/do/repo/db/schema.ts";
+import { concatChunks } from "@/worker/git";
+import { bytesToHex, createLogger } from "@/worker/common/index.ts";
+import { computeOid } from "@/worker/git/core/objects.ts";
+import { rewritePack } from "@/worker/git/pack/rewrite.ts";
+import { buildOutputOrder, buildSelection } from "@/worker/git/pack/rewrite/plan.ts";
+import type { PackCatalogRow } from "@/worker/do/repo/db/schema.ts";
 import { buildAppendOnlyDelta, buildPack } from "./util/test-helpers.ts";
 import { indexTestPack } from "./util/test-indexer.ts";
 

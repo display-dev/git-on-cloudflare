@@ -1,22 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
 
-import { objKey } from "@/do/repo/repoState.ts";
-import { readLooseObjectRaw } from "@/git/operations/read/objects.ts";
-import { readObject } from "@/git/object-store/index.ts";
-import {
-  callStubWithRetry,
-  runDOWithRetry,
-  seedPackedRepo,
-  uniqueRepoId,
-} from "./util/test-helpers.ts";
-import type { RepoDurableObject } from "@/index";
+import { objKey } from "@/worker/do/repo/repoState.ts";
+import { readLooseObjectRaw } from "@/worker/git/operations/read/objects.ts";
+import { readObject } from "@/worker/git/object-store/index.ts";
+import { runDOWithRetry, seedPackedRepo, uniqueRepoId } from "./util/test-helpers.ts";
 
 describe("packed object store reads", () => {
   it("matches legacy reads and still works after loose objects are deleted", async () => {
     const repoId = `o/${uniqueRepoId("pack-object-store")}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
+    const getStub = () => env.REPO_DO.get(id);
     const {
       getStub: seededStub,
       blob,
@@ -55,8 +49,8 @@ describe("packed object store reads", () => {
     const repo = uniqueRepoId("pack-streaming-raw");
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
-    const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
-    const { getStub: seededStub, blob } = await seedPackedRepo({ env, repoId, getStub });
+    const getStub = () => env.REPO_DO.get(id);
+    const { blob } = await seedPackedRepo({ env, repoId, getStub });
 
     const res = await SELF.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${encodeURIComponent(blob.oid)}&name=hello.txt`

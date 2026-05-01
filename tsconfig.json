@@ -11,6 +11,13 @@
     "lib": ["ES2022"],
     "skipLibCheck": true,
     "allowJs": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
     "forceConsistentCasingInFileNames": true,
     "paths": {
       "@/*": ["./src/*"]

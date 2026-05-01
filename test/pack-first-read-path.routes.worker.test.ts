@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { env, SELF } from "cloudflare:test";
 
-import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
-import { computeNeededFast } from "@/git/operations/fetch/neededFast.ts";
-import { packRefsKey } from "@/keys.ts";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState.ts";
+import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast.ts";
+import { packRefsKey } from "@/worker/keys.ts";
 import {
   deleteLooseObjectCopies,
   runDOWithRetry,
