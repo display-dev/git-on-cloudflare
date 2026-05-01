@@ -16,11 +16,12 @@ import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { repoKey } from "@/worker/keys";
 import { badRequest } from "./helpers";
-import type { RouteRequest } from "./helpers";
+import type { RepoParams, RouteArgs } from "../hono";
+import { renderUiDocumentResponse } from "../uiResponse";
 import type { ReadPathResult } from "@/worker/git";
 
-export async function handleTree(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo } = request.params;
+export async function handleTree({ request, env, ctx, params }: RouteArgs<RepoParams>) {
+  const { owner, repo } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -151,26 +152,23 @@ export async function handleTree(request: RouteRequest, env: Env, ctx: Execution
           ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
           : null;
       const progress = await getRepoActivity(env, repoId);
-      const html = await renderUiView(env, "tree", {
-        title: `${path || "root"} · ${owner}/${repo}`,
-        owner,
-        repo,
-        refEnc: encodeURIComponent(ref),
-        progress,
-        breadcrumbs,
-        parentHref,
-        entries,
-      });
-      if (!html) {
-        return new Response("Failed to render view", { status: 500 });
-      }
-      return new Response(html, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "react-ssr",
+      return renderUiDocumentResponse(
+        env,
+        "tree",
+        {
+          title: `${path || "root"} · ${owner}/${repo}`,
+          owner,
+          repo,
+          refEnc: encodeURIComponent(ref),
+          progress,
+          breadcrumbs,
+          parentHref,
+          entries,
         },
-      });
+        {
+          failureBody: "Failed to render view",
+        }
+      );
     } else {
       const raw = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}`;
       const text = bytesToText(result.content);
@@ -180,29 +178,26 @@ export async function handleTree(request: RouteRequest, env: Env, ctx: Execution
       const langs = getHighlightLangsForBlobSmart(title, text);
       const codeLang = langs[0] || null;
       const progress = await getRepoActivity(env, repoId);
-      const html = await renderUiView(env, "blob", {
-        title: `${title} · ${owner}/${repo}`,
-        owner,
-        repo,
-        refEnc: encodeURIComponent(ref),
-        progress,
-        fileName: title,
-        viewRawHref: `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(title)}`,
-        rawHref: raw,
-        codeText: text,
-        codeLang,
-        lineCount,
-      });
-      if (!html) {
-        return new Response("Failed to render view", { status: 500 });
-      }
-      return new Response(html, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "react-ssr",
+      return renderUiDocumentResponse(
+        env,
+        "blob",
+        {
+          title: `${title} · ${owner}/${repo}`,
+          owner,
+          repo,
+          refEnc: encodeURIComponent(ref),
+          progress,
+          fileName: title,
+          viewRawHref: `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(title)}`,
+          rawHref: raw,
+          codeText: text,
+          codeLang,
+          lineCount,
         },
-      });
+        {
+          failureBody: "Failed to render view",
+        }
+      );
     }
   } catch (e: any) {
     return handleError(env, e, `${owner}/${repo} · Tree`, {

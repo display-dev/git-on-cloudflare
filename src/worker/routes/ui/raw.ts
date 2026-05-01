@@ -8,10 +8,10 @@ import {
   getContentTypeFromName,
 } from "@/shared/web";
 import { repoKey } from "@/worker/keys";
-import type { RouteRequest } from "./helpers";
+import type { RepoParams, RouteArgs } from "../hono";
 
-export async function handleRaw(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo } = request.params;
+export async function handleRaw({ request, env, ctx, params }: RouteArgs<RepoParams>) {
+  const { owner, repo } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return new Response("Bad Request\n", { status: 400 });
   }
@@ -46,8 +46,8 @@ export async function handleRaw(request: RouteRequest, env: Env, ctx: ExecutionC
   });
 }
 
-export async function handleRawPath(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo } = request.params;
+export async function handleRawPath({ request, env, ctx, params }: RouteArgs<RepoParams>) {
+  const { owner, repo } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return new Response("Bad Request\n", { status: 400 });
   }

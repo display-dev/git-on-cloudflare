@@ -3,10 +3,10 @@ import { classifyRef, formatRefOption } from "@/shared/git/ref-display";
 import { isValidOwnerRepo } from "@/shared/web";
 import { repoKey } from "@/worker/keys";
 import { loadHeadAndRefsCached } from "./helpers";
-import type { RouteRequest } from "./helpers";
+import type { RepoParams, RouteArgs } from "../hono";
 
-export async function handleRefsApi(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo } = request.params;
+export async function handleRefsApi({ request, env, ctx, params }: RouteArgs<RepoParams>) {
+  const { owner, repo } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return new Response(JSON.stringify({ branches: [], tags: [] }), {
       status: 400,

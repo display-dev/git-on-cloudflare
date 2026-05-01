@@ -1,56 +1,68 @@
-import { AutoRouter } from "itty-router";
-import { renderUiView } from "@/client/server/render";
+import { Hono } from "hono";
 import { registerGitRoutes } from "./routes/git";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerUiRoutes } from "./routes/ui";
 import { registerAuthRoutes } from "./routes/auth";
+import type { AppBindings } from "./routes/hono";
+import { renderUiDocumentResponse } from "./routes/uiResponse";
+import { json } from "./common";
 import { handleRepoMaintenanceQueue, type RepoMaintenanceQueueMessage } from "./maintenance/queue";
 
-// Router setup with itty-router AutoRouter
-const router = AutoRouter();
+const app = new Hono<AppBindings>({ strict: false });
 // Register Git protocol routes (info/refs, upload-pack, receive-pack)
-registerGitRoutes(router);
+registerGitRoutes(app);
 // Register Admin routes
-registerAdminRoutes(router);
+registerAdminRoutes(app);
 // Register Auth routes BEFORE UI to avoid /:owner shadowing /auth
-registerAuthRoutes(router);
+registerAuthRoutes(app);
 
-router.get("/", async (_request, env: Env) => {
-  const html = await renderUiView(env, "home", {});
-  if (html) {
-    return new Response(html, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "react-ssr",
-      },
-    });
-  }
-  return new Response("Failed to render page\n", { status: 500 });
+app.get("/", async (c) => {
+  return renderUiDocumentResponse(c.env, "home", {}, { failureBody: "Failed to render page\n" });
 });
 
 // Register UI routes AFTER static/auth so that /:owner doesn't shadow them
-registerUiRoutes(router);
+registerUiRoutes(app);
 
-// Catch-all 404
-router.all("*", async (_request, env: Env) => {
-  const html = await renderUiView(env, "404", {});
-  if (html) {
-    return new Response(html, {
+async function renderNotFound(env: Env): Promise<Response> {
+  return renderUiDocumentResponse(
+    env,
+    "404",
+    {},
+    {
       status: 404,
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "react-ssr",
-      },
-    });
+      failureBody: "Not found\n",
+      failureStatus: 404,
+    }
+  );
+}
+
+app.notFound((c) => renderNotFound(c.env));
+
+function errorStatus(error: Error): number {
+  if ("status" in error && typeof error.status === "number") {
+    return error.status;
   }
-  return new Response("Not found\n", { status: 404 });
+  return 500;
+}
+
+app.onError((error) => {
+  // The previous router converted uncaught handler failures into JSON. Most
+  // routes catch expected failures themselves, but keep this last-resort shape
+  // stable for truly unexpected errors.
+  const status = errorStatus(error);
+  return json({ error: error.message || "Internal Server Error" }, status, {
+    "Content-Type": "application/json; charset=utf-8",
+  });
 });
 
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    return router.fetch(request, env, ctx);
+    // Hono maps HEAD to GET before routing, but this service historically
+    // treated HEAD as an unsupported method that reaches the rendered 404.
+    if (request.method === "HEAD") {
+      return renderNotFound(env);
+    }
+    return app.fetch(request, env, ctx);
   },
   async queue(batch: MessageBatch<RepoMaintenanceQueueMessage>, env: Env, ctx: ExecutionContext) {
     return await handleRepoMaintenanceQueue(batch, env, ctx);

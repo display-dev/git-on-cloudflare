@@ -1,6 +1,5 @@
 import type { HeadInfo, Ref } from "@/worker/git";
 import { isValidOwnerRepo } from "@/shared/web";
-import { renderUiView } from "@/client/server/render";
 import { getRepoActivity, getRepoStub, unauthorizedAdminBasic } from "@/worker/common";
 import { verifyAuth } from "@/worker/auth";
 import { repoKey } from "@/worker/keys";
@@ -12,11 +11,12 @@ import {
   loadAdminPackRefIndexState,
   loadHeadAndRefsCached,
   type DebugState,
-  type RouteRequest,
 } from "./helpers";
+import type { RepoParams, RouteArgs } from "../hono";
+import { renderUiDocumentResponse } from "../uiResponse";
 
-export async function handleAdminPage(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo } = request.params;
+export async function handleAdminPage({ request, env, ctx, params }: RouteArgs<RepoParams>) {
+  const { owner, repo } = params;
 
   // Validate parameters
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
@@ -53,32 +53,29 @@ export async function handleAdminPage(request: RouteRequest, env: Env, ctx: Exec
   const defaultBranch = getDefaultBranchFromHead(head);
   const refEnc = encodeURIComponent(defaultBranch);
 
-  const html = await renderUiView(env, "admin", {
-    title: `Admin · ${owner}/${repo}`,
-    owner,
-    repo,
-    refEnc,
-    head,
-    refs,
-    storageSize,
-    packCount,
-    packList,
-    state,
-    defaultBranch,
-    compactionStatus,
-    compactionStartedAt,
-    compactionData: state.compaction,
-    supersededPackCount,
-    progress,
-  });
-  if (!html) {
-    return new Response("Failed to render view", { status: 500 });
-  }
-  return new Response(html, {
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-store, no-cache, must-revalidate",
-      "X-Page-Renderer": "react-ssr",
+  return renderUiDocumentResponse(
+    env,
+    "admin",
+    {
+      title: `Admin · ${owner}/${repo}`,
+      owner,
+      repo,
+      refEnc,
+      head,
+      refs,
+      storageSize,
+      packCount,
+      packList,
+      state,
+      defaultBranch,
+      compactionStatus,
+      compactionStartedAt,
+      compactionData: state.compaction,
+      supersededPackCount,
+      progress,
     },
-  });
+    {
+      failureBody: "Failed to render view",
+    }
+  );
 }

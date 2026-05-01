@@ -3,39 +3,37 @@ import type { CacheContext } from "@/worker/cache";
 import { readPath } from "@/worker/git";
 import { classifyRef, formatRefOption, shortRefName } from "@/shared/git/ref-display";
 import { isValidOwnerRepo, bytesToText } from "@/shared/web";
-import { renderUiView } from "@/client/server/render";
 import { listReposForOwner } from "@/worker/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { repoKey } from "@/worker/keys";
 import { badRequest, loadHeadAndRefsCached } from "./helpers";
-import type { RouteRequest } from "./helpers";
+import type { OwnerParams, RepoParams, RouteArgs } from "../hono";
+import { renderUiDocumentResponse } from "../uiResponse";
 
-export async function handleOwnerOverview(request: RouteRequest, env: Env) {
-  const { owner } = request.params;
+export async function handleOwnerOverview({ env, params }: RouteArgs<OwnerParams>) {
+  const { owner } = params;
   if (!isValidOwnerRepo(owner)) {
     return badRequest(env, "Invalid owner", "Owner contains invalid characters or length");
   }
   const repos = await listReposForOwner(env, owner);
-  const html = await renderUiView(env, "owner", {
-    title: `${owner} · Repositories`,
-    owner,
-    repos,
-  });
-  if (!html) {
-    return new Response("Failed to render view", { status: 500 });
-  }
-  return new Response(html, {
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "public, max-age=60",
-      "X-Page-Renderer": "react-ssr",
+  return renderUiDocumentResponse(
+    env,
+    "owner",
+    {
+      title: `${owner} · Repositories`,
+      owner,
+      repos,
     },
-  });
+    {
+      cacheControl: "public, max-age=60",
+      failureBody: "Failed to render view",
+    }
+  );
 }
 
-export async function handleRepoOverview(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo } = request.params;
+export async function handleRepoOverview({ request, env, ctx, params }: RouteArgs<RepoParams>) {
+  const { owner, repo } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -93,25 +91,22 @@ export async function handleRepoOverview(request: RouteRequest, env: Env, ctx: E
   const readmeMd = readmeData?.md || "";
   const progress = await getRepoActivity(env, repoId);
 
-  const html = await renderUiView(env, "overview", {
-    title: `${owner}/${repo}`,
-    owner,
-    repo,
-    refShort,
-    refEnc,
-    branches: branchesData,
-    tags: tagsData,
-    readmeMd,
-    progress,
-  });
-  if (!html) {
-    return new Response("Failed to render view", { status: 500 });
-  }
-  return new Response(html, {
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-store, no-cache, must-revalidate",
-      "X-Page-Renderer": "react-ssr",
+  return renderUiDocumentResponse(
+    env,
+    "overview",
+    {
+      title: `${owner}/${repo}`,
+      owner,
+      repo,
+      refShort,
+      refEnc,
+      branches: branchesData,
+      tags: tagsData,
+      readmeMd,
+      progress,
     },
-  });
+    {
+      failureBody: "Failed to render view",
+    }
+  );
 }

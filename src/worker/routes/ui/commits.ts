@@ -8,16 +8,16 @@ import {
   readCommitFilePatch,
 } from "@/worker/git";
 import { isValidOwnerRepo, isValidRef, isValidPath, formatWhen, OID_RE } from "@/shared/web";
-import { renderUiView } from "@/client/server/render";
 import { handleError } from "@/client/server/error";
 import { repoKey } from "@/worker/keys";
 import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { badRequest } from "./helpers";
-import type { RouteRequest } from "./helpers";
+import type { RepoOidParams, RepoParams, RouteArgs } from "../hono";
+import { renderUiDocumentResponse } from "../uiResponse";
 
-export async function handleCommits(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo } = request.params;
+export async function handleCommits({ request, env, ctx, params }: RouteArgs<RepoParams>) {
+  const { owner, repo } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -102,26 +102,21 @@ export async function handleCommits(request: RouteRequest, env: Env, ctx: Execut
           : undefined,
     };
     const progress = await getRepoActivity(env, repoId);
-    const html = await renderUiView(env, "commits", {
-      title: `Commits on ${ref} · ${owner}/${repo}`,
-      owner,
-      repo,
-      ref,
-      refEnc,
-      commits: list,
-      pager,
-      progress,
-    });
-    if (!html) {
-      return new Response("Failed to render view", { status: 500 });
-    }
-    return new Response(html, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "react-ssr",
+    return renderUiDocumentResponse(
+      env,
+      "commits",
+      {
+        title: `Commits on ${ref} · ${owner}/${repo}`,
+        owner,
+        repo,
+        ref,
+        refEnc,
+        commits: list,
+        pager,
+        progress,
       },
-    });
+      { failureBody: "Failed to render view" }
+    );
   } catch (e: any) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
       owner,
@@ -131,12 +126,13 @@ export async function handleCommits(request: RouteRequest, env: Env, ctx: Execut
   }
 }
 
-export async function handleCommitFragments(
-  request: RouteRequest,
-  env: Env,
-  ctx: ExecutionContext
-) {
-  const { owner, repo, oid } = request.params;
+export async function handleCommitFragments({
+  request,
+  env,
+  ctx,
+  params,
+}: RouteArgs<RepoOidParams>) {
+  const { owner, repo, oid } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -188,8 +184,8 @@ export async function handleCommitFragments(
   }
 }
 
-export async function handleCommitDiff(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo, oid } = request.params;
+export async function handleCommitDiff({ request, env, ctx, params }: RouteArgs<RepoOidParams>) {
+  const { owner, repo, oid } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -242,8 +238,8 @@ export async function handleCommitDiff(request: RouteRequest, env: Env, ctx: Exe
   }
 }
 
-export async function handleCommit(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo, oid } = request.params;
+export async function handleCommit({ request, env, ctx, params }: RouteArgs<RepoOidParams>) {
+  const { owner, repo, oid } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -275,42 +271,37 @@ export async function handleCommit(request: RouteRequest, env: Env, ctx: Executi
     const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
     const parents = (c.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
     const progress = await getRepoActivity(env, repoId);
-    const html = await renderUiView(env, "commit", {
-      title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
-      owner,
-      repo,
-      commitOid: c.oid,
-      refEnc: encodeURIComponent(c.oid),
-      progress,
-      commitShort: c.oid.slice(0, 7),
-      authorName: c.author?.name || "",
-      authorEmail: c.author?.email || "",
-      when,
-      parents,
-      treeShort: (c.tree || "").slice(0, 7),
-      message: c.message || "",
-      diffBaseRefEnc: diff?.baseCommitOid ? encodeURIComponent(diff.baseCommitOid) : "",
-      diffCompareMode: diff?.compareMode || "root",
-      diffEntries: diff?.entries || [],
-      diffSummary: {
-        added: diff?.added || 0,
-        modified: diff?.modified || 0,
-        deleted: diff?.deleted || 0,
-        total: diff?.total || 0,
+    return renderUiDocumentResponse(
+      env,
+      "commit",
+      {
+        title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
+        owner,
+        repo,
+        commitOid: c.oid,
+        refEnc: encodeURIComponent(c.oid),
+        progress,
+        commitShort: c.oid.slice(0, 7),
+        authorName: c.author?.name || "",
+        authorEmail: c.author?.email || "",
+        when,
+        parents,
+        treeShort: (c.tree || "").slice(0, 7),
+        message: c.message || "",
+        diffBaseRefEnc: diff?.baseCommitOid ? encodeURIComponent(diff.baseCommitOid) : "",
+        diffCompareMode: diff?.compareMode || "root",
+        diffEntries: diff?.entries || [],
+        diffSummary: {
+          added: diff?.added || 0,
+          modified: diff?.modified || 0,
+          deleted: diff?.deleted || 0,
+          total: diff?.total || 0,
+        },
+        diffTruncated: diff?.truncated || false,
+        diffTruncateReason: diff?.truncateReason || "",
       },
-      diffTruncated: diff?.truncated || false,
-      diffTruncateReason: diff?.truncateReason || "",
-    });
-    if (!html) {
-      return new Response("Failed to render view", { status: 500 });
-    }
-    return new Response(html, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "react-ssr",
-      },
-    });
+      { failureBody: "Failed to render view" }
+    );
   } catch (e: any) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
       owner,

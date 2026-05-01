@@ -24,9 +24,6 @@ export type DebugState = Omit<
   supersededPacks: AdminPackState[];
 };
 export type CompactionData = DebugState["compaction"];
-export type RouteRequest = Request & {
-  params: { owner: string; repo: string; [key: string]: string };
-};
 
 type PackRefIndexMetadata = {
   status: PackRefIndexStatus;

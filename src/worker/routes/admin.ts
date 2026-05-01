@@ -1,4 +1,3 @@
-import { AutoRouter } from "itty-router";
 import {
   createLogger,
   getRepoStub,
@@ -10,6 +9,16 @@ import { repoKey } from "@/worker/keys";
 import { verifyAuth } from "@/worker/auth";
 import { listReposForOwner, addRepoToOwner, removeRepoFromOwner } from "@/worker/registry";
 import { isJsonObject, safeParseJsonRequest, type JsonValue } from "@/shared/web";
+import type {
+  AppRouter,
+  OwnerParams,
+  RepoCommitParams,
+  RepoOidParams,
+  RepoPackParams,
+  RepoParams,
+  RouteArgs,
+} from "./hono";
+import { ownerRoute, repoCommitRoute, repoOidRoute, repoPackRoute, repoRoute } from "./hono";
 
 type RefPayload = {
   name: string;
@@ -20,10 +29,6 @@ type HeadPayload = {
   target: string;
   oid?: string;
   unborn?: boolean;
-};
-
-type AdminRouteRequest = Request & {
-  params: { owner: string; repo: string; [key: string]: string };
 };
 
 function isRefPayload(value: JsonValue): value is RefPayload {
@@ -39,13 +44,9 @@ function isHeadPayload(value: JsonValue | null): value is HeadPayload {
   );
 }
 
-export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
-  async function handleCompatCompactionPost(
-    request: AdminRouteRequest,
-    env: Env,
-    ctx: ExecutionContext
-  ) {
-    const { owner, repo } = request.params;
+export function registerAdminRoutes(router: AppRouter) {
+  async function handleCompatCompactionPost({ request, env, ctx, params }: RouteArgs<RepoParams>) {
+    const { owner, repo } = params;
     if (!(await verifyAuth(env, owner, request, true))) {
       return unauthorizedAdminBasic();
     }
@@ -89,8 +90,8 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     }
   }
 
-  async function handleCompatCompactionDelete(request: AdminRouteRequest, env: Env) {
-    const { owner, repo } = request.params;
+  async function handleCompatCompactionDelete({ request, env, params }: RouteArgs<RepoParams>) {
+    const { owner, repo } = params;
     if (!(await verifyAuth(env, owner, request, true))) {
       return unauthorizedAdminBasic();
     }
@@ -104,247 +105,270 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
   }
 
   // Owner registry: list current repos from KV
-  router.get(`/:owner/admin/registry`, async (request, env: Env) => {
-    const { owner } = request.params;
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const repos = await listReposForOwner(env, owner);
-    return json({ owner, repos });
-  });
+  router.get(
+    `/:owner/admin/registry`,
+    ownerRoute(async ({ request, env, params }) => {
+      const { owner } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
+      }
+      const repos = await listReposForOwner(env, owner);
+      return json({ owner, repos });
+    })
+  );
 
-  router.delete(`/:owner/:repo/admin/compact`, handleCompatCompactionDelete);
-  router.post(`/:owner/:repo/admin/compact`, handleCompatCompactionPost);
+  router.delete(`/:owner/:repo/admin/compact`, repoRoute(handleCompatCompactionDelete));
+  router.post(`/:owner/:repo/admin/compact`, repoRoute(handleCompatCompactionPost));
 
   // Owner registry: backfill/sync membership
   // POST body: { repos?: string[] } — if provided, (re)validate those; otherwise, revalidate existing KV entries
-  router.post(`/:owner/admin/registry/sync`, async (request, env: Env) => {
-    const { owner } = request.params as { owner: string };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const input = await safeParseJsonRequest(request);
-    let targets =
-      isJsonObject(input) && Array.isArray(input.repos)
-        ? input.repos.filter((repo): repo is string => typeof repo === "string" && repo.length > 0)
-        : [];
-    if (targets.length === 0) {
-      // revalidate existing KV entries only
-      targets = await listReposForOwner(env, owner);
-    }
-    const updated: { added: string[]; removed: string[]; unchanged: string[] } = {
-      added: [],
-      removed: [],
-      unchanged: [],
-    };
-    for (const repo of targets) {
-      const stub = getRepoStub(env, repoKey(owner, repo));
-      // consider present if refs has entries
-      let present = false;
-      try {
-        const refs = await stub.listRefs();
-        present = Array.isArray(refs) && refs.length > 0;
-      } catch {}
-      if (present) {
-        await addRepoToOwner(env, owner, repo);
-        updated.added.push(repo);
-      } else {
-        await removeRepoFromOwner(env, owner, repo);
-        updated.removed.push(repo);
+  router.post(
+    `/:owner/admin/registry/sync`,
+    ownerRoute(async ({ request, env, params }: RouteArgs<OwnerParams>) => {
+      const { owner } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
       }
-    }
-    return json({ owner, ...updated });
-  });
+      const input = await safeParseJsonRequest(request);
+      let targets =
+        isJsonObject(input) && Array.isArray(input.repos)
+          ? input.repos.filter(
+              (repo): repo is string => typeof repo === "string" && repo.length > 0
+            )
+          : [];
+      if (targets.length === 0) {
+        // revalidate existing KV entries only
+        targets = await listReposForOwner(env, owner);
+      }
+      const updated: { added: string[]; removed: string[]; unchanged: string[] } = {
+        added: [],
+        removed: [],
+        unchanged: [],
+      };
+      for (const repo of targets) {
+        const stub = getRepoStub(env, repoKey(owner, repo));
+        // consider present if refs has entries
+        let present = false;
+        try {
+          const refs = await stub.listRefs();
+          present = Array.isArray(refs) && refs.length > 0;
+        } catch {}
+        if (present) {
+          await addRepoToOwner(env, owner, repo);
+          updated.added.push(repo);
+        } else {
+          await removeRepoFromOwner(env, owner, repo);
+          updated.removed.push(repo);
+        }
+      }
+      return json({ owner, ...updated });
+    })
+  );
 
   // Admin refs
-  router.get(`/:owner/:repo/admin/refs`, async (request, env: Env) => {
-    const { owner, repo } = request.params;
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const refs = await stub.listRefs();
-      return json(refs);
-    } catch {
-      return json([]);
-    }
-  });
+  router.get(
+    `/:owner/:repo/admin/refs`,
+    repoRoute(async ({ request, env, params }) => {
+      const { owner, repo } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
+      }
+      const stub = getRepoStub(env, repoKey(owner, repo));
+      try {
+        const refs = await stub.listRefs();
+        return json(refs);
+      } catch {
+        return json([]);
+      }
+    })
+  );
 
-  router.put(`/:owner/:repo/admin/refs`, async (request, env: Env) => {
-    const { owner, repo } = request.params;
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    const body = await safeParseJsonRequest(request);
-    if (!Array.isArray(body)) {
-      return new Response("Invalid refs payload\n", { status: 400 });
-    }
-    const refs = body.filter(isRefPayload);
-    if (refs.length !== body.length) {
-      return new Response("Invalid refs payload\n", { status: 400 });
-    }
-    await stub.setRefs(refs);
-    return new Response("OK\n");
-  });
+  router.put(
+    `/:owner/:repo/admin/refs`,
+    repoRoute(async ({ request, env, params }) => {
+      const { owner, repo } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
+      }
+      const stub = getRepoStub(env, repoKey(owner, repo));
+      const body = await safeParseJsonRequest(request);
+      if (!Array.isArray(body)) {
+        return new Response("Invalid refs payload\n", { status: 400 });
+      }
+      const refs = body.filter(isRefPayload);
+      if (refs.length !== body.length) {
+        return new Response("Invalid refs payload\n", { status: 400 });
+      }
+      await stub.setRefs(refs);
+      return new Response("OK\n");
+    })
+  );
 
   // Admin head
-  router.get(`/:owner/:repo/admin/head`, async (request, env: Env) => {
-    const { owner, repo } = request.params;
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const head = await stub.getHead();
-      return json(head);
-    } catch {
-      return new Response("Not found\n", { status: 404 });
-    }
-  });
+  router.get(
+    `/:owner/:repo/admin/head`,
+    repoRoute(async ({ request, env, params }) => {
+      const { owner, repo } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
+      }
+      const stub = getRepoStub(env, repoKey(owner, repo));
+      try {
+        const head = await stub.getHead();
+        return json(head);
+      } catch {
+        return new Response("Not found\n", { status: 404 });
+      }
+    })
+  );
 
-  router.put(`/:owner/:repo/admin/head`, async (request, env: Env) => {
-    const { owner, repo } = request.params;
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    const body = await safeParseJsonRequest(request);
-    if (!isHeadPayload(body)) {
-      return new Response("Invalid head payload\n", { status: 400 });
-    }
-    await stub.setHead(body);
-    return new Response("OK\n");
-  });
+  router.put(
+    `/:owner/:repo/admin/head`,
+    repoRoute(async ({ request, env, params }) => {
+      const { owner, repo } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
+      }
+      const stub = getRepoStub(env, repoKey(owner, repo));
+      const body = await safeParseJsonRequest(request);
+      if (!isHeadPayload(body)) {
+        return new Response("Invalid head payload\n", { status: 400 });
+      }
+      await stub.setHead(body);
+      return new Response("OK\n");
+    })
+  );
 
   // Debug: dump DO state (JSON)
-  router.get(`/:owner/:repo/admin/debug-state`, async (request, env: Env) => {
-    const { owner, repo } = request.params as { owner: string; repo: string };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const state = await stub.debugState();
-      return json(state);
-    } catch {
-      return json({});
-    }
-  });
+  router.get(
+    `/:owner/:repo/admin/debug-state`,
+    repoRoute(async ({ request, env, params }) => {
+      const { owner, repo } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
+      }
+      const stub = getRepoStub(env, repoKey(owner, repo));
+      try {
+        const state = await stub.debugState();
+        return json(state);
+      } catch {
+        return json({});
+      }
+    })
+  );
 
   // Debug: check a specific commit's tree presence
-  router.get(`/:owner/:repo/admin/debug-commit/:commit`, async (request, env: Env) => {
-    const { owner, repo, commit } = request.params as {
-      owner: string;
-      repo: string;
-      commit: string;
-    };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    if (!isValidOid(commit)) {
-      return new Response("Invalid commit\n", { status: 400 });
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const result = await stub.debugCheckCommit(commit);
-      return json(result);
-    } catch (e) {
-      return json({ error: String(e) }, 500);
-    }
-  });
+  router.get(
+    `/:owner/:repo/admin/debug-commit/:commit`,
+    repoCommitRoute(async ({ request, env, params }: RouteArgs<RepoCommitParams>) => {
+      const { owner, repo, commit } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
+      }
+      if (!isValidOid(commit)) {
+        return new Response("Invalid commit\n", { status: 400 });
+      }
+      const stub = getRepoStub(env, repoKey(owner, repo));
+      try {
+        const result = await stub.debugCheckCommit(commit);
+        return json(result);
+      } catch (e) {
+        return json({ error: String(e) }, 500);
+      }
+    })
+  );
 
   // Debug: check if an OID exists in loose, R2 loose, and/or packs
-  router.get(`/:owner/:repo/admin/debug-oid/:oid`, async (request, env: Env) => {
-    const { owner, repo, oid } = request.params as {
-      owner: string;
-      repo: string;
-      oid: string;
-    };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    if (!isValidOid(oid)) {
-      return new Response("Invalid OID\n", { status: 400 });
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const result = await stub.debugCheckOid(oid);
-      return json(result);
-    } catch (e) {
-      return json({ error: String(e) }, 500);
-    }
-  });
+  router.get(
+    `/:owner/:repo/admin/debug-oid/:oid`,
+    repoOidRoute(async ({ request, env, params }: RouteArgs<RepoOidParams>) => {
+      const { owner, repo, oid } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
+      }
+      if (!isValidOid(oid)) {
+        return new Response("Invalid OID\n", { status: 400 });
+      }
+      const stub = getRepoStub(env, repoKey(owner, repo));
+      try {
+        const result = await stub.debugCheckOid(oid);
+        return json(result);
+      } catch (e) {
+        return json({ error: String(e) }, 500);
+      }
+    })
+  );
 
   // Admin: Remove a specific pack file
-  router.delete(`/:owner/:repo/admin/pack/:packKey`, async (request, env: Env) => {
-    const { owner, repo, packKey } = request.params as {
-      owner: string;
-      repo: string;
-      packKey: string;
-    };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-
-    if (!packKey) {
-      return json({ error: "Pack key is required" }, 400);
-    }
-
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const result = await stub.removePack(packKey);
-      if (result.rejected) {
-        const error =
-          result.rejected === "active-pack"
-            ? "Active packs cannot be deleted until they are superseded"
-            : "Only superseded packs can be deleted through this endpoint";
-        return json(
-          {
-            ok: false,
-            error,
-            ...result,
-          },
-          409
-        );
+  router.delete(
+    `/:owner/:repo/admin/pack/:packKey`,
+    repoPackRoute(async ({ request, env, params }: RouteArgs<RepoPackParams>) => {
+      const { owner, repo, packKey } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
       }
-      return json({ ok: result.removed, ...result });
-    } catch (e) {
-      return json({ ok: false, error: String(e) }, 500);
-    }
-  });
+
+      if (!packKey) {
+        return json({ error: "Pack key is required" }, 400);
+      }
+
+      const stub = getRepoStub(env, repoKey(owner, repo));
+      try {
+        const result = await stub.removePack(packKey);
+        if (result.rejected) {
+          const error =
+            result.rejected === "active-pack"
+              ? "Active packs cannot be deleted until they are superseded"
+              : "Only superseded packs can be deleted through this endpoint";
+          return json(
+            {
+              ok: false,
+              error,
+              ...result,
+            },
+            409
+          );
+        }
+        return json({ ok: result.removed, ...result });
+      } catch (e) {
+        return json({ ok: false, error: String(e) }, 500);
+      }
+    })
+  );
 
   // Admin: DANGEROUS - completely purge repo (all R2 objects + DO storage)
-  router.delete(`/:owner/:repo/admin/purge`, async (request, env: Env) => {
-    const { owner, repo } = request.params as { owner: string; repo: string };
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
+  router.delete(
+    `/:owner/:repo/admin/purge`,
+    repoRoute(async ({ request, env, params }) => {
+      const { owner, repo } = params;
+      if (!(await verifyAuth(env, owner, request, true))) {
+        return unauthorizedAdminBasic();
+      }
 
-    // Require explicit confirmation
-    const body = await safeParseJsonRequest(request);
-    const confirm = isJsonObject(body) && typeof body.confirm === "string" ? body.confirm : "";
-    if (confirm !== `purge-${owner}/${repo}`) {
-      return json(
-        {
-          error: "Confirmation required",
-          hint: `Set confirm to "purge-${owner}/${repo}"`,
-        },
-        400
-      );
-    }
+      // Require explicit confirmation
+      const body = await safeParseJsonRequest(request);
+      const confirm = isJsonObject(body) && typeof body.confirm === "string" ? body.confirm : "";
+      if (confirm !== `purge-${owner}/${repo}`) {
+        return json(
+          {
+            error: "Confirmation required",
+            hint: `Set confirm to "purge-${owner}/${repo}"`,
+          },
+          400
+        );
+      }
 
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    try {
-      const result = await stub.purgeRepo();
+      const stub = getRepoStub(env, repoKey(owner, repo));
+      try {
+        const result = await stub.purgeRepo();
 
-      // Remove from owner registry
-      await removeRepoFromOwner(env, owner, repo);
+        // Remove from owner registry
+        await removeRepoFromOwner(env, owner, repo);
 
-      return json({ ok: true, ...result });
-    } catch (e) {
-      return json({ ok: false, error: String(e) }, 500);
-    }
-  });
+        return json({ ok: true, ...result });
+      } catch (e) {
+        return json({ ok: false, error: String(e) }, 500);
+      }
+    })
+  );
 }

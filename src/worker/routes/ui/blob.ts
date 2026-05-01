@@ -9,14 +9,14 @@ import {
   bytesToText,
   getHighlightLangsForBlobSmart,
 } from "@/shared/web";
-import { renderUiView } from "@/client/server/render";
 import { handleError } from "@/client/server/error";
 import { repoKey } from "@/worker/keys";
 import { badRequest } from "./helpers";
-import type { RouteRequest } from "./helpers";
+import type { RepoParams, RouteArgs } from "../hono";
+import { renderUiDocumentResponse } from "../uiResponse";
 
-export async function handleBlob(request: RouteRequest, env: Env, ctx: ExecutionContext) {
-  const { owner, repo } = request.params;
+export async function handleBlob({ request, env, ctx, params }: RouteArgs<RepoParams>) {
+  const { owner, repo } = params;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -77,29 +77,26 @@ export async function handleBlob(request: RouteRequest, env: Env, ctx: Execution
       const sizeStr = formatSize(result.size || 0);
       const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(fileName)}`;
       const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&download=1&name=${encodeURIComponent(fileName)}`;
-      const html = await renderUiView(env, "blob", {
-        title: `${fileName} · ${owner}/${repo}`,
-        owner,
-        repo,
-        refEnc: encodeURIComponent(ref),
-        fileName,
-        tooLarge: true,
-        sizeStr,
-        viewRawHref,
-        rawHref,
-        breadcrumbs,
-        parentHref,
-      });
-      if (!html) {
-        return new Response("Failed to render view", { status: 500 });
-      }
-      return new Response(html, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "react-ssr",
+      return renderUiDocumentResponse(
+        env,
+        "blob",
+        {
+          title: `${fileName} · ${owner}/${repo}`,
+          owner,
+          repo,
+          refEnc: encodeURIComponent(ref),
+          fileName,
+          tooLarge: true,
+          sizeStr,
+          viewRawHref,
+          rawHref,
+          breadcrumbs,
+          parentHref,
         },
-      });
+        {
+          failureBody: "Failed to render view",
+        }
+      );
     }
 
     // Binary vs text
@@ -160,16 +157,8 @@ export async function handleBlob(request: RouteRequest, env: Env, ctx: Execution
       }
     }
 
-    const html = await renderUiView(env, "blob", templateData);
-    if (!html) {
-      return new Response("Failed to render view", { status: 500 });
-    }
-    return new Response(html, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "react-ssr",
-      },
+    return renderUiDocumentResponse(env, "blob", templateData, {
+      failureBody: "Failed to render view",
     });
   } catch (e: any) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
