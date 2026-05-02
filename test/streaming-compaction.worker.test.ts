@@ -20,6 +20,7 @@ import { seedPackFirstRepo } from "./util/pack-first";
 import { indexTestPack } from "./util/test-indexer";
 import { decodeReportStatus, promoteToStreaming } from "./util/streaming-helpers";
 import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
+import { createQueueSendResponse } from "./util/queue";
 import {
   compactOnce,
   deleteSupersededOnce,
@@ -47,7 +48,9 @@ describe("streaming compaction", () => {
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
 
-    const sendSpy = vi.spyOn(env.REPO_MAINT_QUEUE, "send").mockImplementation(async () => {});
+    const sendSpy = vi
+      .spyOn(env.REPO_MAINT_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
     try {
       await pushOverflowingStreamingHistory({
         owner,
@@ -116,7 +119,9 @@ describe("streaming compaction", () => {
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
 
-    const sendSpy = vi.spyOn(env.REPO_MAINT_QUEUE, "send").mockImplementation(async () => {});
+    const sendSpy = vi
+      .spyOn(env.REPO_MAINT_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
     try {
       await pushOverflowingStreamingHistory({
         owner,
@@ -161,7 +166,9 @@ describe("streaming compaction", () => {
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
 
-    const sendSpy = vi.spyOn(env.REPO_MAINT_QUEUE, "send").mockImplementation(async () => {});
+    const sendSpy = vi
+      .spyOn(env.REPO_MAINT_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
     try {
       await pushOverflowingStreamingHistory({
         owner,
