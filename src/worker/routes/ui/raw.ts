@@ -8,10 +8,14 @@ import {
   getContentTypeFromName,
 } from "@/shared/web";
 import { repoKey } from "@/worker/keys";
-import type { RepoParams, RouteArgs } from "../hono";
+import type { AppContext } from "../hono";
 
-export async function handleRaw({ request, env, ctx, params }: RouteArgs<RepoParams>) {
-  const { owner, repo } = params;
+export async function handleRaw(c: AppContext<"/:owner/:repo/raw">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return new Response("Bad Request\n", { status: 400 });
   }
@@ -46,8 +50,12 @@ export async function handleRaw({ request, env, ctx, params }: RouteArgs<RepoPar
   });
 }
 
-export async function handleRawPath({ request, env, ctx, params }: RouteArgs<RepoParams>) {
-  const { owner, repo } = params;
+export async function handleRawPath(c: AppContext<"/:owner/:repo/rawpath">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return new Response("Bad Request\n", { status: 400 });
   }
@@ -89,7 +97,7 @@ export async function handleRawPath({ request, env, ctx, params }: RouteArgs<Rep
     if (download) headers.set("Content-Disposition", `attachment; filename="${name}"`);
     else headers.set("Content-Disposition", `inline; filename="${name}"`);
     return new Response(streamResponse.body, { status: streamResponse.status, headers });
-  } catch (e: any) {
+  } catch {
     return new Response("Not found\n", { status: 404 });
   }
 }

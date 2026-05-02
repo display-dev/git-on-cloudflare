@@ -12,11 +12,15 @@ import {
 import { handleError } from "@/client/server/error";
 import { repoKey } from "@/worker/keys";
 import { badRequest } from "./helpers";
-import type { RepoParams, RouteArgs } from "../hono";
+import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 
-export async function handleBlob({ request, env, ctx, params }: RouteArgs<RepoParams>) {
-  const { owner, repo } = params;
+export async function handleBlob(c: AppContext<"/:owner/:repo/blob">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -160,7 +164,7 @@ export async function handleBlob({ request, env, ctx, params }: RouteArgs<RepoPa
     return renderUiDocumentResponse(env, "blob", templateData, {
       failureBody: "Failed to render view",
     });
-  } catch (e: any) {
+  } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
       owner,
       repo,

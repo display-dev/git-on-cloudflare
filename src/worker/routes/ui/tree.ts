@@ -16,12 +16,16 @@ import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { repoKey } from "@/worker/keys";
 import { badRequest } from "./helpers";
-import type { RepoParams, RouteArgs } from "../hono";
+import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 import type { ReadPathResult } from "@/worker/git";
 
-export async function handleTree({ request, env, ctx, params }: RouteArgs<RepoParams>) {
-  const { owner, repo } = params;
+export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -199,7 +203,7 @@ export async function handleTree({ request, env, ctx, params }: RouteArgs<RepoPa
         }
       );
     }
-  } catch (e: any) {
+  } catch (e) {
     return handleError(env, e, `${owner}/${repo} · Tree`, {
       owner,
       repo,

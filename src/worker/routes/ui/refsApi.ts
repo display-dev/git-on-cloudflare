@@ -3,10 +3,14 @@ import { classifyRef, formatRefOption } from "@/shared/git/ref-display";
 import { isValidOwnerRepo } from "@/shared/web";
 import { repoKey } from "@/worker/keys";
 import { loadHeadAndRefsCached } from "./helpers";
-import type { RepoParams, RouteArgs } from "../hono";
+import type { AppContext } from "../hono";
 
-export async function handleRefsApi({ request, env, ctx, params }: RouteArgs<RepoParams>) {
-  const { owner, repo } = params;
+export async function handleRefsApi(c: AppContext<"/:owner/:repo/api/refs">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return new Response(JSON.stringify({ branches: [], tags: [] }), {
       status: 400,
@@ -25,9 +29,9 @@ export async function handleRefsApi({ request, env, ctx, params }: RouteArgs<Rep
         "Cache-Control": "public, max-age=60",
       },
     });
-  } catch (e: any) {
+  } catch (e) {
     return new Response(
-      JSON.stringify({ branches: [], tags: [], error: String(e?.message || e) }),
+      JSON.stringify({ branches: [], tags: [], error: e instanceof Error ? e.message : String(e) }),
       {
         status: 500,
         headers: { "Content-Type": "application/json" },

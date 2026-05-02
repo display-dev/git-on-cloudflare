@@ -12,11 +12,15 @@ import {
   loadHeadAndRefsCached,
   type DebugState,
 } from "./helpers";
-import type { RepoParams, RouteArgs } from "../hono";
+import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 
-export async function handleAdminPage({ request, env, ctx, params }: RouteArgs<RepoParams>) {
-  const { owner, repo } = params;
+export async function handleAdminPage(c: AppContext<"/:owner/:repo/admin">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
 
   // Validate parameters
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {

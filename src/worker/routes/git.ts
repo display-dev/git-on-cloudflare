@@ -17,8 +17,7 @@ import { repoKey } from "@/worker/keys";
 import { verifyAuth } from "@/worker/auth";
 import { addRepoToOwner, removeRepoFromOwner } from "@/worker/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
-import type { AppRouter, RepoParams, RouteArgs } from "./hono";
-import { repoRoute } from "./hono";
+import type { AppRouter } from "./hono";
 
 async function applyReceiveSideEffects(env: Env, repoId: string, headers: Headers): Promise<void> {
   try {
@@ -215,37 +214,33 @@ async function handleReceivePackPOST(
  */
 export function registerGitRoutes(router: AppRouter) {
   // Git info/refs
-  router.get(
-    `/:owner/:repo/info/refs`,
-    repoRoute(async ({ request, env, params }) => {
-      const u = new URL(request.url);
-      const service = u.searchParams.get("service");
-      if (service === "git-upload-pack" || service === "git-receive-pack") {
-        const { owner, repo } = params;
-        return await capabilityAdvertisement(env, service, repoKey(owner, repo));
-      }
-      return new Response("Missing or unsupported service\n", { status: 400 });
-    })
-  );
+  router.get(`/:owner/:repo/info/refs`, async (c) => {
+    const request = c.req.raw;
+    const u = new URL(request.url);
+    const service = u.searchParams.get("service");
+    if (service === "git-upload-pack" || service === "git-receive-pack") {
+      const owner = c.req.param("owner");
+      const repo = c.req.param("repo");
+      return await capabilityAdvertisement(c.env, service, repoKey(owner, repo));
+    }
+    return new Response("Missing or unsupported service\n", { status: 400 });
+  });
 
   // git-upload-pack (POST)
-  router.post(
-    `/:owner/:repo/git-upload-pack`,
-    repoRoute(async ({ request, env, ctx, params }) => {
-      const { owner, repo } = params;
-      return handleUploadPackPOST(env, repoKey(owner, repo), request, ctx);
-    })
-  );
+  router.post(`/:owner/:repo/git-upload-pack`, async (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    return handleUploadPackPOST(c.env, repoKey(owner, repo), c.req.raw, c.executionCtx);
+  });
 
   // git-receive-pack (POST)
-  router.post(
-    `/:owner/:repo/git-receive-pack`,
-    repoRoute(async ({ request, env, ctx, params }: RouteArgs<RepoParams>) => {
-      const { owner, repo } = params;
-      if (!(await verifyAuth(env, owner, request, false))) {
-        return unauthorizedBasic();
-      }
-      return handleReceivePackPOST(env, repoKey(owner, repo), request, ctx);
-    })
-  );
+  router.post(`/:owner/:repo/git-receive-pack`, async (c) => {
+    const request = c.req.raw;
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    if (!(await verifyAuth(c.env, owner, request, false))) {
+      return unauthorizedBasic();
+    }
+    return handleReceivePackPOST(c.env, repoKey(owner, repo), request, c.executionCtx);
+  });
 }

@@ -13,11 +13,15 @@ import { repoKey } from "@/worker/keys";
 import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { badRequest } from "./helpers";
-import type { RepoOidParams, RepoParams, RouteArgs } from "../hono";
+import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 
-export async function handleCommits({ request, env, ctx, params }: RouteArgs<RepoParams>) {
-  const { owner, repo } = params;
+export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -117,7 +121,7 @@ export async function handleCommits({ request, env, ctx, params }: RouteArgs<Rep
       },
       { failureBody: "Failed to render view" }
     );
-  } catch (e: any) {
+  } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
       owner,
       repo,
@@ -127,12 +131,15 @@ export async function handleCommits({ request, env, ctx, params }: RouteArgs<Rep
 }
 
 export async function handleCommitFragments({
-  request,
+  req,
   env,
-  ctx,
-  params,
-}: RouteArgs<RepoOidParams>) {
-  const { owner, repo, oid } = params;
+  executionCtx,
+}: AppContext<"/:owner/:repo/commits/fragments/:oid">) {
+  const request = req.raw;
+  const ctx = executionCtx;
+  const owner = req.param("owner");
+  const repo = req.param("repo");
+  const oid = req.param("oid");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -175,7 +182,7 @@ export async function handleCommitFragments({
         "X-Page-Renderer": "react-fragment-json",
       },
     });
-  } catch (e: any) {
+  } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
       owner,
       repo,
@@ -184,8 +191,13 @@ export async function handleCommitFragments({
   }
 }
 
-export async function handleCommitDiff({ request, env, ctx, params }: RouteArgs<RepoOidParams>) {
-  const { owner, repo, oid } = params;
+export async function handleCommitDiff(c: AppContext<"/:owner/:repo/commit/:oid/diff">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
+  const oid = c.req.param("oid");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -228,7 +240,7 @@ export async function handleCommitDiff({ request, env, ctx, params }: RouteArgs<
         "X-Page-Renderer": "react-fragment-json",
       },
     });
-  } catch (e: any) {
+  } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
       owner,
       repo,
@@ -238,8 +250,13 @@ export async function handleCommitDiff({ request, env, ctx, params }: RouteArgs<
   }
 }
 
-export async function handleCommit({ request, env, ctx, params }: RouteArgs<RepoOidParams>) {
-  const { owner, repo, oid } = params;
+export async function handleCommit(c: AppContext<"/:owner/:repo/commit/:oid">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
+  const oid = c.req.param("oid");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
@@ -302,7 +319,7 @@ export async function handleCommit({ request, env, ctx, params }: RouteArgs<Repo
       },
       { failureBody: "Failed to render view" }
     );
-  } catch (e: any) {
+  } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
       owner,
       repo,

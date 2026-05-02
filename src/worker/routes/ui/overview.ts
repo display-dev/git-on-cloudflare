@@ -8,11 +8,12 @@ import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { repoKey } from "@/worker/keys";
 import { badRequest, loadHeadAndRefsCached } from "./helpers";
-import type { OwnerParams, RepoParams, RouteArgs } from "../hono";
+import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 
-export async function handleOwnerOverview({ env, params }: RouteArgs<OwnerParams>) {
-  const { owner } = params;
+export async function handleOwnerOverview(c: AppContext<"/:owner">) {
+  const env = c.env;
+  const owner = c.req.param("owner");
   if (!isValidOwnerRepo(owner)) {
     return badRequest(env, "Invalid owner", "Owner contains invalid characters or length");
   }
@@ -32,8 +33,12 @@ export async function handleOwnerOverview({ env, params }: RouteArgs<OwnerParams
   );
 }
 
-export async function handleRepoOverview({ request, env, ctx, params }: RouteArgs<RepoParams>) {
-  const { owner, repo } = params;
+export async function handleRepoOverview(c: AppContext<"/:owner/:repo">) {
+  const request = c.req.raw;
+  const env = c.env;
+  const ctx = c.executionCtx;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
