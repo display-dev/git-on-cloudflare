@@ -7,7 +7,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "npm run db:migrate && npm run build && wrangler deploy",
     "test": "vitest run --config vitest.unit.config.ts",
     "test:workers": "vitest run --config vitest.config.ts",
     "test:auth": "vitest run --config vitest.config.ts test/auth.worker.test.ts",
@@ -16,7 +16,11 @@
     "types:generate": "wrangler types --env-file .dev.vars.example",
     "typecheck": "npm run types:generate && tsc -p test/tsconfig.json --noEmit",
     "cf-typegen": "npm run types:generate",
-    "db:gen": "drizzle-kit generate --config drizzle-repo-do.config.ts"
+    "db:generate:repo": "drizzle-kit generate --config drizzle-repo-do.config.ts",
+    "db:generate:d1": "drizzle-kit generate --config drizzle-d1.config.ts",
+    "db:generate": "npm run db:generate:repo && npm run db:generate:d1",
+    "db:migrate": "wrangler d1 migrations apply git-on-cloudflare --remote",
+    "db:migrate:local": "wrangler d1 migrations apply git-on-cloudflare --local"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.30.3",
@@ -43,6 +47,7 @@
     "hono": "^4.12.16",
     "lucide-react": "^1.7.0",
     "marked": "^18.0.0",
+    "openid-client": "^6.8.4",
     "pako": "^2.1.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

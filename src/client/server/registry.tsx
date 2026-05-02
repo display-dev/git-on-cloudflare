@@ -1,8 +1,10 @@
 import type { ReactElement } from "react";
 
 import { clientEntrypoints, type ClientEntrypoint } from "@/client/entrypoints";
+import { AccountPage, type AccountPageProps } from "@/client/pages/AccountPage";
 import { AdminPage, type AdminPageProps } from "@/client/pages/AdminPage";
 import { AuthPage } from "@/client/pages/AuthPage";
+import { AuthSignInPage, type AuthSignInPageProps } from "@/client/pages/AuthSignInPage";
 import { BlobPage, type BlobPageProps } from "@/client/pages/BlobPage";
 import { CommitPage, type CommitPageProps } from "@/client/pages/CommitPage";
 import { CommitsPage, type CommitsPageProps } from "@/client/pages/CommitsPage";
@@ -75,9 +77,21 @@ const views: Record<string, ViewDefinition> = {
     clientEntrypoints: [clientEntrypoints.shell, clientEntrypoints.commitsPage],
     render: renderWithProps((props: CommitsPageProps) => <CommitsPage {...props} />),
   },
-  auth: {
+  "auth-signin": {
     kind: "document",
-    title: "Auth · git-on-cloudflare",
+    title: "Sign in · git-on-cloudflare",
+    clientEntrypoints: [clientEntrypoints.shell],
+    render: renderWithProps((props: AuthSignInPageProps) => <AuthSignInPage {...props} />),
+  },
+  account: {
+    kind: "document",
+    title: "Account · git-on-cloudflare",
+    clientEntrypoints: [clientEntrypoints.shell, clientEntrypoints.accountPage],
+    render: renderWithProps((props: AccountPageProps) => <AccountPage {...props} />),
+  },
+  "auth-legacy": {
+    kind: "document",
+    title: "Legacy auth · git-on-cloudflare",
     clientEntrypoints: [clientEntrypoints.shell, clientEntrypoints.authPage],
     render: () => <AuthPage />,
   },

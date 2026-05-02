@@ -11,6 +11,7 @@ import {
 } from "@/shared/web";
 import { handleError } from "@/client/server/error";
 import { repoKey } from "@/worker/keys";
+import { loadViewer } from "@/worker/auth/session";
 import { badRequest } from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
@@ -49,6 +50,7 @@ export async function handleBlob(c: AppContext<"/:owner/:repo/blob">) {
     const result = await readPath(env, repoId, ref, path, cacheCtx);
     if (result.type !== "blob") return new Response("Not a blob\n", { status: 400 });
     const fileName = path || result.oid;
+    const viewer = await loadViewer(c);
 
     // Generate breadcrumbs and parent link (same pattern as tree.ts)
     const parts = (path || "").split("/").filter(Boolean);
@@ -99,6 +101,7 @@ export async function handleBlob(c: AppContext<"/:owner/:repo/blob">) {
         },
         {
           failureBody: "Failed to render view",
+          viewer,
         }
       );
     }
@@ -163,6 +166,7 @@ export async function handleBlob(c: AppContext<"/:owner/:repo/blob">) {
 
     return renderUiDocumentResponse(env, "blob", templateData, {
       failureBody: "Failed to render view",
+      viewer,
     });
   } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {

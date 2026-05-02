@@ -15,6 +15,7 @@ import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { repoKey } from "@/worker/keys";
+import { loadViewer } from "@/worker/auth/session";
 import { badRequest } from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
@@ -74,14 +75,20 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
   // Handle missing tree/blob result gracefully (e.g., non-existent repo or path)
   if (!result) {
     try {
-      const errHtml = await renderUiView(env, "error", {
-        title: `${owner}/${repo} · Tree`,
-        message: "Not found",
-        owner,
-        repo,
-        refEnc: encodeURIComponent(ref),
-        path,
-      });
+      const viewer = await loadViewer(c);
+      const errHtml = await renderUiView(
+        env,
+        "error",
+        {
+          title: `${owner}/${repo} · Tree`,
+          message: "Not found",
+          owner,
+          repo,
+          refEnc: encodeURIComponent(ref),
+          path,
+        },
+        { viewer }
+      );
       if (errHtml) {
         return new Response(errHtml, {
           status: 404,
@@ -156,6 +163,7 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
           ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
           : null;
       const progress = await getRepoActivity(env, repoId);
+      const viewer = await loadViewer(c);
       return renderUiDocumentResponse(
         env,
         "tree",
@@ -171,6 +179,7 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
         },
         {
           failureBody: "Failed to render view",
+          viewer,
         }
       );
     } else {
@@ -182,6 +191,7 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
       const langs = getHighlightLangsForBlobSmart(title, text);
       const codeLang = langs[0] || null;
       const progress = await getRepoActivity(env, repoId);
+      const viewer = await loadViewer(c);
       return renderUiDocumentResponse(
         env,
         "blob",
@@ -200,6 +210,7 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
         },
         {
           failureBody: "Failed to render view",
+          viewer,
         }
       );
     }

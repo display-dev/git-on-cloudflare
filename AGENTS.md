@@ -179,10 +179,10 @@ npx vitest run --config vitest.config.ts test/auth.worker.test.ts
 
 ```bash
 npm run cf-typegen
-npm run db:gen
+npm run db:generate
 ```
 
-Do not edit generated migrations under `drizzle/repo-do/` manually. Treat `src/worker/do/repo/db/schema.ts` as the source of truth: make the schema change there first, then run `npm run db:gen` to generate the migration.
+Do not edit generated migrations under `drizzle/repo-do/` manually. Treat `src/worker/do/repo/db/schema.ts` as the source of truth: make the schema change there first, then run `npm run db:generate` to generate the migration.
 
 ## Validation By Change Type
 
@@ -195,7 +195,7 @@ Do not edit generated migrations under `drizzle/repo-do/` manually. Treat `src/w
 - UI-only SSR/component changes:
   run `npm run typecheck`; if route behavior changed, add relevant worker coverage
 - SQLite schema or DAL changes:
-  run `npm run db:gen`, `npm run typecheck`, and the worker tests that cover the affected flow
+  run `npm run db:generate`, `npm run typecheck`, and the worker tests that cover the affected flow
 
 ## UI Notes
 

@@ -1,0 +1,370 @@
+import { applyD1Migrations, env, SELF } from "cloudflare:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { createDb } from "@/worker/db/d1/client";
+import {
+  findNamespaceBySlug,
+  findUserByTesseraSub,
+  insertMembershipIfMissing,
+  listNamespacesForUser,
+} from "@/worker/db/d1/dal";
+import { __test as oidcTest, sealTransaction } from "@/worker/auth/oidc";
+import { OIDC_TX_COOKIE_NAME, SESSION_COOKIE_NAME } from "@/worker/auth/cookies";
+
+import { fakeProvider } from "./util/oidcFake";
+import { readAppD1Migrations } from "./util/d1Migrations";
+
+beforeAll(async () => {
+  await applyD1Migrations(env.DB, readAppD1Migrations());
+});
+
+const REDIRECT_URI = "https://example.com/auth/callback";
+
+function preloadProvider() {
+  oidcTest.setProviderForTesting(
+    {
+      issuer: env.TESSERA_OIDC_ISSUER,
+      clientId: env.TESSERA_OIDC_CLIENT_ID,
+      clientSecret: env.TESSERA_OIDC_CLIENT_SECRET,
+    },
+    fakeProvider({
+      authorizationEndpoint: "https://auth.example.com/oauth2/authorize",
+      tokenEndpoint: "https://auth.example.com/oauth2/token",
+      jwksUri: "https://auth.example.com/.well-known/jwks.json",
+    })
+  );
+}
+
+async function buildSealedCookie(state: string, nonce: string, codeVerifier: string) {
+  const sealed = await sealTransaction(env.TESSERA_OIDC_CLIENT_SECRET, {
+    state,
+    nonce,
+    codeVerifier,
+    redirectUri: REDIRECT_URI,
+    createdAt: Date.now(),
+  });
+  return `${OIDC_TX_COOKIE_NAME}=${sealed}`;
+}
+
+type FakeClaims = { sub: string; preferred_username?: string };
+
+function stubGrantWithClaims(claims: FakeClaims, options?: { rejectAs?: "client" | "other" }) {
+  oidcTest.setAuthorizationCodeGrantImpl(async () => {
+    if (options?.rejectAs === "client") {
+      throw new (await import("openid-client")).ClientError("invalid_grant", { cause: claims });
+    }
+    if (options?.rejectAs === "other") {
+      throw new Error("network down");
+    }
+    const tokens = {
+      access_token: "fake-access",
+      token_type: "Bearer",
+      claims: () => ({ sub: claims.sub, preferred_username: claims.preferred_username }),
+    } as unknown as Awaited<ReturnType<typeof import("openid-client").authorizationCodeGrant>>;
+    return tokens;
+  });
+}
+
+async function callCallback(args: { state: string; cookie?: string; code?: string }) {
+  const url = new URL("https://example.com/auth/callback");
+  url.searchParams.set("code", args.code ?? "fake-code");
+  url.searchParams.set("state", args.state);
+  return await SELF.fetch(url.toString(), {
+    redirect: "manual",
+    headers: args.cookie ? { Cookie: args.cookie } : undefined,
+  });
+}
+
+beforeEach(() => {
+  preloadProvider();
+});
+
+afterEach(() => {
+  oidcTest.clearProviderCache();
+  oidcTest.setAuthorizationCodeGrantImpl(null);
+});
+
+describe("/auth/callback", () => {
+  it("creates user, namespace, membership, and session for a fresh sub with valid pref-name", async () => {
+    const sub = "sub-fresh-1";
+    const state = "state-fresh-1";
+    stubGrantWithClaims({ sub, preferred_username: "fresh-rachel" });
+    const cookie = await buildSealedCookie(state, "nonce-1", "verifier-1");
+    const res = await callCallback({ state, cookie });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/auth/account");
+    const cookies = res.headers.get("set-cookie") ?? "";
+    expect(cookies).toContain(`${SESSION_COOKIE_NAME}=goc_sess_`);
+    const db = createDb(env.DB);
+    const user = await findUserByTesseraSub(db, sub);
+    expect(user).toBeDefined();
+    const namespace = await findNamespaceBySlug(db, "fresh-rachel");
+    expect(namespace).toBeDefined();
+    expect(namespace!.createdBy).toBe(user!.id);
+    const namespaces = await listNamespacesForUser(db, user!.id);
+    expect(namespaces.map((row) => row.slug)).toEqual(["fresh-rachel"]);
+  });
+
+  it("creates only user+session when pref-name is taken by another user", async () => {
+    const occupant = "user-occupant";
+    const db = createDb(env.DB);
+    // Seed an existing namespace owned by an unrelated user.
+    await db.batch([
+      db.insert((await import("@/worker/db/d1/schema")).users).values({
+        id: occupant,
+        tesseraSub: "sub-occupant",
+        createdAt: Date.now(),
+      }),
+      db.insert((await import("@/worker/db/d1/schema")).namespaces).values({
+        id: "ns-taken",
+        slug: "taken",
+        createdBy: occupant,
+        createdAt: Date.now(),
+      }),
+    ]);
+    const sub = "sub-loser";
+    const state = "state-taken";
+    stubGrantWithClaims({ sub, preferred_username: "taken" });
+    const cookie = await buildSealedCookie(state, "nonce-2", "verifier-2");
+    const res = await callCallback({ state, cookie });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/auth/account");
+    const dbAfter = createDb(env.DB);
+    const user = await findUserByTesseraSub(dbAfter, sub);
+    expect(user).toBeDefined();
+    expect(user!.id).not.toBe(occupant);
+    const namespace = await findNamespaceBySlug(dbAfter, "taken");
+    expect(namespace?.createdBy).toBe(occupant);
+    expect((await listNamespacesForUser(dbAfter, user!.id)).length).toBe(0);
+  });
+
+  it("creates only user+session when pref-name is invalid", async () => {
+    const sub = "sub-invalid-1";
+    const state = "state-invalid";
+    stubGrantWithClaims({ sub, preferred_username: "Invalid_Slug!" });
+    const cookie = await buildSealedCookie(state, "nonce-3", "verifier-3");
+    const res = await callCallback({ state, cookie });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/auth/account");
+    const db = createDb(env.DB);
+    const user = await findUserByTesseraSub(db, sub);
+    expect(user).toBeDefined();
+    expect((await listNamespacesForUser(db, user!.id)).length).toBe(0);
+  });
+
+  it("creates only session for a returning user even if pref-name is now valid+free", async () => {
+    const sub = "sub-returning";
+    const state1 = "state-r1";
+    stubGrantWithClaims({ sub });
+    const cookie1 = await buildSealedCookie(state1, "n1", "v1");
+    expect((await callCallback({ state: state1, cookie: cookie1 })).status).toBe(302);
+    const db = createDb(env.DB);
+    const user = await findUserByTesseraSub(db, sub);
+    expect(user).toBeDefined();
+    // Second sign-in tries to claim a free name; ensure it does NOT create
+    // a namespace because the user already exists.
+    stubGrantWithClaims({ sub, preferred_username: "newslug" });
+    const state2 = "state-r2";
+    const cookie2 = await buildSealedCookie(state2, "n2", "v2");
+    const res = await callCallback({ state: state2, cookie: cookie2 });
+    expect(res.status).toBe(302);
+    const namespace = await findNamespaceBySlug(db, "newslug");
+    expect(namespace).toBeUndefined();
+    expect((await listNamespacesForUser(db, user!.id)).length).toBe(0);
+  });
+
+  it("clears the OIDC transaction cookie when runtime config is missing", async () => {
+    const cookie = await buildSealedCookie("state-cfg", "n", "v");
+    // Force loadOidcConfig() into the "missing_client_secret" branch by
+    // blanking the binding for the duration of this test. Restoring at the
+    // end so other tests still have a complete config.
+    const original = env.TESSERA_OIDC_CLIENT_SECRET;
+    env.TESSERA_OIDC_CLIENT_SECRET = "";
+    try {
+      const url = new URL("https://example.com/auth/callback");
+      url.searchParams.set("code", "anything");
+      url.searchParams.set("state", "state-cfg");
+      const res = await SELF.fetch(url.toString(), {
+        redirect: "manual",
+        headers: { Cookie: cookie },
+      });
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/auth?error=oidc_unavailable");
+      const setCookie = res.headers.get("set-cookie") ?? "";
+      expect(setCookie).toContain(`${OIDC_TX_COOKIE_NAME}=`);
+      expect(setCookie.toLowerCase()).toContain("max-age=0");
+    } finally {
+      env.TESSERA_OIDC_CLIENT_SECRET = original;
+    }
+  });
+
+  it("fails before D1 writes when SESSION_SECRET is missing", async () => {
+    const sub = "sub-missing-session-secret";
+    const state = "state-missing-session-secret";
+    stubGrantWithClaims({ sub, preferred_username: "missing-session-secret" });
+    const cookie = await buildSealedCookie(state, "n", "v");
+    const original = env.SESSION_SECRET;
+    env.SESSION_SECRET = "";
+    try {
+      const res = await callCallback({ state, cookie });
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/auth?error=session_create_failed");
+      const setCookie = res.headers.get("set-cookie") ?? "";
+      expect(setCookie).toContain(`${OIDC_TX_COOKIE_NAME}=`);
+      expect(setCookie.toLowerCase()).toContain("max-age=0");
+      const db = createDb(env.DB);
+      expect(await findUserByTesseraSub(db, sub)).toBeUndefined();
+    } finally {
+      env.SESSION_SECRET = original;
+    }
+  });
+
+  it("redirects to /auth?error=missing_state when the OIDC cookie is absent", async () => {
+    const res = await callCallback({ state: "anything" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/auth?error=missing_state");
+  });
+
+  it("redirects to /auth?error=invalid_state when state does not match the cookie", async () => {
+    const cookie = await buildSealedCookie("state-A", "n", "v");
+    const res = await callCallback({ state: "state-B", cookie });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/auth?error=invalid_state");
+  });
+
+  it("redirects to /auth?error=invalid_id_token when the grant raises ClientError", async () => {
+    const sub = "sub-grant-err";
+    stubGrantWithClaims({ sub }, { rejectAs: "client" });
+    const cookie = await buildSealedCookie("state-grant", "n", "v");
+    const res = await callCallback({ state: "state-grant", cookie });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/auth?error=invalid_id_token");
+  });
+
+  it("seeds membership for the existing namespace owner on returning sign-in", async () => {
+    const sub = "sub-existing-member";
+    const userId = "user-existing-member";
+    const namespaceId = "ns-existing-member";
+    const db = createDb(env.DB);
+    const schema = await import("@/worker/db/d1/schema");
+    await db.batch([
+      db.insert(schema.users).values({ id: userId, tesseraSub: sub, createdAt: Date.now() }),
+      db.insert(schema.namespaces).values({
+        id: namespaceId,
+        slug: "preexisting",
+        createdBy: userId,
+        createdAt: Date.now(),
+      }),
+    ]);
+    await insertMembershipIfMissing(db, {
+      namespaceId,
+      userId,
+      createdAt: Date.now(),
+    });
+    stubGrantWithClaims({ sub, preferred_username: "preexisting" });
+    const state = "state-pre";
+    const cookie = await buildSealedCookie(state, "n", "v");
+    const res = await callCallback({ state, cookie });
+    expect(res.status).toBe(302);
+    expect((await listNamespacesForUser(db, userId)).map((row) => row.slug)).toEqual([
+      "preexisting",
+    ]);
+  });
+
+  // Integration coverage: the callback enqueues the legacy-backfill message
+  // via `c.executionCtx.waitUntil(env.REPO_MAINT_QUEUE.send(...))`. The
+  // Miniflare runtime delivers that message to the same worker's queue
+  // consumer (`handleRepoMaintenanceQueue`), which writes to ROUTES KV.
+  // Polling ROUTES exercises the full producer→runtime→consumer chain
+  // without mocking — see Cloudflare's `queue-producer-integration-self`
+  // example. Negative cases bound the wait at the same ceiling as
+  // positive cases and assert ROUTES never receives a record.
+
+  it("enqueues backfill on a fresh user's namespace claim (visible via ROUTES)", async () => {
+    const slug = "queue-fresh";
+    const repo = "repo-queue-fresh";
+    await env.OWNER_REGISTRY.put(`owner:${slug}:${repo}`, "1");
+    try {
+      stubGrantWithClaims({ sub: "sub-queue-fresh", preferred_username: slug });
+      const cookie = await buildSealedCookie("state-queue-fresh", "n", "v");
+      const res = await callCallback({ state: "state-queue-fresh", cookie });
+      expect(res.status).toBe(302);
+      // `vi.waitUntil` polls until the consumer has written the route
+      // record. A 5s ceiling is well above any realistic queue-runtime
+      // delay; if it fires, treat it as a real regression.
+      const routeKey = `repo-route:v1:${slug}/${repo}`;
+      await vi.waitUntil(async () => (await env.ROUTES.get(routeKey)) !== null, {
+        timeout: 5000,
+        interval: 50,
+      });
+      const record = JSON.parse((await env.ROUTES.get(routeKey)) as string) as Record<
+        string,
+        unknown
+      >;
+      expect(record).toMatchObject({ doName: `${slug}/${repo}` });
+      // ROUTES KV must NEVER carry visibility — it stays in D1 only so KV
+      // staleness can never be an authorization source.
+      expect("visibility" in record).toBe(false);
+    } finally {
+      await env.OWNER_REGISTRY.delete(`owner:${slug}:${repo}`);
+      await env.ROUTES.delete(`repo-route:v1:${slug}/${repo}`);
+    }
+  });
+
+  it("does NOT enqueue backfill when pref-name is invalid (ROUTES stays empty)", async () => {
+    const targetSlug = "invalid-pref"; // hypothetical legacy namespace
+    const repo = "should-not-land";
+    await env.OWNER_REGISTRY.put(`owner:${targetSlug}:${repo}`, "1");
+    try {
+      stubGrantWithClaims({
+        sub: "sub-no-enqueue-invalid",
+        // Mixed case + underscore + bang fails the slug policy.
+        preferred_username: "Invalid_Slug!",
+      });
+      const cookie = await buildSealedCookie("state-no-enqueue-invalid", "n", "v");
+      expect((await callCallback({ state: "state-no-enqueue-invalid", cookie })).status).toBe(302);
+      // No positive signal to wait for; bound the wait at a small fraction
+      // of the positive-case ceiling and assert ROUTES never sees the key.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(await env.ROUTES.get(`repo-route:v1:${targetSlug}/${repo}`)).toBeNull();
+    } finally {
+      await env.OWNER_REGISTRY.delete(`owner:${targetSlug}:${repo}`);
+    }
+  });
+
+  it("does NOT enqueue backfill when pref-name is taken (ROUTES stays empty)", async () => {
+    // Seed an existing namespace owned by an unrelated user (mirrors the
+    // earlier 'creates only user+session when pref-name is taken' setup).
+    const occupantId = "user-no-enqueue-taken";
+    const takenSlug = "taken-bf";
+    const repo = "should-not-land-2";
+    const db = createDb(env.DB);
+    const schema = await import("@/worker/db/d1/schema");
+    await db.batch([
+      db.insert(schema.users).values({
+        id: occupantId,
+        tesseraSub: "sub-occupant-bf",
+        createdAt: Date.now(),
+      }),
+      db.insert(schema.namespaces).values({
+        id: "ns-taken-bf",
+        slug: takenSlug,
+        createdBy: occupantId,
+        createdAt: Date.now(),
+      }),
+    ]);
+    await env.OWNER_REGISTRY.put(`owner:${takenSlug}:${repo}`, "1");
+    try {
+      stubGrantWithClaims({
+        sub: "sub-no-enqueue-taken",
+        preferred_username: takenSlug,
+      });
+      const cookie = await buildSealedCookie("state-no-enqueue-taken", "n", "v");
+      expect((await callCallback({ state: "state-no-enqueue-taken", cookie })).status).toBe(302);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(await env.ROUTES.get(`repo-route:v1:${takenSlug}/${repo}`)).toBeNull();
+    } finally {
+      await env.OWNER_REGISTRY.delete(`owner:${takenSlug}:${repo}`);
+    }
+  });
+});

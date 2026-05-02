@@ -4,12 +4,16 @@ import {
   handleCompactionDeleteMessage,
   handleCompactionMessage,
 } from "./compaction";
+import { handleLegacyBackfillMessage, type LegacyBackfillMessage } from "./legacyBackfill";
 import { handlePackRefBackfillMessage, type PackRefBackfillQueueMessage } from "./refBackfill";
+
+export type { LegacyBackfillMessage } from "./legacyBackfill";
 
 export type RepoMaintenanceQueueMessage =
   | CompactionDeleteQueueMessage
   | CompactionQueueMessage
-  | PackRefBackfillQueueMessage;
+  | PackRefBackfillQueueMessage
+  | LegacyBackfillMessage;
 
 function isCompactionMessage(value: unknown): value is CompactionQueueMessage {
   if (!value || typeof value !== "object") return false;
@@ -47,6 +51,17 @@ function isPackRefBackfillMessage(value: unknown): value is PackRefBackfillQueue
   );
 }
 
+function isLegacyBackfillMessage(value: unknown): value is LegacyBackfillMessage {
+  if (!value || typeof value !== "object") return false;
+  const body = value as Record<string, unknown>;
+  return (
+    body.kind === "legacy-backfill" &&
+    typeof body.userId === "string" &&
+    typeof body.namespaceSlug === "string" &&
+    (body.cursor === undefined || typeof body.cursor === "string")
+  );
+}
+
 export async function handleRepoMaintenanceQueue(
   batch: MessageBatch<RepoMaintenanceQueueMessage>,
   env: Env,
@@ -67,6 +82,11 @@ export async function handleRepoMaintenanceQueue(
 
     if (isPackRefBackfillMessage(body)) {
       await handlePackRefBackfillMessage(message, body, env, ctx);
+      continue;
+    }
+
+    if (isLegacyBackfillMessage(body)) {
+      await handleLegacyBackfillMessage(message, body, env, ctx);
       continue;
     }
 

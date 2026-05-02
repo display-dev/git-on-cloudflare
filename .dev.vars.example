@@ -10,3 +10,20 @@ REPO_DO_IDLE_MINUTES=30
 
 # Logging level: debug|info|warn|error.
 LOG_LEVEL=debug
+
+# Local goc browser session cookie sealing secret. Generate a real value with
+# `openssl rand -hex 32`, then set production with
+# `wrangler secret put SESSION_SECRET`; never commit a real production value.
+SESSION_SECRET=local-goc-session-secret-change-me
+
+# tessera OIDC issuer override for local dev. Production value lives in
+# wrangler.jsonc.vars (https://auth.limic.dev). Loopback HTTP is allowed for
+# the issuer because tessera dev runs on http://localhost:5174.
+TESSERA_OIDC_ISSUER=http://localhost:5174
+
+# tessera OIDC client credentials. These are runtime/deployment-specific.
+# Production should use `wrangler secret put TESSERA_OIDC_CLIENT_SECRET` (and
+# either `wrangler secret put` or env-specific vars for the client id);
+# never commit a real production value to wrangler.jsonc.vars.
+TESSERA_OIDC_CLIENT_ID=local-goc
+TESSERA_OIDC_CLIENT_SECRET=local-goc-dev-secret-change-me

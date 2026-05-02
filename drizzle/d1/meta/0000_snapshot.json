@@ -1,0 +1,517 @@
+{
+  "version": "6",
+  "dialect": "sqlite",
+  "id": "0d22aea9-b745-4f5e-ad58-a5fa590512a6",
+  "prevId": "00000000-0000-0000-0000-000000000000",
+  "tables": {
+    "users": {
+      "name": "users",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "tessera_sub": {
+          "name": "tessera_sub",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "users_tessera_sub_unique": {
+          "name": "users_tessera_sub_unique",
+          "columns": ["tessera_sub"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "namespaces": {
+      "name": "namespaces",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "namespaces_slug_unique": {
+          "name": "namespaces_slug_unique",
+          "columns": ["slug"],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "namespaces_created_by_users_id_fk": {
+          "name": "namespaces_created_by_users_id_fk",
+          "tableFrom": "namespaces",
+          "tableTo": "users",
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "namespace_memberships": {
+      "name": "namespace_memberships",
+      "columns": {
+        "namespace_id": {
+          "name": "namespace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_namespace_memberships_user_ns": {
+          "name": "idx_namespace_memberships_user_ns",
+          "columns": ["user_id", "namespace_id"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "namespace_memberships_namespace_id_namespaces_id_fk": {
+          "name": "namespace_memberships_namespace_id_namespaces_id_fk",
+          "tableFrom": "namespace_memberships",
+          "tableTo": "namespaces",
+          "columnsFrom": ["namespace_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "namespace_memberships_user_id_users_id_fk": {
+          "name": "namespace_memberships_user_id_users_id_fk",
+          "tableFrom": "namespace_memberships",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "namespace_memberships_namespace_id_user_id_pk": {
+          "columns": ["namespace_id", "user_id"],
+          "name": "namespace_memberships_namespace_id_user_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "repositories": {
+      "name": "repositories",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "namespace_id": {
+          "name": "namespace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "do_name": {
+          "name": "do_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "visibility": {
+          "name": "visibility",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "uq_repositories_namespace_slug": {
+          "name": "uq_repositories_namespace_slug",
+          "columns": ["namespace_id", "slug"],
+          "isUnique": true
+        },
+        "uq_repositories_do_name": {
+          "name": "uq_repositories_do_name",
+          "columns": ["do_name"],
+          "isUnique": true
+        },
+        "idx_repositories_namespace_updated": {
+          "name": "idx_repositories_namespace_updated",
+          "columns": ["namespace_id", "\"updated_at\" desc", "slug"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "repositories_namespace_id_namespaces_id_fk": {
+          "name": "repositories_namespace_id_namespaces_id_fk",
+          "tableFrom": "repositories",
+          "tableTo": "namespaces",
+          "columnsFrom": ["namespace_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "repositories_created_by_users_id_fk": {
+          "name": "repositories_created_by_users_id_fk",
+          "tableFrom": "repositories",
+          "tableTo": "users",
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "chk_repositories_visibility": {
+          "name": "chk_repositories_visibility",
+          "value": "\"visibility\" IN ('public','private')"
+        }
+      }
+    },
+    "personal_access_tokens": {
+      "name": "personal_access_tokens",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "prefix": {
+          "name": "prefix",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "hash": {
+          "name": "hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "last_used_at": {
+          "name": "last_used_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "personal_access_tokens_prefix_unique": {
+          "name": "personal_access_tokens_prefix_unique",
+          "columns": ["prefix"],
+          "isUnique": true
+        },
+        "idx_pats_user_created": {
+          "name": "idx_pats_user_created",
+          "columns": ["user_id", "\"created_at\" desc"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "personal_access_tokens_user_id_users_id_fk": {
+          "name": "personal_access_tokens_user_id_users_id_fk",
+          "tableFrom": "personal_access_tokens",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "pat_namespace_grants": {
+      "name": "pat_namespace_grants",
+      "columns": {
+        "pat_id": {
+          "name": "pat_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "namespace_id": {
+          "name": "namespace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "level": {
+          "name": "level",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_pat_namespace_grants_namespace": {
+          "name": "idx_pat_namespace_grants_namespace",
+          "columns": ["namespace_id"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "pat_namespace_grants_pat_id_personal_access_tokens_id_fk": {
+          "name": "pat_namespace_grants_pat_id_personal_access_tokens_id_fk",
+          "tableFrom": "pat_namespace_grants",
+          "tableTo": "personal_access_tokens",
+          "columnsFrom": ["pat_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "pat_namespace_grants_namespace_id_namespaces_id_fk": {
+          "name": "pat_namespace_grants_namespace_id_namespaces_id_fk",
+          "tableFrom": "pat_namespace_grants",
+          "tableTo": "namespaces",
+          "columnsFrom": ["namespace_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "pat_namespace_grants_pat_id_namespace_id_pk": {
+          "columns": ["pat_id", "namespace_id"],
+          "name": "pat_namespace_grants_pat_id_namespace_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "chk_pat_namespace_grants_level": {
+          "name": "chk_pat_namespace_grants_level",
+          "value": "\"level\" IN ('pull','push')"
+        }
+      }
+    },
+    "pat_repo_grants": {
+      "name": "pat_repo_grants",
+      "columns": {
+        "pat_id": {
+          "name": "pat_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "repo_id": {
+          "name": "repo_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "level": {
+          "name": "level",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "idx_pat_repo_grants_repo": {
+          "name": "idx_pat_repo_grants_repo",
+          "columns": ["repo_id"],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {
+        "pat_repo_grants_pat_id_personal_access_tokens_id_fk": {
+          "name": "pat_repo_grants_pat_id_personal_access_tokens_id_fk",
+          "tableFrom": "pat_repo_grants",
+          "tableTo": "personal_access_tokens",
+          "columnsFrom": ["pat_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "pat_repo_grants_repo_id_repositories_id_fk": {
+          "name": "pat_repo_grants_repo_id_repositories_id_fk",
+          "tableFrom": "pat_repo_grants",
+          "tableTo": "repositories",
+          "columnsFrom": ["repo_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "pat_repo_grants_pat_id_repo_id_pk": {
+          "columns": ["pat_id", "repo_id"],
+          "name": "pat_repo_grants_pat_id_repo_id_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "chk_pat_repo_grants_level": {
+          "name": "chk_pat_repo_grants_level",
+          "value": "\"level\" IN ('pull','push')"
+        }
+      }
+    }
+  },
+  "views": {},
+  "enums": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "indexes": {
+      "idx_repositories_namespace_updated": {
+        "columns": {
+          "\"updated_at\" desc": {
+            "isExpression": true
+          }
+        }
+      },
+      "idx_pats_user_created": {
+        "columns": {
+          "\"created_at\" desc": {
+            "isExpression": true
+          }
+        }
+      }
+    }
+  }
+}

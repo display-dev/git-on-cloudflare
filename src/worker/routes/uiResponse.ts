@@ -1,4 +1,5 @@
 import { renderUiView } from "@/client/server/render";
+import type { Viewer } from "@/client/server/viewer";
 
 const HTML_HEADERS = {
   "Content-Type": "text/html; charset=utf-8",
@@ -11,6 +12,10 @@ type RenderUiDocumentOptions = {
   failureBody: string;
   failureStatus?: number;
   headers?: HeadersInit;
+  // Optional signed-in viewer threaded into the SSR shell. Route handlers
+  // that want the signed-in header must call `loadViewer(c)` and pass the
+  // result here. The renderer itself never reads cookies or D1.
+  viewer?: Viewer | null;
 };
 
 /**
@@ -24,7 +29,7 @@ export async function renderUiDocumentResponse(
   data: Record<string, unknown>,
   options: RenderUiDocumentOptions
 ): Promise<Response> {
-  const body = await renderUiView(env, view, data);
+  const body = await renderUiView(env, view, data, { viewer: options.viewer ?? null });
   if (!body) {
     return new Response(options.failureBody, { status: options.failureStatus ?? 500 });
   }

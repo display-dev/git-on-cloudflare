@@ -50,6 +50,18 @@
     {
       "binding": "OWNER_REGISTRY",
       "id": "2e6769b1e1cf488d8055a7fb4ecbd0f3"
+    },
+    {
+      "binding": "ROUTES",
+      "id": "4e471bad6c5e44ceb91c4adf5559cb44"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "git-on-cloudflare",
+      "database_id": "1fd98d8b-92b8-4a12-852a-e218ce362149",
+      "migrations_dir": "drizzle/d1"
     }
   ],
   "r2_buckets": [
@@ -86,6 +98,9 @@
     // Repo DO idle cleanup threshold (minutes)
     "REPO_DO_IDLE_MINUTES": "30",
     // Logging level: debug|info|warn|error
-    "LOG_LEVEL": "info"
+    "LOG_LEVEL": "info",
+    // tessera OIDC issuer (production). Override via .dev.vars for local dev.
+    // Client id and secret are runtime concerns and live in .dev.vars / `wrangler secret put`.
+    "TESSERA_OIDC_ISSUER": "https://auth.limic.dev"
   }
 }

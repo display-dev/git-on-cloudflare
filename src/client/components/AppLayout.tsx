@@ -2,13 +2,15 @@ import type { ReactNode } from "react";
 
 import { Header } from "@/client/components/header";
 import { Footer } from "@/client/components/footer";
+import type { Viewer } from "@/client/server/viewer";
 
 type AppLayoutProps = {
   children: ReactNode;
   currentView?: string;
+  viewer?: Viewer | null;
 };
 
-export function AppLayout({ children, currentView }: AppLayoutProps) {
+export function AppLayout({ children, currentView, viewer }: AppLayoutProps) {
   return (
     <>
       <a
@@ -18,7 +20,7 @@ export function AppLayout({ children, currentView }: AppLayoutProps) {
         Skip to content
       </a>
       <div className="relative z-10 flex min-h-screen flex-col sm:h-screen">
-        <Header currentView={currentView} />
+        <Header currentView={currentView} viewer={viewer ?? null} />
         <main
           id="main-content"
           className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:overflow-y-auto sm:px-6 min-w-0"

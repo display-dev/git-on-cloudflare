@@ -3,8 +3,9 @@ import { registerGitRoutes } from "./routes/git";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerUiRoutes } from "./routes/ui";
 import { registerAuthRoutes } from "./routes/auth";
-import type { AppBindings } from "./routes/hono";
+import type { AppBindings, AppContext } from "./routes/hono";
 import { renderUiDocumentResponse } from "./routes/uiResponse";
+import { loadViewer } from "./auth/session";
 import { json } from "./common";
 import { handleRepoMaintenanceQueue, type RepoMaintenanceQueueMessage } from "./maintenance/queue";
 
@@ -17,26 +18,34 @@ registerAdminRoutes(app);
 registerAuthRoutes(app);
 
 app.get("/", async (c) => {
-  return renderUiDocumentResponse(c.env, "home", {}, { failureBody: "Failed to render page\n" });
+  const viewer = await loadViewer(c);
+  return renderUiDocumentResponse(
+    c.env,
+    "home",
+    {},
+    { failureBody: "Failed to render page\n", viewer }
+  );
 });
 
 // Register UI routes AFTER static/auth so that /:owner doesn't shadow them
 registerUiRoutes(app);
 
-async function renderNotFound(env: Env): Promise<Response> {
+async function renderNotFound(c: AppContext): Promise<Response> {
+  const viewer = await loadViewer(c);
   return renderUiDocumentResponse(
-    env,
+    c.env,
     "404",
     {},
     {
       status: 404,
       failureBody: "Not found\n",
       failureStatus: 404,
+      viewer,
     }
   );
 }
 
-app.notFound((c) => renderNotFound(c.env));
+app.notFound((c) => renderNotFound(c));
 
 function errorStatus(error: Error): number {
   if ("status" in error && typeof error.status === "number") {
@@ -57,11 +66,6 @@ app.onError((error) => {
 
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    // Hono maps HEAD to GET before routing, but this service historically
-    // treated HEAD as an unsupported method that reaches the rendered 404.
-    if (request.method === "HEAD") {
-      return renderNotFound(env);
-    }
     return app.fetch(request, env, ctx);
   },
   async queue(batch: MessageBatch<RepoMaintenanceQueueMessage>, env: Env, ctx: ExecutionContext) {

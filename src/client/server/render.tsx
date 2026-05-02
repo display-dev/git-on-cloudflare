@@ -4,6 +4,7 @@ import { AppLayout } from "@/client/components/AppLayout";
 import { resolveDocumentAssets } from "./assets";
 import { Document } from "./document";
 import { getViewDefinition } from "./registry";
+import type { Viewer } from "./viewer";
 
 function needsHighlightTheme(name: string, data: Record<string, unknown>): boolean {
   return (
@@ -13,10 +14,18 @@ function needsHighlightTheme(name: string, data: Record<string, unknown>): boole
   );
 }
 
+export type RenderUiViewOptions = {
+  // The signed-in viewer (if any) is computed by the Worker route handler
+  // and threaded through the SSR shell. The renderer stays presentational
+  // and never touches cookies or D1 itself.
+  viewer?: Viewer | null;
+};
+
 export async function renderUiView(
   env: Env,
   name: string,
-  data: Record<string, unknown>
+  data: Record<string, unknown>,
+  options: RenderUiViewOptions = {}
 ): Promise<BodyInit | null> {
   const definition = getViewDefinition(name);
   if (!definition) {
@@ -36,7 +45,9 @@ export async function renderUiView(
       assets={assets}
       needsHighlight={needsHighlightTheme(name, data)}
     >
-      <AppLayout currentView={name}>{page}</AppLayout>
+      <AppLayout currentView={name} viewer={options.viewer ?? null}>
+        {page}
+      </AppLayout>
     </Document>
   );
 

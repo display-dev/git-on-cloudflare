@@ -7,6 +7,7 @@ import { listReposForOwner } from "@/worker/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { repoKey } from "@/worker/keys";
+import { loadViewer } from "@/worker/auth/session";
 import { badRequest, loadHeadAndRefsCached } from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
@@ -18,6 +19,7 @@ export async function handleOwnerOverview(c: AppContext<"/:owner">) {
     return badRequest(env, "Invalid owner", "Owner contains invalid characters or length");
   }
   const repos = await listReposForOwner(env, owner);
+  const viewer = await loadViewer(c);
   return renderUiDocumentResponse(
     env,
     "owner",
@@ -29,6 +31,7 @@ export async function handleOwnerOverview(c: AppContext<"/:owner">) {
     {
       cacheControl: "public, max-age=60",
       failureBody: "Failed to render view",
+      viewer,
     }
   );
 }
@@ -95,6 +98,7 @@ export async function handleRepoOverview(c: AppContext<"/:owner/:repo">) {
   );
   const readmeMd = readmeData?.md || "";
   const progress = await getRepoActivity(env, repoId);
+  const viewer = await loadViewer(c);
 
   return renderUiDocumentResponse(
     env,
@@ -112,6 +116,7 @@ export async function handleRepoOverview(c: AppContext<"/:owner/:repo">) {
     },
     {
       failureBody: "Failed to render view",
+      viewer,
     }
   );
 }

@@ -1,0 +1,168 @@
+import { FolderGit2, ShieldCheck } from "lucide-react";
+
+import { EmptyState } from "@/client/components/ui";
+import { IslandHost } from "@/client/server/IslandHost";
+import { TokensIsland, type TokensIslandSummary } from "@/client/islands/tokens";
+
+export type AccountNamespace = {
+  id: string;
+  slug: string;
+};
+
+export type AccountRepository = {
+  id: string;
+  slug: string;
+  namespaceSlug: string;
+  visibility: "public" | "private";
+  updatedAt: number;
+};
+
+export type AccountPageProps = {
+  userId: string;
+  primaryNamespaceSlug?: string;
+  namespaces: AccountNamespace[];
+  repositories: AccountRepository[];
+  tokens: TokensIslandSummary[];
+};
+
+function formatRelativeTime(epochMs: number): string {
+  const delta = Date.now() - epochMs;
+  if (delta < 60_000) return "just now";
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(epochMs).toISOString().slice(0, 10);
+}
+
+function truncateUserId(userId: string): string {
+  if (userId.length <= 12) return userId;
+  return `${userId.slice(0, 8)}…${userId.slice(-4)}`;
+}
+
+export function AccountPage({
+  userId,
+  primaryNamespaceSlug,
+  namespaces,
+  repositories,
+  tokens,
+}: AccountPageProps) {
+  const handle = primaryNamespaceSlug ? `@${primaryNamespaceSlug}` : "Identity not yet claimed";
+  return (
+    <div className="mx-auto max-w-3xl py-8">
+      <header className="mb-12">
+        <p className="m-0 mb-2 text-xs font-medium uppercase tracking-widest text-accent-500 dark:text-accent-400">
+          Identity
+        </p>
+        <div className="flex flex-col items-baseline justify-between gap-2 sm:flex-row sm:gap-6">
+          <h1 className="m-0 font-display text-4xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+            {handle}
+          </h1>
+          <span
+            className="font-mono text-[11px] uppercase tracking-widest text-zinc-500"
+            title={userId}
+          >
+            id {truncateUserId(userId)}
+          </span>
+        </div>
+      </header>
+
+      <section className="mb-10">
+        <h2 className="m-0 mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+          Namespaces
+        </h2>
+        {namespaces.length === 0 ? (
+          <EmptyState
+            icon={<ShieldCheck className="h-5 w-5 text-zinc-400" aria-hidden="true" />}
+            title="No namespace yet"
+            detail="Sign in once with a unique tessera username to claim a namespace."
+          />
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {namespaces.map((ns) => (
+              <a
+                key={ns.id}
+                href={`/${ns.slug}`}
+                className="inline-flex items-center rounded-lg border border-zinc-300 bg-white/60 px-3 py-1.5 font-mono text-sm text-zinc-700 no-underline transition-colors hover:border-accent-500/40 hover:text-accent-600 dark:border-zinc-800/60 dark:bg-zinc-900/30 dark:text-zinc-300 dark:hover:text-accent-400"
+              >
+                @{ns.slug}
+              </a>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="mb-10">
+        <h2 className="m-0 mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+          Repositories
+        </h2>
+        {repositories.length === 0 ? (
+          <EmptyState
+            icon={<FolderGit2 className="h-5 w-5 text-zinc-400" aria-hidden="true" />}
+            title="Repositories you own will appear here."
+            detail="Legacy repositories are imported in the background; refresh after a moment if you've just signed in."
+          />
+        ) : (
+          <div className="overflow-hidden rounded-2xl border border-zinc-300 dark:border-zinc-800/60">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Visibility</th>
+                  <th className="text-right">Updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {repositories.map((repo) => (
+                  <tr key={repo.id}>
+                    <td>
+                      <a
+                        href={`/${repo.namespaceSlug}/${repo.slug}`}
+                        className="font-mono text-sm text-zinc-900 no-underline hover:text-accent-600 dark:text-zinc-100 dark:hover:text-accent-400"
+                      >
+                        {repo.namespaceSlug}/{repo.slug}
+                      </a>
+                    </td>
+                    <td>
+                      <span
+                        className={`font-mono text-[10px] uppercase tracking-widest ${
+                          repo.visibility === "private"
+                            ? "text-amber-700 dark:text-amber-400"
+                            : "text-emerald-700 dark:text-emerald-400"
+                        }`}
+                      >
+                        {repo.visibility}
+                      </span>
+                    </td>
+                    <td className="text-right text-xs text-zinc-500">
+                      {formatRelativeTime(repo.updatedAt)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section id="tokens" className="scroll-mt-20">
+        <h2 className="m-0 mb-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+          Tokens
+        </h2>
+        <p className="m-0 mb-4 text-sm text-zinc-500">
+          Personal access tokens scope to a namespace or a single repo. The plaintext is shown only
+          once at creation.
+        </p>
+        <IslandHost name="tokens" props={{ primaryNamespaceSlug, repositories, tokens }}>
+          <TokensIsland
+            primaryNamespaceSlug={primaryNamespaceSlug}
+            repositories={repositories}
+            tokens={tokens}
+          />
+        </IslandHost>
+      </section>
+    </div>
+  );
+}

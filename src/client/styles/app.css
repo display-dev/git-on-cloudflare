@@ -43,6 +43,7 @@
   --animate-slide-up: slide-up 0.35s ease-out both;
   --animate-scale-fade: scale-fade 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
   --animate-shimmer: shimmer 1.5s ease-in-out infinite;
+  --animate-pulse-soft: pulse-soft 1.6s ease-in-out infinite;
 }
 
 @keyframes fade-in {
@@ -86,6 +87,17 @@
 
   to {
     background-position: 200% 0;
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+
+  50% {
+    opacity: 1;
   }
 }
 

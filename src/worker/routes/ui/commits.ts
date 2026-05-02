@@ -12,6 +12,7 @@ import { handleError } from "@/client/server/error";
 import { repoKey } from "@/worker/keys";
 import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
+import { loadViewer } from "@/worker/auth/session";
 import { badRequest } from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
@@ -106,6 +107,7 @@ export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
           : undefined,
     };
     const progress = await getRepoActivity(env, repoId);
+    const viewer = await loadViewer(c);
     return renderUiDocumentResponse(
       env,
       "commits",
@@ -119,7 +121,7 @@ export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
         pager,
         progress,
       },
-      { failureBody: "Failed to render view" }
+      { failureBody: "Failed to render view", viewer }
     );
   } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
@@ -270,7 +272,7 @@ export async function handleCommit(c: AppContext<"/:owner/:repo/commit/:oid">) {
   const repoId = repoKey(owner, repo);
   try {
     const cacheCtx: CacheContext = { req: request, ctx };
-    const c = await readCommitInfo(env, repoId, oid, cacheCtx);
+    const commit = await readCommitInfo(env, repoId, oid, cacheCtx);
     const diffCacheKey = buildCacheKeyFrom(request, "/_cache/commit-diff", {
       repo: repoId,
       oid,
@@ -285,26 +287,27 @@ export async function handleCommit(c: AppContext<"/:owner/:repo/commit/:oid">) {
       () => 86400,
       ctx
     );
-    const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
-    const parents = (c.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
+    const when = commit.author ? formatWhen(commit.author.when, commit.author.tz) : "";
+    const parents = (commit.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
     const progress = await getRepoActivity(env, repoId);
+    const viewer = await loadViewer(c);
     return renderUiDocumentResponse(
       env,
       "commit",
       {
-        title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
+        title: `${commit.oid.slice(0, 7)} · ${owner}/${repo}`,
         owner,
         repo,
-        commitOid: c.oid,
-        refEnc: encodeURIComponent(c.oid),
+        commitOid: commit.oid,
+        refEnc: encodeURIComponent(commit.oid),
         progress,
-        commitShort: c.oid.slice(0, 7),
-        authorName: c.author?.name || "",
-        authorEmail: c.author?.email || "",
+        commitShort: commit.oid.slice(0, 7),
+        authorName: commit.author?.name || "",
+        authorEmail: commit.author?.email || "",
         when,
         parents,
-        treeShort: (c.tree || "").slice(0, 7),
-        message: c.message || "",
+        treeShort: (commit.tree || "").slice(0, 7),
+        message: commit.message || "",
         diffBaseRefEnc: diff?.baseCommitOid ? encodeURIComponent(diff.baseCommitOid) : "",
         diffCompareMode: diff?.compareMode || "root",
         diffEntries: diff?.entries || [],
@@ -317,7 +320,7 @@ export async function handleCommit(c: AppContext<"/:owner/:repo/commit/:oid">) {
         diffTruncated: diff?.truncated || false,
         diffTruncateReason: diff?.truncateReason || "",
       },
-      { failureBody: "Failed to render view" }
+      { failureBody: "Failed to render view", viewer }
     );
   } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {

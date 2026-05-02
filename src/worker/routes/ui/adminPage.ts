@@ -2,6 +2,7 @@ import type { HeadInfo, Ref } from "@/worker/git";
 import { isValidOwnerRepo } from "@/shared/web";
 import { getRepoActivity, getRepoStub, unauthorizedAdminBasic } from "@/worker/common";
 import { verifyAuth } from "@/worker/auth";
+import { loadViewer } from "@/worker/auth/session";
 import { repoKey } from "@/worker/keys";
 import {
   badRequest,
@@ -56,6 +57,7 @@ export async function handleAdminPage(c: AppContext<"/:owner/:repo/admin">) {
 
   const defaultBranch = getDefaultBranchFromHead(head);
   const refEnc = encodeURIComponent(defaultBranch);
+  const viewer = await loadViewer(c);
 
   return renderUiDocumentResponse(
     env,
@@ -80,6 +82,7 @@ export async function handleAdminPage(c: AppContext<"/:owner/:repo/admin">) {
     },
     {
       failureBody: "Failed to render view",
+      viewer,
     }
   );
 }
