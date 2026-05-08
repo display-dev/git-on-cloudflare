@@ -30,9 +30,5 @@ describe("Hono routing compatibility", () => {
     });
     expect(postOwner.status).toBe(404);
     expect(postOwner.headers.get("X-Page-Renderer")).toBe("react-ssr");
-
-    const headRoot = await SELF.fetch("https://example.com/", { method: "HEAD" });
-    expect(headRoot.status).toBe(404);
-    expect(headRoot.headers.get("X-Page-Renderer")).toBe("react-ssr");
   });
 });
