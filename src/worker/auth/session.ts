@@ -3,6 +3,7 @@ import { newPrefixedId } from "@/worker/common";
 import { findUserById, listNamespacesForUser } from "@/worker/db/d1/dal";
 import type { UserRow } from "@/worker/db/d1/schema";
 import type { AppContext } from "@/worker/routes/hono";
+import { z } from "zod";
 
 import { clearSessionCookie, getSessionCookie, setSessionCookie } from "./cookies";
 
@@ -17,12 +18,14 @@ const SESSION_VERSION = 1;
 const AES_GCM_IV_LENGTH = 12;
 const AES_KEY_BIT_LENGTH = 256;
 
-interface SessionPayload {
-  version: typeof SESSION_VERSION;
-  userId: string;
-  createdAt: number;
-  expiresAt: number;
-}
+const SessionPayloadSchema = z.object({
+  version: z.literal(SESSION_VERSION),
+  userId: z.string(),
+  createdAt: z.number(),
+  expiresAt: z.number(),
+});
+
+type SessionPayload = z.infer<typeof SessionPayloadSchema>;
 
 export type ActiveSession = { user: UserRow; payload: SessionPayload };
 
@@ -83,17 +86,6 @@ async function deriveSessionKey(secret: string): Promise<CryptoKey> {
   );
 }
 
-function isSessionPayload(value: unknown): value is SessionPayload {
-  if (!value || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
-  return (
-    record.version === SESSION_VERSION &&
-    typeof record.userId === "string" &&
-    typeof record.createdAt === "number" &&
-    typeof record.expiresAt === "number"
-  );
-}
-
 async function sealSession(secret: string, payload: SessionPayload): Promise<string> {
   const key = await deriveSessionKey(secret);
   const iv = randomBytes(AES_GCM_IV_LENGTH);
@@ -137,9 +129,10 @@ async function unsealSession(
   } catch {
     return { ok: false, reason: "invalid_payload" };
   }
-  if (!isSessionPayload(parsed)) return { ok: false, reason: "invalid_payload" };
-  if (parsed.expiresAt <= now) return { ok: false, reason: "expired" };
-  return { ok: true, payload: parsed };
+  const payload = SessionPayloadSchema.safeParse(parsed);
+  if (!payload.success) return { ok: false, reason: "invalid_payload" };
+  if (payload.data.expiresAt <= now) return { ok: false, reason: "expired" };
+  return { ok: true, payload: payload.data };
 }
 
 export function loadSessionConfig(env: Env): SessionConfigResult {

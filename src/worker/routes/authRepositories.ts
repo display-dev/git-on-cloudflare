@@ -1,4 +1,4 @@
-import { isJsonObject, safeParseJsonRequest } from "@/shared/web";
+import { safeParseJsonRequest } from "@/shared/web";
 import { validateSlugForRoute } from "@/shared/slugs";
 import { json, newPrefixedId } from "@/worker/common";
 import {
@@ -14,6 +14,7 @@ import { loadViewer } from "@/worker/auth/session";
 import { viewerIsNamespaceMember } from "@/worker/auth/pat";
 import type { AppRouter } from "./hono";
 import { enqueueRouteCacheSync } from "./authShared";
+import { RepositoryCreateRequestSchema, RepositoryVisibilityRequestSchema } from "./requestSchemas";
 
 export function registerAuthRepositoryRoutes(router: AppRouter) {
   router.get(`/auth/api/repositories`, async (c) => {
@@ -43,27 +44,22 @@ export function registerAuthRepositoryRoutes(router: AppRouter) {
       log.info("repo-create:not-authenticated");
       return json({ error: "Unauthorized" }, 401);
     }
-    const body = await safeParseJsonRequest(c.req.raw);
-    const namespaceSlugRaw =
-      isJsonObject(body) && typeof body.namespaceSlug === "string"
-        ? body.namespaceSlug.trim().toLowerCase()
-        : "";
-    const slugRaw =
-      isJsonObject(body) && typeof body.slug === "string" ? body.slug.trim().toLowerCase() : "";
-    const visibility =
-      isJsonObject(body) && (body.visibility === "public" || body.visibility === "private")
-        ? body.visibility
-        : null;
-    if (visibility === null) {
+    const rawBody = await safeParseJsonRequest(c.req.raw);
+    const parsedBody = RepositoryCreateRequestSchema.safeParse(rawBody);
+    const body = parsedBody.success
+      ? parsedBody.data
+      : { namespaceSlug: "", slug: "", visibility: null };
+    if (body.visibility === null) {
       log.warn("repo-create:invalid-visibility");
       return json({ ok: false, reason: "invalid-visibility" } as const, 400);
     }
-    const namespaceValidation = validateSlugForRoute(namespaceSlugRaw);
+    const visibility = body.visibility;
+    const namespaceValidation = validateSlugForRoute(body.namespaceSlug);
     if (!namespaceValidation.ok) {
       log.warn("repo-create:invalid-slug", { field: "namespaceSlug" });
       return json({ ok: false, reason: "invalid-slug" } as const, 400);
     }
-    const slugValidation = validateSlugForRoute(slugRaw);
+    const slugValidation = validateSlugForRoute(body.slug);
     if (!slugValidation.ok) {
       log.warn("repo-create:invalid-slug", { field: "slug" });
       return json({ ok: false, reason: "invalid-slug" } as const, 400);
@@ -139,15 +135,14 @@ export function registerAuthRepositoryRoutes(router: AppRouter) {
     const viewer = await loadViewer(c);
     if (!viewer) return json({ error: "Unauthorized" }, 401);
     const repositoryId = c.req.param("repositoryId");
-    const body = await safeParseJsonRequest(c.req.raw);
-    const visibility =
-      isJsonObject(body) && (body.visibility === "public" || body.visibility === "private")
-        ? body.visibility
-        : null;
-    if (visibility === null) {
+    const rawBody = await safeParseJsonRequest(c.req.raw);
+    const parsedBody = RepositoryVisibilityRequestSchema.safeParse(rawBody);
+    const body = parsedBody.success ? parsedBody.data : { visibility: null };
+    if (body.visibility === null) {
       log.warn("repo-visibility:invalid-payload", { repositoryId });
       return json({ ok: false, reason: "invalid-payload" } as const, 400);
     }
+    const visibility = body.visibility;
     const db = c.var.db;
     const repo = await findRepositoryById(db, repositoryId);
     if (!repo) {

@@ -1,16 +1,19 @@
 import { createLogger } from "@/worker/common";
+import { z } from "zod";
 
 // Workers KV `ROUTES` candidate cache. Backfill and repo-mutation flows
 // write here; the resolver reads here as a hint and re-confirms against
 // D1. The payload deliberately omits `visibility` because KV is
 // eventually consistent and must not be an authorization source.
 
-export type RouteCacheRecord = {
-  repositoryId: string;
-  namespaceId: string;
-  doName: string;
-  updatedAt: number;
-};
+export const RouteCacheRecordSchema = z.object({
+  repositoryId: z.string(),
+  namespaceId: z.string(),
+  doName: z.string(),
+  updatedAt: z.number(),
+});
+
+export type RouteCacheRecord = z.infer<typeof RouteCacheRecordSchema>;
 
 export function routeCacheKey(namespaceSlug: string, repoSlug: string): string {
   return `repo-route:v1:${namespaceSlug}/${repoSlug}`;
@@ -43,15 +46,8 @@ export async function getRouteCacheRecord(
   const raw = await env.ROUTES.get(routeCacheKey(namespaceSlug, repoSlug));
   if (!raw) return null;
   try {
-    const parsed = JSON.parse(raw) as Partial<RouteCacheRecord>;
-    if (
-      typeof parsed.repositoryId === "string" &&
-      typeof parsed.namespaceId === "string" &&
-      typeof parsed.doName === "string" &&
-      typeof parsed.updatedAt === "number"
-    ) {
-      return parsed as RouteCacheRecord;
-    }
+    const parsed = RouteCacheRecordSchema.safeParse(JSON.parse(raw));
+    if (parsed.success) return parsed.data;
   } catch {}
   return null;
 }

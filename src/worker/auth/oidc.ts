@@ -1,4 +1,5 @@
 import * as oidc from "openid-client";
+import { z } from "zod";
 
 // tessera relying-party module. Mirrors flamemail's OIDC pattern:
 //   - openid-client v6 owns discovery, PKCE, authorize URL, token exchange
@@ -16,13 +17,15 @@ const AES_GCM_IV_LENGTH = 12;
 const AES_KEY_BIT_LENGTH = 256;
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
 
-export interface TransactionPayload {
-  state: string;
-  nonce: string;
-  codeVerifier: string;
-  redirectUri: string;
-  createdAt: number;
-}
+const TransactionPayloadSchema = z.object({
+  state: z.string(),
+  nonce: z.string(),
+  codeVerifier: z.string(),
+  redirectUri: z.string(),
+  createdAt: z.number(),
+});
+
+export type TransactionPayload = z.infer<typeof TransactionPayloadSchema>;
 
 export interface OidcConfig {
   issuer: string;
@@ -162,18 +165,6 @@ export type UnsealResult =
   | { ok: true; payload: TransactionPayload }
   | { ok: false; reason: UnsealError };
 
-function isTransactionPayload(value: unknown): value is TransactionPayload {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.state === "string" &&
-    typeof v.nonce === "string" &&
-    typeof v.codeVerifier === "string" &&
-    typeof v.redirectUri === "string" &&
-    typeof v.createdAt === "number"
-  );
-}
-
 export async function unsealTransaction(
   clientSecret: string,
   encoded: string,
@@ -201,9 +192,10 @@ export async function unsealTransaction(
   } catch {
     return { ok: false, reason: "invalid_payload" };
   }
-  if (!isTransactionPayload(parsed)) return { ok: false, reason: "invalid_payload" };
-  if (now - parsed.createdAt > STATE_TTL_MS) return { ok: false, reason: "expired" };
-  return { ok: true, payload: parsed };
+  const payload = TransactionPayloadSchema.safeParse(parsed);
+  if (!payload.success) return { ok: false, reason: "invalid_payload" };
+  if (now - payload.data.createdAt > STATE_TTL_MS) return { ok: false, reason: "expired" };
+  return { ok: true, payload: payload.data };
 }
 
 export interface OidcProvider {

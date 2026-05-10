@@ -1,33 +1,15 @@
 import { getRepoStub, isValidOid, json } from "@/worker/common";
 import { sameOriginViolation } from "@/worker/auth/origin";
-import { isJsonObject, safeParseJsonRequest, type JsonValue } from "@/shared/web";
+import { safeParseJsonRequest } from "@/shared/web";
 import type { RepositoryDeleteMessage } from "@/worker/tasks/queue";
 import { resolveAdminApiRepoAccess, type AdminRepoAccess } from "./ui/helpers";
 import type { AppContext, AppRouter } from "./hono";
-
-type RefPayload = {
-  name: string;
-  oid: string;
-};
-
-type HeadPayload = {
-  target: string;
-  oid?: string;
-  unborn?: boolean;
-};
-
-function isRefPayload(value: JsonValue): value is RefPayload {
-  return isJsonObject(value) && typeof value.name === "string" && typeof value.oid === "string";
-}
-
-function isHeadPayload(value: JsonValue | null): value is HeadPayload {
-  return (
-    isJsonObject(value) &&
-    typeof value.target === "string" &&
-    (value.oid === undefined || typeof value.oid === "string") &&
-    (value.unborn === undefined || typeof value.unborn === "boolean")
-  );
-}
+import {
+  AdminCompactionRequestSchema,
+  AdminHeadPayloadSchema,
+  AdminPurgeRequestSchema,
+  AdminRefsPayloadSchema,
+} from "./requestSchemas";
 
 // Centralizes the auth + non-disclosure + CSRF policy for repo-scoped admin
 // endpoints. Git credentials are deliberately ignored: admin is
@@ -49,8 +31,10 @@ export function registerAdminRoutes(router: AppRouter) {
     if (gate.kind === "response") return gate.response;
     const { route, limiter } = gate;
     const env = c.env;
-    const body = await safeParseJsonRequest(c.req.raw);
-    const dryRun = !isJsonObject(body) || body.dryRun !== false;
+    const rawBody = await safeParseJsonRequest(c.req.raw);
+    const parsedBody = AdminCompactionRequestSchema.safeParse(rawBody);
+    const body = parsedBody.success ? parsedBody.data : { dryRun: undefined };
+    const dryRun = body.dryRun !== false;
     const stub = getRepoStub(env, route.doName);
     const log = c.var.logFor({
       service: "AdminRoutes",
@@ -130,14 +114,11 @@ export function registerAdminRoutes(router: AppRouter) {
     const { route, limiter } = gate;
     const stub = getRepoStub(c.env, route.doName);
     const body = await safeParseJsonRequest(c.req.raw);
-    if (!Array.isArray(body)) {
+    const refs = AdminRefsPayloadSchema.safeParse(body);
+    if (!refs.success) {
       return new Response("Invalid refs payload\n", { status: 400 });
     }
-    const refs = body.filter(isRefPayload);
-    if (refs.length !== body.length) {
-      return new Response("Invalid refs payload\n", { status: 400 });
-    }
-    await limiter.run("do:admin-set-refs", () => stub.setRefs(refs));
+    await limiter.run("do:admin-set-refs", () => stub.setRefs(refs.data));
     return new Response("OK\n");
   });
 
@@ -160,10 +141,11 @@ export function registerAdminRoutes(router: AppRouter) {
     const { route, limiter } = gate;
     const stub = getRepoStub(c.env, route.doName);
     const body = await safeParseJsonRequest(c.req.raw);
-    if (!isHeadPayload(body)) {
+    const head = AdminHeadPayloadSchema.safeParse(body);
+    if (!head.success) {
       return new Response("Invalid head payload\n", { status: 400 });
     }
-    await limiter.run("do:admin-set-head", () => stub.setHead(body));
+    await limiter.run("do:admin-set-head", () => stub.setHead(head.data));
     return new Response("OK\n");
   });
 
@@ -263,8 +245,10 @@ export function registerAdminRoutes(router: AppRouter) {
       service: "AdminPurge",
       repoId: route.doName,
     });
-    const body = await safeParseJsonRequest(c.req.raw);
-    const confirm = isJsonObject(body) && typeof body.confirm === "string" ? body.confirm : "";
+    const rawBody = await safeParseJsonRequest(c.req.raw);
+    const parsedBody = AdminPurgeRequestSchema.safeParse(rawBody);
+    const body = parsedBody.success ? parsedBody.data : { confirm: "" };
+    const confirm = body.confirm;
     if (confirm !== `purge-${owner}/${repo}`) {
       return json(
         {

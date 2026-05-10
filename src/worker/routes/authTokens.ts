@@ -1,4 +1,4 @@
-import { isJsonObject, safeParseJsonRequest } from "@/shared/web";
+import { safeParseJsonRequest } from "@/shared/web";
 import { validateSlugForRoute } from "@/shared/slugs";
 import { json, newPrefixedId } from "@/worker/common";
 import {
@@ -9,7 +9,6 @@ import {
   listPatsForUser,
   listRepositoriesForUser,
   revokePatById,
-  type PatGrantLevel,
 } from "@/worker/db/d1/dal";
 import { sameOriginViolation } from "@/worker/auth/origin";
 import { loadViewer } from "@/worker/auth/session";
@@ -22,6 +21,7 @@ import {
 import type { AppRouter } from "./hono";
 import { renderUiDocumentResponse } from "./uiResponse";
 import { safeRedirect, summarizeTokens } from "./authShared";
+import { PatCreateRequestSchema } from "./requestSchemas";
 
 export function registerAuthTokenRoutes(router: AppRouter) {
   router.get(`/auth/account`, async (c) => {
@@ -80,44 +80,32 @@ export function registerAuthTokenRoutes(router: AppRouter) {
     // `scope` and `level` are both required so contract drift surfaces as
     // a 400 instead of silently coercing. `level === "push"` includes pull
     // access by construction (see `pat_*_grants.level` CHECK).
-    const body = await safeParseJsonRequest(c.req.raw);
-    const scope =
-      isJsonObject(body) && (body.scope === "namespace" || body.scope === "repo")
-        ? body.scope
-        : null;
-    if (scope === null) {
+    const rawBody = await safeParseJsonRequest(c.req.raw);
+    const parsedBody = PatCreateRequestSchema.safeParse(rawBody);
+    if (!parsedBody.success) {
       log.warn("pat:create-invalid-scope");
       return json({ error: "Body must include scope: 'namespace' or 'repo'" }, 400);
     }
-    const name = isJsonObject(body) && typeof body.name === "string" ? body.name.trim() : "";
-    const namespaceSlug =
-      isJsonObject(body) && typeof body.namespaceSlug === "string"
-        ? body.namespaceSlug.trim().toLowerCase()
-        : "";
-    const repoSlugRaw =
-      scope === "repo" && isJsonObject(body) && typeof body.repoSlug === "string"
-        ? body.repoSlug.trim().toLowerCase()
-        : "";
-    const level: PatGrantLevel | null =
-      isJsonObject(body) && (body.level === "pull" || body.level === "push") ? body.level : null;
+    const body = parsedBody.data;
 
-    const nameValidation = validatePatName(name);
+    const nameValidation = validatePatName(body.name);
     if (!nameValidation.ok) {
       log.warn("pat:create-invalid-name", { reason: nameValidation.reason });
       return json({ error: "Invalid token name" }, 400);
     }
+    const level = body.level;
     if (level === null) {
       log.warn("pat:create-invalid-level");
       return json({ error: "Body must include level: 'pull' or 'push'" }, 400);
     }
-    const slugValidation = validateSlugForRoute(namespaceSlug);
+    const slugValidation = validateSlugForRoute(body.namespaceSlug);
     if (!slugValidation.ok) {
       log.warn("pat:create-invalid-namespace-slug", { reason: slugValidation.reason });
       return json({ error: "Invalid namespace slug" }, 400);
     }
     let repoSlug: string | null = null;
-    if (scope === "repo") {
-      const repoSlugValidation = validateSlugForRoute(repoSlugRaw);
+    if (body.scope === "repo") {
+      const repoSlugValidation = validateSlugForRoute(body.repoSlug);
       if (!repoSlugValidation.ok) {
         log.warn("pat:create-invalid-repo-slug", { reason: repoSlugValidation.reason });
         return json({ error: "Invalid repo slug" }, 400);
@@ -139,7 +127,7 @@ export function registerAuthTokenRoutes(router: AppRouter) {
     }
 
     let repoId: string | null = null;
-    if (scope === "repo" && repoSlug !== null) {
+    if (body.scope === "repo" && repoSlug !== null) {
       const repository = await findRepositoryByNamespaceAndSlug(db, namespace.id, repoSlug);
       if (!repository) {
         log.warn("pat:create-repo-not-found", {
@@ -167,14 +155,15 @@ export function registerAuthTokenRoutes(router: AppRouter) {
         revokedAt: null,
         lastUsedAt: null,
       },
-      namespaceGrants: scope === "namespace" ? [{ patId, namespaceId: namespace.id, level }] : [],
-      repoGrants: scope === "repo" && repoId !== null ? [{ patId, repoId, level }] : [],
+      namespaceGrants:
+        body.scope === "namespace" ? [{ patId, namespaceId: namespace.id, level }] : [],
+      repoGrants: body.scope === "repo" && repoId !== null ? [{ patId, repoId, level }] : [],
     });
     log.info("pat:create-ok", {
       userId: viewer.userId,
       patId,
       prefix: generated.publicPrefix,
-      scope,
+      scope: body.scope,
       namespaceSlug: slugValidation.slug,
       repoSlug,
       level,
