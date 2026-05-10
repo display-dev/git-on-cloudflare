@@ -1,10 +1,24 @@
-import { createExecutionContext } from "cloudflare:test";
+import { createExecutionContext, createMessageBatch, getQueueResult } from "cloudflare:test";
 import { env as testEnv } from "cloudflare:workers";
-import { handleRepoTaskQueue, type RepoTaskQueueMessage } from "@/worker/tasks/queue";
+import worker from "@/worker/index";
 
 export type QueueRunResult = {
   acked: boolean;
   retried: boolean;
+};
+
+// `getQueueResult()` returns more state than most tests need. Keep the
+// asserted subset named here so the helper stays typed without reaching for
+// casts when the generated Worker types do not expose `FetcherQueueResult`.
+type QueueResultState = {
+  ackAll: boolean;
+  explicitAcks: string[];
+  retryBatch: {
+    retry: boolean;
+  };
+  retryMessages: Array<{
+    msgId: string;
+  }>;
 };
 
 function createQueueMetrics(): MessageBatchMetrics {
@@ -35,35 +49,29 @@ export function createQueueSendResponse(): QueueSendResponse {
 /**
  * Run a single repo task queue message through the handler and return
  * whether it was acked or retried. Uses the real test `env` by default;
- * pass `overrideEnv` for tests that stub bindings.
+ * pass `overrideEnv` for tests that stub bindings. The Cloudflare Queue
+ * helpers own ack/retry tracking and wait for queue `ctx.waitUntil()` work.
  */
-export async function runQueueMessage(
-  body: RepoTaskQueueMessage,
-  overrideEnv?: Env
-): Promise<QueueRunResult> {
-  let acked = false;
-  let retried = false;
-  const batch: MessageBatch<RepoTaskQueueMessage> = {
-    queue: "git-on-cloudflare-repo-maint",
-    metadata: createMessageBatchMetadata(),
-    messages: [
-      {
-        id: "queue-1",
-        timestamp: new Date(),
-        body,
-        attempts: 1,
-        retry() {
-          retried = true;
-        },
-        ack() {
-          acked = true;
-        },
-      },
-    ],
-    retryAll() {},
-    ackAll() {},
-  };
+export async function runQueueMessage(body: unknown, overrideEnv?: Env): Promise<QueueRunResult> {
+  const messageId = "queue-1";
+  const messages = [
+    {
+      id: messageId,
+      timestamp: new Date(),
+      attempts: 1,
+      body,
+    },
+  ];
+  const batch = createMessageBatch("git-on-cloudflare-repo-maint", messages);
 
-  await handleRepoTaskQueue(batch, overrideEnv ?? testEnv, createExecutionContext());
-  return { acked, retried };
+  const ctx = createExecutionContext();
+  await worker.queue(batch, overrideEnv ?? testEnv, ctx);
+  const result: QueueResultState = await getQueueResult(batch, ctx);
+
+  return {
+    acked: result.ackAll || result.explicitAcks.includes(messageId),
+    retried:
+      result.retryBatch.retry ||
+      result.retryMessages.some((message) => message.msgId === messageId),
+  };
 }

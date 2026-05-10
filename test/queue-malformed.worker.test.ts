@@ -7,19 +7,19 @@ import { runQueueMessage } from "./util/queue";
 // forever or throw on `body.kind` access.
 describe("repo task queue: malformed message handling", () => {
   it("null body -> ack, no retry", async () => {
-    const result = await runQueueMessage(null as never);
+    const result = await runQueueMessage(null);
     expect(result.acked).toBe(true);
     expect(result.retried).toBe(false);
   });
 
   it("primitive body -> ack, no retry", async () => {
-    const result = await runQueueMessage("not-a-message" as never);
+    const result = await runQueueMessage("not-a-message");
     expect(result.acked).toBe(true);
     expect(result.retried).toBe(false);
   });
 
   it("object with unknown kind -> ack, no retry", async () => {
-    const result = await runQueueMessage({ kind: "unknown-kind" } as never);
+    const result = await runQueueMessage({ kind: "unknown-kind" });
     expect(result.acked).toBe(true);
     expect(result.retried).toBe(false);
   });
@@ -29,7 +29,7 @@ describe("repo task queue: malformed message handling", () => {
       kind: "legacy-backfill",
       userId: "user_x",
       namespaceSlug: "ns",
-    } as never);
+    });
     expect(result.acked).toBe(true);
     expect(result.retried).toBe(false);
   });
@@ -39,7 +39,7 @@ describe("repo task queue: malformed message handling", () => {
     const result = await runQueueMessage({
       kind: "route-cache-sync",
       repositoryId: "repo_x",
-    } as never);
+    });
     expect(result.acked).toBe(true);
     expect(result.retried).toBe(false);
   });
@@ -54,7 +54,7 @@ describe("repo task queue: malformed message handling", () => {
       doName: "ns/site",
       actor: "user",
       requestedAt: "now",
-    } as never);
+    });
     expect(result.acked).toBe(true);
     expect(result.retried).toBe(false);
   });

@@ -4,7 +4,7 @@ import { handleCompactionDeleteMessage, handleCompactionMessage } from "./compac
 import { handlePackRefBackfillMessage } from "./refBackfill";
 import { handleRouteCacheSyncMessage } from "./routeCacheSync";
 import { handleRepositoryDeleteMessage } from "./repositoryDelete";
-import { RepoTaskQueueMessageSchema, type RepoTaskQueueMessage } from "./types";
+import { RepoTaskQueueMessageSchema } from "./types";
 
 export type { RepoTaskQueueMessage, RepositoryDeleteMessage, RouteCacheSyncMessage } from "./types";
 
@@ -14,7 +14,7 @@ export type { RepoTaskQueueMessage, RepositoryDeleteMessage, RouteCacheSyncMessa
 // `git-on-cloudflare-repo-maint` for continuity. Schemas live in
 // `./types.ts`; this file dispatches.
 export async function handleRepoTaskQueue(
-  batch: MessageBatch<RepoTaskQueueMessage>,
+  batch: MessageBatch<unknown>,
   env: Env,
   ctx: ExecutionContext
 ): Promise<void> {
