@@ -29,11 +29,14 @@ export function AuthSignInPage({ errorCode }: AuthSignInPageProps) {
   const errorText = describeError(errorCode);
   return (
     <div className="mx-auto max-w-md py-10">
-      <PageHeader>
+      <PageHeader className="!mb-4">
         <div>
-          <h1 className="font-display text-3xl font-semibold text-zinc-900 dark:text-zinc-100">
+          <h1 className="m-0 font-display text-3xl font-semibold text-zinc-900 dark:text-zinc-100">
             Sign in
           </h1>
+          <p className="m-0 mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+            Authenticate with tessera to manage your namespaces.
+          </p>
         </div>
       </PageHeader>
       {errorText ? <ErrorBanner>{errorText}</ErrorBanner> : null}
