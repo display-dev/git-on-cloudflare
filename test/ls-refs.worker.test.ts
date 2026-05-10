@@ -1,8 +1,8 @@
 import { it, expect } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
-import { decodePktLines } from "@/worker/git";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { uniqueRepoId, runDOWithRetry, toRequestBody } from "./util/test-helpers";
 import { setupRepoForTests } from "./util/repoSeed";
+import { decodePktLinePayloads } from "./util/fetch-protocol";
 
 function pktLine(s: string | Uint8Array): Uint8Array {
   const enc = typeof s === "string" ? new TextEncoder().encode(s) : s;
@@ -51,15 +51,31 @@ it("ls-refs: unborn HEAD advertises correctly", async () => {
       "Content-Type": "application/x-git-upload-pack-request",
       "Git-Protocol": "version=2",
     },
-    body,
-  } as any);
+    body: toRequestBody(body),
+  });
   expect(res.status).toBe(200);
   const bytes = new Uint8Array(await res.arrayBuffer());
-  const lines = decodePktLines(bytes)
-    .filter((i) => i.type === "line")
-    .map((i: any) => i.text);
+  const lines = decodePktLinePayloads(bytes);
   // First line should indicate unborn HEAD with symref target
   expect(lines[0]).toBe("unborn HEAD symref-target:refs/heads/main\n");
+});
+
+it("ls-refs: .git upload-pack URL resolves to the canonical repository", async () => {
+  const owner = "o";
+  const repo = uniqueRepoId("r-lsrefs-dotgit");
+  await setupRepoForTests(env, owner, repo);
+  const url = `https://example.com/${owner}/${repo}.git/git-upload-pack`;
+  const body = buildLsRefsBody(["ref-prefix refs/heads/"]);
+  const res = await workerExports.default.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-git-upload-pack-request",
+      "Git-Protocol": "version=2",
+    },
+    body: toRequestBody(body),
+  });
+  expect(res.status).toBe(200);
+  expect(res.headers.get("Content-Type")).toContain("git-upload-pack-result");
 });
 
 it("ls-refs: resolved HEAD and refs are listed after seeding", async () => {
@@ -82,13 +98,11 @@ it("ls-refs: resolved HEAD and refs are listed after seeding", async () => {
       "Content-Type": "application/x-git-upload-pack-request",
       "Git-Protocol": "version=2",
     },
-    body,
-  } as any);
+    body: toRequestBody(body),
+  });
   expect(res.status).toBe(200);
   const bytes = new Uint8Array(await res.arrayBuffer());
-  const lines = decodePktLines(bytes)
-    .filter((i) => i.type === "line")
-    .map((i: any) => i.text);
+  const lines = decodePktLinePayloads(bytes);
   // First line should show HEAD resolved with symref
   expect(lines[0]).toBe(`${commitOid} HEAD symref-target:refs/heads/main\n`);
   // There should be a line for refs/heads/main

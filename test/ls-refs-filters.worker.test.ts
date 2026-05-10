@@ -1,16 +1,10 @@
 import { it, expect } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
-import {
-  pktLine,
-  delimPkt,
-  flushPkt,
-  concatChunks,
-  decodePktLines,
-  encodeGitObject,
-} from "@/worker/git";
-import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { pktLine, delimPkt, flushPkt, concatChunks, encodeGitObject } from "@/worker/git";
+import { uniqueRepoId, runDOWithRetry, toRequestBody } from "./util/test-helpers";
 import { setupRepoForTests } from "./util/repoSeed";
 import { registerTestPack } from "./util/packed-repo";
+import { decodePktLinePayloads } from "./util/fetch-protocol";
 
 function buildLsRefsBody(args: string[] = []) {
   const chunks: Uint8Array[] = [];
@@ -19,12 +13,6 @@ function buildLsRefsBody(args: string[] = []) {
   for (const a of args) chunks.push(pktLine(a + "\n"));
   chunks.push(flushPkt());
   return concatChunks(chunks);
-}
-
-function decodeLineTexts(bytes: Uint8Array): string[] {
-  return decodePktLines(bytes)
-    .filter((item) => item.type === "line")
-    .map((item: any) => item.text);
 }
 
 it("ls-refs: ref-prefix filters refs and peel adds peeled attribute for annotated tags", async () => {
@@ -76,10 +64,10 @@ it("ls-refs: ref-prefix filters refs and peel adds peeled attribute for annotate
       "Content-Type": "application/x-git-upload-pack-request",
       "Git-Protocol": "version=2",
     },
-    body,
-  } as any);
+    body: toRequestBody(body),
+  });
   expect(res.status).toBe(200);
-  const lines = decodeLineTexts(new Uint8Array(await res.arrayBuffer()));
+  const lines = decodePktLinePayloads(new Uint8Array(await res.arrayBuffer()));
 
   // HEAD should be first and present
   expect(lines[0]?.startsWith("unborn HEAD") || lines[0]?.startsWith(commitOid + " HEAD")).toBe(
@@ -155,11 +143,11 @@ it("ls-refs: peel resolves many annotated tags stored across multiple packs", as
       "Content-Type": "application/x-git-upload-pack-request",
       "Git-Protocol": "version=2",
     },
-    body: buildLsRefsBody(["ref-prefix refs/tags/", "peel"]),
-  } as any);
+    body: toRequestBody(buildLsRefsBody(["ref-prefix refs/tags/", "peel"])),
+  });
   expect(res.status).toBe(200);
 
-  const lines = decodeLineTexts(new Uint8Array(await res.arrayBuffer()));
+  const lines = decodePktLinePayloads(new Uint8Array(await res.arrayBuffer()));
   const tagLines = lines.filter((line) => line.includes(" refs/tags/"));
   expect(tagLines.length).toBe(tagCount);
   for (let index = 0; index < tagCount; index++) {

@@ -2,8 +2,8 @@ import { it, expect } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 import { uniqueRepoId } from "./util/test-helpers";
 import { setupRepoForTests } from "./util/repoSeed";
-import { decodePktLines } from "@/worker/git";
 import { seedPackFirstRepo } from "./util/pack-first";
+import { decodePktLinePayloads } from "./util/fetch-protocol";
 
 it("advertises streaming receive-pack capabilities including side-band-64k", async () => {
   const owner = "o";
@@ -26,8 +26,7 @@ it("advertises streaming receive-pack capabilities including side-band-64k", asy
   expect(res.headers.get("Content-Type")).toContain("git-receive-pack-advertisement");
 
   const bytes = new Uint8Array(await res.arrayBuffer());
-  const items = decodePktLines(bytes);
-  const lines = items.filter((i) => i.type === "line").map((i: any) => i.text);
+  const lines = decodePktLinePayloads(bytes);
 
   // First line should be the prelude
   expect(lines[0]).toBe("# service=git-receive-pack\n");
@@ -41,4 +40,25 @@ it("advertises streaming receive-pack capabilities including side-band-64k", asy
   // Streaming capabilities are always advertised
   expect(capsLine).toContain("side-band-64k");
   expect(capsLine).toContain("quiet");
+});
+
+it("advertises receive-pack over .git info/refs", async () => {
+  const owner = "o";
+  const repo = uniqueRepoId("r-recv-adv-dotgit");
+  const seeded = await setupRepoForTests(env, owner, repo);
+  const repoId = `${owner}/${repo}`;
+
+  await seedPackFirstRepo(repoId);
+
+  const url = new URL(`https://example.com/${owner}/${repo}.git/info/refs`);
+  url.searchParams.set("service", "git-receive-pack");
+
+  const res = await workerExports.default.fetch(
+    new Request(url, {
+      method: "GET",
+      headers: { Authorization: seeded.pushAuthHeader },
+    })
+  );
+  expect(res.status).toBe(200);
+  expect(res.headers.get("Content-Type")).toContain("git-receive-pack-advertisement");
 });

@@ -39,6 +39,14 @@ export function decodePktTextLines(bytes: Uint8Array): string[] {
     .map((item) => item.text.trim());
 }
 
+// Exact pkt-line payloads, including trailing LF. Use `decodePktTextLines`
+// when a test wants trimmed human-readable lines instead.
+export function decodePktLinePayloads(bytes: Uint8Array): string[] {
+  return decodePktLines(bytes)
+    .filter(isPktLine)
+    .map((item) => item.text);
+}
+
 export function findBytes(haystack: Uint8Array, needle: Uint8Array): number {
   outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
     for (let j = 0; j < needle.length; j++) {

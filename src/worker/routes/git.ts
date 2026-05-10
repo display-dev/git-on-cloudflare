@@ -228,6 +228,13 @@ function validateRouteSlugs(owner: string, repo: string): boolean {
   return isValidOwnerRepo(owner) && isValidOwnerRepo(repo);
 }
 
+function normalizeGitRouteRepoSlug(repo: string): string {
+  // Git clients append Smart HTTP endpoints to the clone URL. Accept
+  // clone-style `/repo.git/...` URLs while resolving storage against the
+  // canonical repository slug.
+  return repo.endsWith(".git") ? repo.slice(0, -".git".length) : repo;
+}
+
 function gitRequestAllowsD1Fallback(request: Request): boolean {
   const credentials = getBasicCredentials(request);
   return credentials !== null && credentials.password.length > 0;
@@ -414,7 +421,7 @@ async function authorizeGitRouteForRequest(
 export function registerGitRoutes(router: AppRouter) {
   router.get(`/:owner/:repo/info/refs`, async (c) => {
     const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
+    const repo = normalizeGitRouteRepoSlug(c.req.param("repo"));
     if (!validateRouteSlugs(owner, repo)) return gitNotFound();
     const url = new URL(c.req.url);
     const service = url.searchParams.get("service");
@@ -432,7 +439,7 @@ export function registerGitRoutes(router: AppRouter) {
 
   router.post(`/:owner/:repo/git-upload-pack`, async (c) => {
     const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
+    const repo = normalizeGitRouteRepoSlug(c.req.param("repo"));
     if (!validateRouteSlugs(owner, repo)) return gitNotFound();
     const resolved = await resolveGitRouteForRequest(c, owner, repo, "git-upload-pack", false);
     if (resolved.kind === "response") return resolved.response;
@@ -450,7 +457,7 @@ export function registerGitRoutes(router: AppRouter) {
 
   router.post(`/:owner/:repo/git-receive-pack`, async (c) => {
     const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
+    const repo = normalizeGitRouteRepoSlug(c.req.param("repo"));
     if (!validateRouteSlugs(owner, repo)) return gitNotFound();
     const resolved = await resolveGitRouteForRequest(c, owner, repo, "git-receive-pack", false);
     if (resolved.kind === "response") return resolved.response;
