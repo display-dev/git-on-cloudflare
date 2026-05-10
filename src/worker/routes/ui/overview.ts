@@ -3,11 +3,16 @@ import { readPath } from "@/worker/git";
 import { classifyRef, formatRefOption, shortRefName } from "@/shared/git/ref-display";
 import { isValidOwnerRepo, bytesToText } from "@/shared/web";
 import { buildCacheKeyFrom, cacheOrLoadJSONForRequest } from "@/worker/cache";
-import { getRepoActivity } from "@/worker/common";
 import { findNamespaceBySlug } from "@/worker/db/d1/dal/namespaces";
 import { listRepositoriesForNamespace } from "@/worker/db/d1/dal/repositories";
 import { loadViewer } from "@/worker/auth/session";
-import { badRequest, loadHeadAndRefsCached, notFound, resolveUiRepoAccess } from "./helpers";
+import {
+  badRequest,
+  loadHeadAndRefsCached,
+  loadUiRepoActivity,
+  notFound,
+  resolveUiRepoAccess,
+} from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 
@@ -105,7 +110,7 @@ export async function handleRepoOverview(c: AppContext<"/:owner/:repo">) {
     300
   );
   const readmeMd = readmeData?.md || "";
-  const progress = await getRepoActivity(env, repoId, cacheCtx);
+  const progress = await loadUiRepoActivity(env, access);
 
   return renderUiDocumentResponse(
     env,

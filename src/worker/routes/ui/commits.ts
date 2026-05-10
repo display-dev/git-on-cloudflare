@@ -9,8 +9,7 @@ import {
 import { isValidPath, formatWhen, OID_RE } from "@/shared/web";
 import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSONForRequestWithTTL } from "@/worker/cache";
-import { getRepoActivity } from "@/worker/common";
-import { badRequest, isRequestPrivate, resolveUiRepoAccess } from "./helpers";
+import { badRequest, isRequestPrivate, loadUiRepoActivity, resolveUiRepoAccess } from "./helpers";
 import { isValidRef } from "@/shared/web";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
@@ -97,7 +96,7 @@ export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
           ? `/${owner}/${repo}/commits?ref=${refEnc}&page=${page + 1}&per_page=${perPage}`
           : undefined,
     };
-    const progress = await getRepoActivity(env, repoId, cacheCtx);
+    const progress = await loadUiRepoActivity(env, access);
     return renderUiDocumentResponse(
       env,
       "commits",
@@ -274,7 +273,7 @@ export async function handleCommit(c: AppContext<"/:owner/:repo/commit/:oid">) {
     );
     const when = commit.author ? formatWhen(commit.author.when, commit.author.tz) : "";
     const parents = (commit.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
-    const progress = await getRepoActivity(env, repoId, cacheCtx);
+    const progress = await loadUiRepoActivity(env, access);
     return renderUiDocumentResponse(
       env,
       "commit",

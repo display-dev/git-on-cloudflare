@@ -4,9 +4,12 @@ import { env, exports as workerExports } from "cloudflare:workers";
 import { newPrefixedId } from "@/worker/common";
 import { createDb } from "@/worker/db/d1/client";
 import { claimNamespace, insertMembershipIfMissing, insertUserIfNew } from "@/worker/db/d1/dal";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 
 import { ensureD1Migrations } from "./util/d1Setup";
 import { mintSessionCookie, setupRepoForTests } from "./util/repoSeed";
+import { seedPackFirstRepo } from "./util/pack-first";
+import { runDOWithRetry } from "./util/test-helpers";
 
 beforeAll(async () => {
   await ensureD1Migrations(env);
@@ -30,6 +33,21 @@ async function makeOutsider(): Promise<string> {
   return await mintSessionCookie(env, userId);
 }
 
+async function setupPublicRepoWithReceiveActivity(owner: string, repo: string) {
+  const seededRepo = await setupRepoForTests(env, owner, repo, { visibility: "public" });
+  const seededPack = await seedPackFirstRepo(`${owner}/${repo}`);
+  await runDOWithRetry(seededPack.getStub, async (_instance, state) => {
+    const store = asTypedStorage<RepoStateSchema>(state.storage);
+    const now = Date.now();
+    await store.put("receiveLease", {
+      token: `test-receive-lease-${owner}-${repo}`,
+      createdAt: now,
+      expiresAt: now + 60_000,
+    });
+  });
+  return seededRepo;
+}
+
 describe("repo page route-cache disclosure", () => {
   it("anonymous + public repo + missing route cache -> 404", async () => {
     const owner = `dis-route-${Math.random().toString(36).slice(2, 8)}`;
@@ -42,6 +60,45 @@ describe("repo page route-cache disclosure", () => {
       redirect: "manual",
     });
     expect(res.status).toBe(404);
+  });
+
+  it("anonymous + public repo + active receive lease -> hides activity banner", async () => {
+    const owner = `dis-act-anon-${Math.random().toString(36).slice(2, 8)}`;
+    const repo = "site";
+    await setupPublicRepoWithReceiveActivity(owner, repo);
+    const res = await workerExports.default.fetch(`https://example.com/${owner}/${repo}`, {
+      redirect: "manual",
+    });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).not.toContain("Receiving push...");
+  });
+
+  it("signed-in non-member + public repo + active receive lease -> hides activity banner", async () => {
+    const owner = `dis-act-out-${Math.random().toString(36).slice(2, 8)}`;
+    const repo = "site";
+    await setupPublicRepoWithReceiveActivity(owner, repo);
+    const outsider = await makeOutsider();
+    const res = await workerExports.default.fetch(`https://example.com/${owner}/${repo}`, {
+      headers: { Cookie: outsider },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).not.toContain("Receiving push...");
+  });
+
+  it("namespace member + public repo + active receive lease -> shows activity banner", async () => {
+    const owner = `dis-act-mem-${Math.random().toString(36).slice(2, 8)}`;
+    const repo = "site";
+    const seeded = await setupPublicRepoWithReceiveActivity(owner, repo);
+    const res = await workerExports.default.fetch(`https://example.com/${owner}/${repo}`, {
+      headers: { Cookie: seeded.cookieHeader },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("Receiving push...");
   });
 });
 

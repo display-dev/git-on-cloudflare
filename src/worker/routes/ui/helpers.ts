@@ -11,6 +11,7 @@ import { buildCacheKeyFrom, cacheOrLoadJSONForRequest } from "@/worker/cache";
 import { isRequestPrivate, markRequestPrivate } from "@/worker/cache/policy";
 import { loadSessionMembership } from "@/worker/auth/sessionMembership";
 import { loadViewer } from "@/worker/auth/session";
+import { getRepoActivity, type RepoActivity } from "@/worker/common";
 import { createLogger } from "@/worker/common/logger";
 import { countSubrequest, getLimiter, type Limiter } from "@/worker/git/operations/limits";
 import { packRefsKey } from "@/worker/keys";
@@ -117,13 +118,20 @@ export function notFoundJson(): Response {
 
 // Bundle for the resolve+session+visibility decision shared by every UI
 // repo-serving handler. Returns either:
-//   - { kind: "ok", route, cacheCtx, viewer }: caller proceeds to render. The
-//     `cacheCtx` is already marked private (no-cache flags) when applicable.
+//   - { kind: "ok", route, cacheCtx, viewer, showActivityBanner }: caller
+//     proceeds to render. The `cacheCtx` is already marked private when
+//     private repository data is rendered.
 //   - { kind: "response", response }: caller returns the response as-is.
 //     Centralizes the non-disclosure rule (private + non-member -> 404,
 //     identical to private + anonymous).
 export type UiRepoAccess =
-  | { kind: "ok"; route: RepositoryRoute; cacheCtx: CacheContext; viewer: Viewer | null }
+  | {
+      kind: "ok";
+      route: RepositoryRoute;
+      cacheCtx: CacheContext;
+      viewer: Viewer | null;
+      showActivityBanner: boolean;
+    }
   | { kind: "response"; response: Response };
 
 export type AdminRepoAccess =
@@ -162,7 +170,18 @@ export async function resolveUiRepoAccess(
     };
   }
   if (route.visibility === "public") {
-    return { kind: "ok", route, cacheCtx, viewer };
+    if (!viewer) {
+      return { kind: "ok", route, cacheCtx, viewer, showActivityBanner: false };
+    }
+    const membership = await loadSessionMembership(c, route.namespaceId);
+    const showActivityBanner = membership.kind === "member";
+    return {
+      kind: "ok",
+      route,
+      cacheCtx,
+      viewer: membership.kind === "anonymous" ? viewer : membership.viewer,
+      showActivityBanner,
+    };
   }
   if (!viewer) {
     const log = c.var.logFor({ service: "UiAcl", repoId: route.doName });
@@ -191,7 +210,15 @@ export async function resolveUiRepoAccess(
     };
   }
   markRequestPrivate(cacheCtx);
-  return { kind: "ok", route, cacheCtx, viewer: membership.viewer };
+  return { kind: "ok", route, cacheCtx, viewer: membership.viewer, showActivityBanner: true };
+}
+
+export async function loadUiRepoActivity(
+  env: Env,
+  access: Extract<UiRepoAccess, { kind: "ok" }>
+): Promise<RepoActivity | null> {
+  if (!access.showActivityBanner) return null;
+  return await getRepoActivity(env, access.route.doName, access.cacheCtx);
 }
 
 function adminForbidden(): Response {

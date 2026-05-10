@@ -11,8 +11,7 @@ import {
 import { renderUiView } from "@/client/server/render";
 import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSONForRequestWithTTL } from "@/worker/cache";
-import { getRepoActivity } from "@/worker/common";
-import { badRequest, isRequestPrivate, resolveUiRepoAccess } from "./helpers";
+import { badRequest, isRequestPrivate, loadUiRepoActivity, resolveUiRepoAccess } from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 import type { ReadPathResult } from "@/worker/git";
@@ -159,7 +158,7 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
         parts.length > 0
           ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
           : null;
-      const progress = await getRepoActivity(env, repoId, cacheCtx);
+      const progress = await loadUiRepoActivity(env, access);
       const viewer = access.viewer;
       return renderUiDocumentResponse(
         env,
@@ -187,7 +186,7 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
       const title = path || result.oid;
       const langs = getHighlightLangsForBlobSmart(title, text);
       const codeLang = langs[0] || null;
-      const progress = await getRepoActivity(env, repoId, cacheCtx);
+      const progress = await loadUiRepoActivity(env, access);
       const viewer = access.viewer;
       return renderUiDocumentResponse(
         env,
