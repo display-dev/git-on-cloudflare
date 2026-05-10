@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { env, SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { encodeGitObject, listCommitChangedFiles, readCommitFilePatch } from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry, type RepoDOStubFactory } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { registerTestPack } from "./util/packed-repo";
 
 type TreeSpec = {
@@ -94,6 +95,7 @@ describe("commit diff v1", () => {
   it("lists added files for a root commit", async () => {
     const owner = "o";
     const repo = uniqueRepoId("r-diff-root");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -130,6 +132,7 @@ describe("commit diff v1", () => {
   it("detects modifications and file-to-directory transitions", async () => {
     const owner = "o";
     const repo = uniqueRepoId("r-diff-transition");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -194,6 +197,7 @@ describe("commit diff v1", () => {
   it("truncates when maxFiles is exceeded", async () => {
     const owner = "o";
     const repo = uniqueRepoId("r-diff-truncate-files");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -224,6 +228,7 @@ describe("commit diff v1", () => {
   it("truncates when the time budget is exceeded", async () => {
     const owner = "o";
     const repo = uniqueRepoId("r-diff-truncate-time");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -259,6 +264,7 @@ describe("commit diff v1", () => {
   it("generates a lazy patch for a modified text file", async () => {
     const owner = "o";
     const repo = uniqueRepoId("r-diff-patch");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -290,6 +296,7 @@ describe("commit diff v1", () => {
   it("skips binary patch previews", async () => {
     const owner = "o";
     const repo = uniqueRepoId("r-diff-binary");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -319,6 +326,7 @@ describe("commit diff v1", () => {
   it("returns lazy patch JSON for a commit path", async () => {
     const owner = "o";
     const repo = uniqueRepoId("r-diff-route-patch");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -330,7 +338,7 @@ describe("commit diff v1", () => {
     await setMainRef(getStub, commit.oid);
     await packAll(repoId, getStub, [readme, tree, commit]);
 
-    const res = await SELF.fetch(
+    const res = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/commit/${commit.oid}/diff?path=${encodeURIComponent("README.md")}`
     );
 
@@ -352,6 +360,7 @@ describe("commit diff v1", () => {
   it("commit page renders files changed and first-parent note for merge commits", async () => {
     const owner = "o";
     const repo = uniqueRepoId("r-diff-route");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -404,7 +413,9 @@ describe("commit diff v1", () => {
       mergeCommit,
     ]);
 
-    const res = await SELF.fetch(`https://example.com/${owner}/${repo}/commit/${mergeCommit.oid}`);
+    const res = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/commit/${mergeCommit.oid}`
+    );
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toContain("text/html");
 

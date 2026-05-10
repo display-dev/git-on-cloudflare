@@ -1,4 +1,3 @@
-import type { CacheContext } from "@/worker/cache";
 import type { CommitDiffResult, CommitFilePatchResult } from "@/shared/git/types";
 import {
   listCommitsFirstParentRange,
@@ -7,27 +6,25 @@ import {
   listCommitChangedFiles,
   readCommitFilePatch,
 } from "@/worker/git";
-import { isValidOwnerRepo, isValidRef, isValidPath, formatWhen, OID_RE } from "@/shared/web";
+import { isValidPath, formatWhen, OID_RE } from "@/shared/web";
 import { handleError } from "@/client/server/error";
-import { repoKey } from "@/worker/keys";
 import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
-import { loadViewer } from "@/worker/auth/session";
-import { badRequest } from "./helpers";
+import { badRequest, isRequestPrivate, resolveUiRepoAccess } from "./helpers";
+import { isValidRef } from "@/shared/web";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 
 export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
-  const request = c.req.raw;
   const env = c.env;
-  const ctx = c.executionCtx;
   const owner = c.req.param("owner");
   const repo = c.req.param("repo");
-  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
-    return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
-  }
-  const repoId = repoKey(owner, repo);
-  const u = new URL(request.url);
+  const access = await resolveUiRepoAccess(c, owner, repo);
+  if (access.kind === "response") return access.response;
+  const { route, cacheCtx } = access;
+  const repoId = route.doName;
+  const isPrivate = isRequestPrivate(cacheCtx);
+  const u = new URL(c.req.url);
   const ref = u.searchParams.get("ref") || "main";
   if (!isValidRef(ref)) {
     return badRequest(env, "Invalid ref", "Ref format not allowed", {
@@ -40,55 +37,59 @@ export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
   const perRaw = Number(u.searchParams.get("per_page") || "25");
   const perPage = Number.isFinite(perRaw) ? Math.max(5, Math.min(100, Math.floor(perRaw))) : 25;
   try {
-    const cacheCtx: CacheContext = { req: request, ctx };
     let page = Number(pageRaw);
     if (!Number.isFinite(page) || page < 0) page = 0;
-    let offset = page * perPage;
+    const offset = page * perPage;
 
-    const cacheKey = buildCacheKeyFrom(request, "/_cache/commits", {
-      repo: repoId,
-      ref,
-      per_page: String(perPage),
-      page: String(page),
-      offset: String(offset),
-    });
-
-    const commitsView = await cacheOrLoadJSONWithTTL<
-      Array<{
-        oid: string;
-        shortOid: string;
-        firstLine: string;
-        authorName: string;
-        when: string;
-      }>
-    >(
-      cacheKey,
-      async () => {
-        const commits = await listCommitsFirstParentRange(
-          env,
-          repoId,
-          ref,
-          offset,
-          perPage,
-          cacheCtx
-        );
-        return commits.map((c) => ({
-          oid: c.oid,
-          shortOid: c.oid.slice(0, 7),
-          firstLine: (c.message || "").split(/\r?\n/, 1)[0],
-          authorName: c.author?.name || "",
-          when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
-          isMerge: Array.isArray(c.parents) && c.parents.length > 1,
-        }));
-      },
-      () => {
-        const isOid = OID_RE.test(ref);
-        const isTag = ref.startsWith("refs/tags/");
-        // Branch commits: 300s; Tags/OIDs (immutable): 3600s
-        return isOid || isTag ? 3600 : 300;
-      },
-      ctx
-    );
+    const loader = async () => {
+      const commits = await listCommitsFirstParentRange(
+        env,
+        repoId,
+        ref,
+        offset,
+        perPage,
+        cacheCtx
+      );
+      return commits.map((c) => ({
+        oid: c.oid,
+        shortOid: c.oid.slice(0, 7),
+        firstLine: (c.message || "").split(/\r?\n/, 1)[0],
+        authorName: c.author?.name || "",
+        when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
+        isMerge: Array.isArray(c.parents) && c.parents.length > 1,
+      }));
+    };
+    let commitsView;
+    if (isPrivate) {
+      commitsView = await loader();
+    } else {
+      const cacheKey = buildCacheKeyFrom(c.req.raw, "/_cache/commits", {
+        repo: repoId,
+        ref,
+        per_page: String(perPage),
+        page: String(page),
+        offset: String(offset),
+      });
+      commitsView = await cacheOrLoadJSONWithTTL<
+        Array<{
+          oid: string;
+          shortOid: string;
+          firstLine: string;
+          authorName: string;
+          when: string;
+        }>
+      >(
+        cacheKey,
+        loader,
+        () => {
+          const isOid = OID_RE.test(ref);
+          const isTag = ref.startsWith("refs/tags/");
+          // Branch commits: 300s; Tags/OIDs (immutable): 3600s
+          return isOid || isTag ? 3600 : 300;
+        },
+        c.executionCtx
+      );
+    }
     const list = commitsView || [];
     const last = list[list.length - 1]?.oid || "";
     const refEnc = encodeURIComponent(ref);
@@ -106,8 +107,7 @@ export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
           ? `/${owner}/${repo}/commits?ref=${refEnc}&page=${page + 1}&per_page=${perPage}`
           : undefined,
     };
-    const progress = await getRepoActivity(env, repoId);
-    const viewer = await loadViewer(c);
+    const progress = await getRepoActivity(env, repoId, cacheCtx);
     return renderUiDocumentResponse(
       env,
       "commits",
@@ -121,7 +121,11 @@ export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
         pager,
         progress,
       },
-      { failureBody: "Failed to render view", viewer }
+      {
+        cacheControl: isPrivate ? "no-store" : undefined,
+        failureBody: "Failed to render view",
+        viewer: access.viewer,
+      }
     );
   } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {
@@ -132,19 +136,14 @@ export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
   }
 }
 
-export async function handleCommitFragments({
-  req,
-  env,
-  executionCtx,
-}: AppContext<"/:owner/:repo/commits/fragments/:oid">) {
-  const request = req.raw;
-  const ctx = executionCtx;
-  const owner = req.param("owner");
-  const repo = req.param("repo");
-  const oid = req.param("oid");
-  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
-    return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
-  }
+export async function handleCommitFragments(c: AppContext<"/:owner/:repo/commits/fragments/:oid">) {
+  const env = c.env;
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
+  const oid = c.req.param("oid");
+  const access = await resolveUiRepoAccess(c, owner, repo, { responseShape: "json" });
+  if (access.kind === "response") return access.response;
+  const { route, cacheCtx } = access;
   if (!OID_RE.test(oid)) {
     return badRequest(env, "Invalid OID", "OID must be 40 hex", {
       owner,
@@ -152,12 +151,11 @@ export async function handleCommitFragments({
       refEnc: encodeURIComponent(oid),
     });
   }
-  const u = new URL(request.url);
+  const u = new URL(c.req.url);
   const limitRaw = Number(u.searchParams.get("limit") || "20");
   const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.floor(limitRaw))) : 20;
-  const repoId = repoKey(owner, repo);
+  const repoId = route.doName;
   try {
-    const cacheCtx: CacheContext = { req: request, ctx };
     const side = await listMergeSideFirstParent(
       env,
       repoId,
@@ -165,8 +163,8 @@ export async function handleCommitFragments({
       limit,
       {
         scanLimit: Math.min(400, limit * 5),
-        timeBudgetMs: 5000, // Increased for production R2 latency
-        mainlineProbe: 50, // Reduced to speed up initial probe
+        timeBudgetMs: 5000,
+        mainlineProbe: 50,
       },
       cacheCtx
     );
@@ -194,15 +192,14 @@ export async function handleCommitFragments({
 }
 
 export async function handleCommitDiff(c: AppContext<"/:owner/:repo/commit/:oid/diff">) {
-  const request = c.req.raw;
   const env = c.env;
-  const ctx = c.executionCtx;
   const owner = c.req.param("owner");
   const repo = c.req.param("repo");
   const oid = c.req.param("oid");
-  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
-    return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
-  }
+  const access = await resolveUiRepoAccess(c, owner, repo, { responseShape: "json" });
+  if (access.kind === "response") return access.response;
+  const { route, cacheCtx } = access;
+  const isPrivate = isRequestPrivate(cacheCtx);
   if (!OID_RE.test(oid)) {
     return badRequest(env, "Invalid commit OID", "Commit id must be 40-hex", {
       owner,
@@ -210,7 +207,7 @@ export async function handleCommitDiff(c: AppContext<"/:owner/:repo/commit/:oid/
       refEnc: encodeURIComponent(oid),
     });
   }
-  const url = new URL(request.url);
+  const url = new URL(c.req.url);
   const path = url.searchParams.get("path") || "";
   if (!path || !isValidPath(path)) {
     return badRequest(env, "Invalid path", "Path contains invalid characters or is too long", {
@@ -220,21 +217,26 @@ export async function handleCommitDiff(c: AppContext<"/:owner/:repo/commit/:oid/
       path,
     });
   }
-  const repoId = repoKey(owner, repo);
+  const repoId = route.doName;
   try {
-    const cacheCtx: CacheContext = { req: request, ctx };
-    const patchCacheKey = buildCacheKeyFrom(request, "/_cache/commit-patch", {
-      repo: repoId,
-      oid,
-      path,
-      v: "1",
-    });
-    const patch = await cacheOrLoadJSONWithTTL<CommitFilePatchResult>(
-      patchCacheKey,
-      async () => await readCommitFilePatch(env, repoId, oid, path, cacheCtx),
-      () => 86400,
-      ctx
-    );
+    const loader = async () => await readCommitFilePatch(env, repoId, oid, path, cacheCtx);
+    let patch: CommitFilePatchResult | null;
+    if (isPrivate) {
+      patch = await loader();
+    } else {
+      const patchCacheKey = buildCacheKeyFrom(c.req.raw, "/_cache/commit-patch", {
+        repo: repoId,
+        oid,
+        path,
+        v: "1",
+      });
+      patch = await cacheOrLoadJSONWithTTL<CommitFilePatchResult>(
+        patchCacheKey,
+        loader,
+        () => 86400,
+        c.executionCtx
+      );
+    }
     return new Response(JSON.stringify(patch), {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -253,15 +255,14 @@ export async function handleCommitDiff(c: AppContext<"/:owner/:repo/commit/:oid/
 }
 
 export async function handleCommit(c: AppContext<"/:owner/:repo/commit/:oid">) {
-  const request = c.req.raw;
   const env = c.env;
-  const ctx = c.executionCtx;
   const owner = c.req.param("owner");
   const repo = c.req.param("repo");
   const oid = c.req.param("oid");
-  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
-    return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
-  }
+  const access = await resolveUiRepoAccess(c, owner, repo);
+  if (access.kind === "response") return access.response;
+  const { route, cacheCtx } = access;
+  const isPrivate = isRequestPrivate(cacheCtx);
   if (!OID_RE.test(oid)) {
     return badRequest(env, "Invalid commit OID", "Commit id must be 40-hex", {
       owner,
@@ -269,28 +270,32 @@ export async function handleCommit(c: AppContext<"/:owner/:repo/commit/:oid">) {
       refEnc: encodeURIComponent(oid),
     });
   }
-  const repoId = repoKey(owner, repo);
+  const repoId = route.doName;
   try {
-    const cacheCtx: CacheContext = { req: request, ctx };
     const commit = await readCommitInfo(env, repoId, oid, cacheCtx);
-    const diffCacheKey = buildCacheKeyFrom(request, "/_cache/commit-diff", {
-      repo: repoId,
-      oid,
-      v: "1",
-    });
-    const diff = await cacheOrLoadJSONWithTTL<CommitDiffResult>(
-      diffCacheKey,
-      async () =>
-        await listCommitChangedFiles(env, repoId, oid, cacheCtx, {
-          timeBudgetMs: 5000,
-        }),
-      () => 86400,
-      ctx
-    );
+    const diffLoader = async () =>
+      await listCommitChangedFiles(env, repoId, oid, cacheCtx, {
+        timeBudgetMs: 5000,
+      });
+    let diff: CommitDiffResult | null;
+    if (isPrivate) {
+      diff = await diffLoader();
+    } else {
+      const diffCacheKey = buildCacheKeyFrom(c.req.raw, "/_cache/commit-diff", {
+        repo: repoId,
+        oid,
+        v: "1",
+      });
+      diff = await cacheOrLoadJSONWithTTL<CommitDiffResult>(
+        diffCacheKey,
+        diffLoader,
+        () => 86400,
+        c.executionCtx
+      );
+    }
     const when = commit.author ? formatWhen(commit.author.when, commit.author.tz) : "";
     const parents = (commit.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
-    const progress = await getRepoActivity(env, repoId);
-    const viewer = await loadViewer(c);
+    const progress = await getRepoActivity(env, repoId, cacheCtx);
     return renderUiDocumentResponse(
       env,
       "commit",
@@ -320,7 +325,11 @@ export async function handleCommit(c: AppContext<"/:owner/:repo/commit/:oid">) {
         diffTruncated: diff?.truncated || false,
         diffTruncateReason: diff?.truncateReason || "",
       },
-      { failureBody: "Failed to render view", viewer }
+      {
+        cacheControl: isPrivate ? "no-store" : undefined,
+        failureBody: "Failed to render view",
+        viewer: access.viewer,
+      }
     );
   } catch (e) {
     return handleError(env, e, `Error · ${owner}/${repo}`, {

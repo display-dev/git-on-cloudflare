@@ -1,5 +1,5 @@
 import { it, expect, describe } from "vitest";
-import { env, SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/worker/git";
 import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream";
 import {
@@ -8,6 +8,7 @@ import {
   planUploadPack,
 } from "@/worker/git/operations/fetch/plan";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { asBufferSource } from "@/worker/common";
 import { packRefsKey } from "@/worker/keys";
 import { runQueueMessage } from "./util/queue";
@@ -74,14 +75,17 @@ async function postFinalFetch(args: {
     haves: args.haves,
     done: true,
   });
-  return await SELF.fetch(`https://example.com/${args.owner}/${args.repo}/git-upload-pack`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-git-upload-pack-request",
-      "Git-Protocol": "version=2",
-    },
-    body: asBufferSource(body),
-  });
+  return await workerExports.default.fetch(
+    `https://example.com/${args.owner}/${args.repo}/git-upload-pack`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body: asBufferSource(body),
+    }
+  );
 }
 
 async function expectRetryThenBackfillRepair(args: {
@@ -127,6 +131,7 @@ describe("git fetch streaming (default)", () => {
   it("handles fetch with streaming by default", async () => {
     const owner = "o";
     const repo = uniqueRepoId("streaming");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // Seed a repository with some commits
@@ -139,7 +144,7 @@ describe("git fetch streaming (default)", () => {
     const body = buildFetchBody({ wants: [commitOid], done: true });
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-    const res = await SELF.fetch(url, {
+    const res = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -221,6 +226,7 @@ describe("git fetch streaming (default)", () => {
   it("handles incremental fetch with haves", async () => {
     const owner = "o";
     const repo = uniqueRepoId("incremental");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // Seed repository and get multiple commits
@@ -245,7 +251,7 @@ describe("git fetch streaming (default)", () => {
     });
 
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-    const negotiateRes = await SELF.fetch(url, {
+    const negotiateRes = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -287,7 +293,7 @@ describe("git fetch streaming (default)", () => {
       done: true,
     });
 
-    const fetchRes = await SELF.fetch(url, {
+    const fetchRes = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -340,6 +346,7 @@ describe("git fetch streaming (default)", () => {
   it("returns retry before packfile when an active pack ref sidecar is missing and backfill repairs it", async () => {
     const owner = "o";
     const repo = uniqueRepoId("missing-ref-sidecar");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -364,7 +371,7 @@ describe("git fetch streaming (default)", () => {
       done: true,
     });
 
-    const retryRes = await SELF.fetch(url, {
+    const retryRes = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -385,7 +392,7 @@ describe("git fetch streaming (default)", () => {
     expect(queueResult).toEqual({ acked: true, retried: false });
     await expect(env.REPO_BUCKET.head(packRefsKey(targetPack.packKey))).resolves.toBeTruthy();
 
-    const okRes = await SELF.fetch(url, {
+    const okRes = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -401,6 +408,7 @@ describe("git fetch streaming (default)", () => {
   it("backfills refs for an already-active same-pack REF_DELTA pack", async () => {
     const owner = "o";
     const repo = uniqueRepoId("missing-ref-sidecar-ref-delta");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -459,6 +467,7 @@ describe("git fetch streaming (default)", () => {
   it("backfills refs when the newest external duplicate base points back to the target pack", async () => {
     const owner = "o";
     const repo = uniqueRepoId("missing-ref-sidecar-external-duplicate-cycle");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -521,6 +530,7 @@ describe("git fetch streaming (default)", () => {
   it("plans final fetch from valid sidecars without closure-time range reads", async () => {
     const owner = "o";
     const repo = uniqueRepoId("valid-ref-sidecar-no-range");
+    await setupRepoForTests(env, owner, repo);
     const { repoId, firstCommit, secondCommit } = await seedTwoCommitRepo(owner, repo);
     const cacheCtx = createTestCacheContext(`https://example.com/${repoId}/git-upload-pack`);
     const labels: string[] = [];
@@ -553,6 +563,7 @@ describe("git fetch streaming (default)", () => {
   it("returns retry before packfile when an active pack ref sidecar is corrupt", async () => {
     const owner = "o";
     const repo = uniqueRepoId("corrupt-ref-sidecar");
+    await setupRepoForTests(env, owner, repo);
     const { repoId, doId, getStub, firstCommit, secondCommit } = await seedTwoCommitRepo(
       owner,
       repo
@@ -581,6 +592,7 @@ describe("git fetch streaming (default)", () => {
   it("returns retry before packfile when an active pack ref sidecar is stale", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stale-ref-sidecar");
+    await setupRepoForTests(env, owner, repo);
     const { repoId, doId, getStub, firstCommit, secondCommit } = await seedTwoCommitRepo(
       owner,
       repo
@@ -609,6 +621,7 @@ describe("git fetch streaming (default)", () => {
   it("does not require pack ref sidecars for negotiation-only upload-pack planning", async () => {
     const owner = "o";
     const repo = uniqueRepoId("negotiation-ref-sidecar");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -636,6 +649,7 @@ describe("git fetch streaming (default)", () => {
   it("handles initial clone (no haves) with streaming", async () => {
     const owner = "o";
     const repo = uniqueRepoId("clone");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // Seed a repository
@@ -649,7 +663,7 @@ describe("git fetch streaming (default)", () => {
     const body = buildFetchBody({ wants: [commitOid], done: true });
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-    const res = await SELF.fetch(url, {
+    const res = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -695,6 +709,7 @@ describe("git fetch streaming (default)", () => {
   it("handles repositories with packs created by default", async () => {
     const owner = "o";
     const repo = uniqueRepoId("with-pack");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // Seed repository with packed objects (default behavior)
@@ -708,7 +723,7 @@ describe("git fetch streaming (default)", () => {
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
     // Streaming is now the default
-    const res = await SELF.fetch(url, {
+    const res = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -754,6 +769,7 @@ describe("git fetch streaming (default)", () => {
   it("returns 503 when pack assembly fails", async () => {
     const owner = "o";
     const repo = uniqueRepoId("fail");
+    await setupRepoForTests(env, owner, repo);
 
     // Request fetch for non-existent objects
     const body = buildFetchBody({
@@ -762,7 +778,7 @@ describe("git fetch streaming (default)", () => {
     });
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-    const res = await SELF.fetch(url, {
+    const res = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -779,6 +795,7 @@ describe("git fetch streaming (default)", () => {
   it("handles request abort mid-stream gracefully", async () => {
     const owner = "o";
     const repo = uniqueRepoId("abort");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // Seed repository with multiple objects to ensure streaming takes some time
@@ -801,7 +818,7 @@ describe("git fetch streaming (default)", () => {
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
     const abortController = new AbortController();
 
-    const fetchPromise = SELF.fetch(url, {
+    const fetchPromise = workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -834,6 +851,7 @@ describe("git fetch streaming (default)", () => {
   it("emits band-3 fatal message on mid-stream error", async () => {
     const owner = "o";
     const repo = uniqueRepoId("fatal");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // This test is tricky to implement without mocking R2 failures
@@ -865,7 +883,7 @@ describe("git fetch streaming (default)", () => {
 
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-    const res = await SELF.fetch(url, {
+    const res = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -898,6 +916,7 @@ describe("git fetch streaming (default)", () => {
   it("handles abort signal during negotiation phase", async () => {
     const owner = "o";
     const repo = uniqueRepoId("abort-negotiation");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // Seed repository with commits
@@ -933,6 +952,7 @@ describe("git fetch streaming (default)", () => {
   it("verifies streaming response includes progress messages", async () => {
     const owner = "o";
     const repo = uniqueRepoId("progress");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // Create a repository with enough content to trigger progress messages
@@ -956,7 +976,7 @@ describe("git fetch streaming (default)", () => {
     const body = buildFetchBody({ wants: commits, done: true });
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-    const res = await SELF.fetch(url, {
+    const res = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -993,6 +1013,7 @@ describe("git fetch streaming (default)", () => {
   it("emits pack preparation progress before pack data for initial fetches", async () => {
     const owner = "o";
     const repo = uniqueRepoId("early-progress");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // Seed repository with some commits and ensure they're packed
@@ -1005,7 +1026,7 @@ describe("git fetch streaming (default)", () => {
     const body = buildFetchBody({ wants: [commitOid], done: true });
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-    const res = await SELF.fetch(url, {
+    const res = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",
@@ -1056,6 +1077,7 @@ describe("git fetch streaming (default)", () => {
   it("emits pack preparation progress before pack data when haves are present", async () => {
     const owner = "o";
     const repo = uniqueRepoId("have-progress");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     const id = env.REPO_DO.idFromName(repoId);
@@ -1078,7 +1100,7 @@ describe("git fetch streaming (default)", () => {
     });
     const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
 
-    const res = await SELF.fetch(url, {
+    const res = await workerExports.default.fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-git-upload-pack-request",

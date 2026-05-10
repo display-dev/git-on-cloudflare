@@ -8,13 +8,9 @@ import {
 import { findRepositoryByDoName } from "@/worker/db/d1/dal/repositories";
 import { findMembership, findNamespaceBySlug } from "@/worker/db/d1/dal/namespaces";
 
-// PAT format helpers (parse/generate/hash/validate-name) are consumed by
-// the `/auth/api/tokens` management endpoints. `verifyPat` is the
-// authentication path used to gate git fetch/push; it lives here so the
-// management and verification surfaces share the same parsing/hashing
-// invariants. The serving-path-invariants worker test enforces that no
-// repo-serving handler imports `verifyPat` until visibility-aware ACLs
-// are wired through the resolver.
+// Parse/generate/hash/validate helpers and `verifyPat` share a single file
+// so the management and verification surfaces stay on the same parsing and
+// hashing rules.
 
 const PAT_PREFIX_PUBLIC = "goc_";
 const PAT_PREFIX_HEX_LENGTH = 8;
@@ -112,11 +108,6 @@ export function validatePatName(input: string): PatNameValidation {
   return { ok: true, name: trimmed };
 }
 
-// ---------------------------------------------------------------------------
-// PAT verifier. Used by visibility-aware authentication paths once the
-// resolver hookup lands; the serving-path-invariants test bans `verifyPat`
-// from `routes/git.ts`, `routes/admin.ts`, and `routes/ui/*` until then.
-
 export type PatVerifyOk = {
   ok: true;
   patId: string;
@@ -127,6 +118,9 @@ export type PatVerifyOk = {
   // authorizes fetch/clone because `push` includes `pull` by construction
   // (DB CHECK constraint on `pat_*_grants.level`).
   level: PatGrantLevel;
+  // Loaded value at verification time so callers throttle the write
+  // decision in Worker memory; see `shouldTouchPatLastUsedAt`.
+  lastUsedAt: number | null;
 };
 
 export type PatVerifyError =
@@ -231,6 +225,7 @@ export async function verifyPat(env: Env, args: VerifyPatArgs): Promise<PatVerif
         namespaceId: resolvedNamespaceId,
         repositoryId: resolvedRepositoryId,
         level: repoGrant.level,
+        lastUsedAt: pat.lastUsedAt,
       };
     }
   }
@@ -243,10 +238,27 @@ export async function verifyPat(env: Env, args: VerifyPatArgs): Promise<PatVerif
       namespaceId: resolvedNamespaceId,
       repositoryId: resolvedRepositoryId,
       level: namespaceGrant.level,
+      lastUsedAt: pat.lastUsedAt,
     };
   }
 
   return { ok: false, reason: "grant-missing" };
+}
+
+// Writes always update; reads only when the prior value is older than this
+// window (or null) so D1 is not written on every clone.
+export const PAT_LAST_USED_READ_THROTTLE_MS = 15 * 60 * 1000;
+
+export type PatLastUsedOp = "read" | "write";
+
+export function shouldTouchPatLastUsedAt(
+  lastUsedAt: number | null,
+  op: PatLastUsedOp,
+  now: number = Date.now()
+): boolean {
+  if (op === "write") return true;
+  if (lastUsedAt === null) return true;
+  return now - lastUsedAt >= PAT_LAST_USED_READ_THROTTLE_MS;
 }
 
 // Internal: callers in management endpoints need to confirm the

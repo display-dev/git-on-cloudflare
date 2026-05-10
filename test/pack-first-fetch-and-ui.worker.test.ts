@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { env, SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import type { RepoStateSchema } from "@/worker/do/repo/repoState";
 
 import { buildPack, callStubWithRetry, runDOWithRetry, uniqueRepoId } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { asTypedStorage, objKey } from "@/worker/do/repo/repoState";
 import { encodeGitObject } from "@/worker/git/core";
 import { doPrefix, r2LooseKey, r2PackKey } from "@/worker/keys";
@@ -120,32 +121,35 @@ describe("pack-first fetch and UI", () => {
   it("serves UI routes from packs after loose copies are deleted", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-first-ui");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const { commit2, blob2 } = await seedPackedOnlyRepo(repoId);
 
-    const rawRes = await SELF.fetch(
+    const rawRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${encodeURIComponent(blob2.oid)}&name=hello.txt`
     );
     expect(rawRes.status).toBe(200);
     expect(await rawRes.text()).toBe("hello from v2\n");
 
-    const treeRes = await SELF.fetch(`https://example.com/${owner}/${repo}/tree?ref=main`);
+    const treeRes = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/tree?ref=main`
+    );
     expect(treeRes.status).toBe(200);
     expect(await treeRes.text()).toContain("hello.txt");
 
-    const blobRes = await SELF.fetch(
+    const blobRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/blob?ref=main&path=${encodeURIComponent("hello.txt")}`
     );
     expect(blobRes.status).toBe(200);
     expect(await blobRes.text()).toContain("hello from v2");
 
-    const commitRes = await SELF.fetch(
+    const commitRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/commit/${commit2.oid}`
     );
     expect(commitRes.status).toBe(200);
     expect(await commitRes.text()).toContain("second commit");
 
-    const diffRes = await SELF.fetch(
+    const diffRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/commit/${commit2.oid}/diff?path=${encodeURIComponent("hello.txt")}`
     );
     expect(diffRes.status).toBe(200);
@@ -155,17 +159,21 @@ describe("pack-first fetch and UI", () => {
   it("streams fetches from multiple active packs after loose copies are deleted", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-first-fetch");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const { commit2 } = await seedPackedOnlyRepo(repoId);
 
-    const res = await SELF.fetch(`https://example.com/${owner}/${repo}/git-upload-pack`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        "Git-Protocol": "version=2",
-      },
-      body: buildFetchBody({ wants: [commit2.oid], done: true, agent: false }),
-    } as RequestInit);
+    const res = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/git-upload-pack`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          "Git-Protocol": "version=2",
+        },
+        body: buildFetchBody({ wants: [commit2.oid], done: true, agent: false }),
+      } as RequestInit
+    );
 
     expect(res.status).toBe(200);
     const bytes = new Uint8Array(await res.arrayBuffer());

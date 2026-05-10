@@ -2,14 +2,20 @@ import type { CacheContext } from "@/worker/cache";
 import type { DebugPackState, DebugStateSnapshot } from "@/worker/do/repo/debug";
 import type { HeadInfo, Ref } from "@/worker/git";
 import type { PackRefIndexStatus } from "@/shared/git/types";
+import type { Viewer } from "@/client/server/viewer";
 import { getHeadAndRefs } from "@/worker/git";
 import { shortRefName } from "@/shared/git/ref-display";
-import { formatSize, HttpError } from "@/shared/web";
+import { formatSize, HttpError, isValidOwnerRepo } from "@/shared/web";
 import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
+import { loadSessionMembership } from "@/worker/auth/sessionMembership";
+import { loadViewer } from "@/worker/auth/session";
 import { createLogger } from "@/worker/common/logger";
 import { countSubrequest, getLimiter } from "@/worker/git/operations/limits";
 import { packRefsKey } from "@/worker/keys";
+import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
+import type { AppContext } from "@/worker/routes/hono";
+import { renderUiDocumentResponse } from "@/worker/routes/uiResponse";
 
 export type AdminPackState = DebugPackState & {
   refIndexStatus?: PackRefIndexStatus;
@@ -51,26 +57,124 @@ export function formatFromNowShort(deltaMs: number): string {
   return `in ${s}s`;
 }
 
+export function requestCacheContext(c: AppContext): CacheContext {
+  return { req: c.req.raw, ctx: c.executionCtx };
+}
+
+export function markRequestPrivate(cacheCtx: CacheContext): void {
+  cacheCtx.memo = cacheCtx.memo || {};
+  cacheCtx.memo.flags = cacheCtx.memo.flags || new Set<string>();
+  cacheCtx.memo.flags.add("no-cache-read");
+  cacheCtx.memo.flags.add("no-cache-write");
+}
+
+export function isRequestPrivate(cacheCtx: CacheContext | undefined): boolean {
+  return cacheCtx?.memo?.flags?.has("no-cache-read") === true;
+}
+
 export async function loadHeadAndRefsCached(
   env: Env,
-  request: Request,
-  ctx: ExecutionContext,
+  cacheCtx: CacheContext,
   repoId: string
 ): Promise<{ head: HeadInfo | undefined; refs: Ref[] } | null> {
-  const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", { repo: repoId });
+  const loader = async (): Promise<{ head: HeadInfo | undefined; refs: Ref[] } | null> => {
+    try {
+      const res = await getHeadAndRefs(env, repoId, cacheCtx);
+      return { head: res.head, refs: res.refs };
+    } catch {
+      return null;
+    }
+  };
+  if (isRequestPrivate(cacheCtx)) {
+    return await loader();
+  }
+  const cacheKeyRefs = buildCacheKeyFrom(cacheCtx.req, "/_cache/refs", { repo: repoId });
   return cacheOrLoadJSON<{ head: HeadInfo | undefined; refs: Ref[] }>(
     cacheKeyRefs,
-    async () => {
-      try {
-        const res = await getHeadAndRefs(env, repoId);
-        return { head: res.head, refs: res.refs };
-      } catch {
-        return null;
-      }
-    },
+    loader,
     60,
-    ctx
+    cacheCtx.ctx
   );
+}
+
+// Shared 404 response for repo-serving handlers. Centralizes the SSR shell +
+// viewer load so handlers don't reach into `index.ts` internals.
+export async function notFound(c: AppContext, title?: string): Promise<Response> {
+  const viewer = await loadViewer(c);
+  return renderUiDocumentResponse(c.env, "404", title ? { title } : {}, {
+    status: 404,
+    failureBody: "Not found\n",
+    failureStatus: 404,
+    viewer,
+  });
+}
+
+// Same as `notFound` but returns a JSON 404 — used by data API endpoints
+// (`/api/refs`) where SSR shell would be wasted bytes.
+export function notFoundJson(): Response {
+  return new Response(JSON.stringify({ error: "Not found" }), {
+    status: 404,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+// Bundle for the resolve+session+visibility decision shared by every UI
+// repo-serving handler. Returns either:
+//   - { kind: "ok", route, cacheCtx, viewer }: caller proceeds to render. The
+//     `cacheCtx` is already marked private (no-cache flags) when applicable.
+//   - { kind: "response", response }: caller returns the response as-is.
+//     Centralizes the non-disclosure rule (private + non-member -> 404,
+//     identical to private + anonymous).
+export type UiRepoAccess =
+  | { kind: "ok"; route: RepositoryRoute; cacheCtx: CacheContext; viewer: Viewer | null }
+  | { kind: "response"; response: Response };
+
+export type UiRepoAccessOptions = {
+  // For data-API endpoints that return JSON (not HTML) on failure.
+  responseShape?: "html" | "json";
+};
+
+export async function resolveUiRepoAccess(
+  c: AppContext,
+  owner: string,
+  repo: string,
+  options: UiRepoAccessOptions = {}
+): Promise<UiRepoAccess> {
+  const cacheCtx = requestCacheContext(c);
+  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+    return {
+      kind: "response",
+      response:
+        options.responseShape === "json" ? notFoundJson() : await notFound(c, "Invalid owner/repo"),
+    };
+  }
+  const route = await resolveRepositoryRoute(c.env, owner, repo);
+  if (!route) {
+    return {
+      kind: "response",
+      response: options.responseShape === "json" ? notFoundJson() : await notFound(c),
+    };
+  }
+  if (route.visibility === "public") {
+    const viewer = await loadViewer(c);
+    return { kind: "ok", route, cacheCtx, viewer };
+  }
+  // Private: gate on session membership. PAT credentials are never honored
+  // for UI/data routes (PATs are git-only).
+  const membership = await loadSessionMembership(c, route.namespaceId);
+  const log = createLogger(c.env.LOG_LEVEL, { service: "UiAcl", repoId: route.doName });
+  if (membership.kind !== "member") {
+    log.debug("ui-acl:private-non-member-404", { kind: membership.kind });
+    return {
+      kind: "response",
+      response: options.responseShape === "json" ? notFoundJson() : await notFound(c),
+    };
+  }
+  markRequestPrivate(cacheCtx);
+  return { kind: "ok", route, cacheCtx, viewer: membership.viewer };
 }
 
 export function getDefaultBranchFromHead(head: HeadInfo | undefined): string {

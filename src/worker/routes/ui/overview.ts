@@ -1,14 +1,20 @@
 import type { HeadInfo, Ref } from "@/worker/git";
-import type { CacheContext } from "@/worker/cache";
 import { readPath } from "@/worker/git";
 import { classifyRef, formatRefOption, shortRefName } from "@/shared/git/ref-display";
 import { isValidOwnerRepo, bytesToText } from "@/shared/web";
-import { listReposForOwner } from "@/worker/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
-import { repoKey } from "@/worker/keys";
+import { createDb } from "@/worker/db/d1/client";
+import { findNamespaceBySlug } from "@/worker/db/d1/dal/namespaces";
+import { listRepositoriesForNamespace } from "@/worker/db/d1/dal/repositories";
 import { loadViewer } from "@/worker/auth/session";
-import { badRequest, loadHeadAndRefsCached } from "./helpers";
+import {
+  badRequest,
+  isRequestPrivate,
+  loadHeadAndRefsCached,
+  notFound,
+  resolveUiRepoAccess,
+} from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 
@@ -18,18 +24,31 @@ export async function handleOwnerOverview(c: AppContext<"/:owner">) {
   if (!isValidOwnerRepo(owner)) {
     return badRequest(env, "Invalid owner", "Owner contains invalid characters or length");
   }
-  const repos = await listReposForOwner(env, owner);
+  const db = createDb(env.DB);
+  const namespace = await findNamespaceBySlug(db, owner);
+  if (!namespace) {
+    // No D1 row -> 404. Backfill is complete; legacy OWNER_REGISTRY listing
+    // is no longer the authoritative listing for owners.
+    return await notFound(c);
+  }
   const viewer = await loadViewer(c);
+  const repos = await listRepositoriesForNamespace(db, namespace.id, viewer?.userId ?? null);
+  const includesPrivate = repos.some((row) => row.visibility === "private");
   return renderUiDocumentResponse(
     env,
     "owner",
     {
       title: `${owner} · Repositories`,
       owner,
-      repos,
+      repos: repos.map((row) => ({
+        slug: row.slug,
+        visibility: row.visibility as "public" | "private",
+      })),
     },
     {
-      cacheControl: "public, max-age=60",
+      // Public-only listings cache briefly per-colo. As soon as a private
+      // row enters the response, we must not cache (membership-derived).
+      cacheControl: includesPrivate ? "no-store" : "public, max-age=60",
       failureBody: "Failed to render view",
       viewer,
     }
@@ -37,17 +56,15 @@ export async function handleOwnerOverview(c: AppContext<"/:owner">) {
 }
 
 export async function handleRepoOverview(c: AppContext<"/:owner/:repo">) {
-  const request = c.req.raw;
   const env = c.env;
-  const ctx = c.executionCtx;
   const owner = c.req.param("owner");
   const repo = c.req.param("repo");
-  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
-    return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
-  }
-  const repoId = repoKey(owner, repo);
+  const access = await resolveUiRepoAccess(c, owner, repo);
+  if (access.kind === "response") return access.response;
+  const { route, cacheCtx, viewer } = access;
+  const repoId = route.doName;
 
-  const refsData = await loadHeadAndRefsCached(env, request, ctx, repoId);
+  const refsData = await loadHeadAndRefsCached(env, cacheCtx, repoId);
   const head: HeadInfo | undefined = refsData?.head;
   const refs: Ref[] = refsData?.refs || [];
 
@@ -59,46 +76,49 @@ export async function handleRepoOverview(c: AppContext<"/:owner/:repo">) {
     .map(formatRefOption);
   const tagsData = refs.filter((ref) => classifyRef(ref.name) === "tag").map(formatRefOption);
 
-  // Try to load README at repo root on default branch with caching (5 minutes)
-  const cacheKeyReadme = buildCacheKeyFrom(request, "/_cache/readme", {
-    repo: repoId,
-    ref: refShort,
-  });
-  const readmeData = await cacheOrLoadJSON<{ md: string }>(
-    cacheKeyReadme,
-    async () => {
-      try {
-        // Load all candidates in parallel for better performance
-        const candidates = ["README.md", "README.MD", "Readme.md", "README", "readme.md"];
-        const cacheCtx: CacheContext = { req: request, ctx };
-        const results = await Promise.all(
-          candidates.map(async (name) => {
-            try {
-              const res = await readPath(env, repoId, refShort, name, cacheCtx);
-              if (res.type === "blob") {
-                return { name, content: res.content };
-              }
-            } catch {}
-            return null;
-          })
-        );
-        const found = results.find((r) => r !== null) as {
-          name: string;
-          content: Uint8Array;
-        } | null;
-        if (!found) return null;
-        const text = bytesToText(found.content);
-        return { md: text };
-      } catch {
-        return null;
-      }
-    },
-    300,
-    ctx
-  );
+  const readReadme = async (): Promise<{ md: string } | null> => {
+    try {
+      const candidates = ["README.md", "README.MD", "Readme.md", "README", "readme.md"];
+      const results = await Promise.all(
+        candidates.map(async (name) => {
+          try {
+            const res = await readPath(env, repoId, refShort, name, cacheCtx);
+            if (res.type === "blob") {
+              return { name, content: res.content };
+            }
+          } catch {}
+          return null;
+        })
+      );
+      const found = results.find((r) => r !== null) as {
+        name: string;
+        content: Uint8Array;
+      } | null;
+      if (!found) return null;
+      const text = bytesToText(found.content);
+      return { md: text };
+    } catch {
+      return null;
+    }
+  };
+
+  let readmeData: { md: string } | null;
+  if (isRequestPrivate(cacheCtx)) {
+    readmeData = await readReadme();
+  } else {
+    const cacheKeyReadme = buildCacheKeyFrom(c.req.raw, "/_cache/readme", {
+      repo: repoId,
+      ref: refShort,
+    });
+    readmeData = await cacheOrLoadJSON<{ md: string }>(
+      cacheKeyReadme,
+      readReadme,
+      300,
+      c.executionCtx
+    );
+  }
   const readmeMd = readmeData?.md || "";
-  const progress = await getRepoActivity(env, repoId);
-  const viewer = await loadViewer(c);
+  const progress = await getRepoActivity(env, repoId, cacheCtx);
 
   return renderUiDocumentResponse(
     env,
@@ -115,6 +135,7 @@ export async function handleRepoOverview(c: AppContext<"/:owner/:repo">) {
       progress,
     },
     {
+      cacheControl: route.visibility === "private" ? "no-store" : undefined,
       failureBody: "Failed to render view",
       viewer,
     }

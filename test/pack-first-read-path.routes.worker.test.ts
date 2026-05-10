@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env, SELF } from "cloudflare:test";
-
+import { env, exports as workerExports } from "cloudflare:workers";
 import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast";
 import { packRefsKey } from "@/worker/keys";
@@ -10,6 +9,7 @@ import {
   toRequestBody,
   uniqueRepoId,
 } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { buildFetchBody, decodePktTextLines } from "./util/fetch-protocol";
 import { seedPackFirstRepo } from "./util/pack-first";
 
@@ -17,6 +17,7 @@ describe("pack-first read path routes", () => {
   it("serves fetch and UI routes after deleting all loose object copies", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-read-path");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
 
@@ -32,58 +33,66 @@ describe("pack-first read path routes", () => {
       new Set([seeded.nextCommit.oid, seeded.nextTree.oid, seeded.nextBlob.oid])
     );
 
-    const ackResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/git-upload-pack`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        "Git-Protocol": "version=2",
-      },
-      body: toRequestBody(
-        buildFetchBody({
-          wants: [seeded.nextCommit.oid],
-          haves: [seeded.baseCommit.oid],
-        })
-      ),
-    });
+    const ackResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/git-upload-pack`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          "Git-Protocol": "version=2",
+        },
+        body: toRequestBody(
+          buildFetchBody({
+            wants: [seeded.nextCommit.oid],
+            haves: [seeded.baseCommit.oid],
+          })
+        ),
+      }
+    );
     expect(ackResponse.status).toBe(200);
     const ackLines = decodePktTextLines(new Uint8Array(await ackResponse.arrayBuffer()));
     expect(ackLines).toContain(`ACK ${seeded.baseCommit.oid} ready`);
 
-    const fetchResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/git-upload-pack`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        "Git-Protocol": "version=2",
-      },
-      body: toRequestBody(
-        buildFetchBody({
-          wants: [seeded.nextCommit.oid],
-          haves: [seeded.baseCommit.oid],
-          done: true,
-        })
-      ),
-    });
+    const fetchResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/git-upload-pack`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          "Git-Protocol": "version=2",
+        },
+        body: toRequestBody(
+          buildFetchBody({
+            wants: [seeded.nextCommit.oid],
+            haves: [seeded.baseCommit.oid],
+            done: true,
+          })
+        ),
+      }
+    );
     expect(fetchResponse.status).toBe(200);
     const fetchBytes = new Uint8Array(await fetchResponse.arrayBuffer());
     expect(new TextDecoder().decode(fetchBytes.subarray(4, 13))).toBe("packfile\n");
 
-    const treeResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/tree?ref=main`);
+    const treeResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/tree?ref=main`
+    );
     expect(treeResponse.status).toBe(200);
     expect(await treeResponse.text()).toContain("README.md");
 
-    const blobResponse = await SELF.fetch(
+    const blobResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/blob?ref=main&path=${encodeURIComponent("README.md")}`
     );
     expect(blobResponse.status).toBe(200);
     expect(await blobResponse.text()).toContain("version two");
 
-    const rawResponse = await SELF.fetch(
+    const rawResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${seeded.nextBlob.oid}&name=README.md`
     );
     expect(rawResponse.status).toBe(200);
     expect(await rawResponse.text()).toBe("version two\n");
 
-    const commitResponse = await SELF.fetch(
+    const commitResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/commit/${seeded.nextCommit.oid}`
     );
     expect(commitResponse.status).toBe(200);
@@ -91,7 +100,7 @@ describe("pack-first read path routes", () => {
     expect(commitHtml).toContain("second commit");
     expect(commitHtml).toContain("README.md");
 
-    const diffResponse = await SELF.fetch(
+    const diffResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/commit/${seeded.nextCommit.oid}/diff?path=${encodeURIComponent("README.md")}`
     );
     expect(diffResponse.status).toBe(200);
@@ -104,12 +113,14 @@ describe("pack-first read path routes", () => {
   it("keeps admin debug endpoints on the shared DO contract after loose copies are deleted", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-debug-contract");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await deleteLooseObjectCopies(env, seeded.getStub, seeded.objectOids);
 
-    const commitResponse = await SELF.fetch(
-      `https://example.com/${owner}/${repo}/admin/debug-commit/${seeded.nextCommit.oid}`
+    const commitResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/admin/debug-commit/${seeded.nextCommit.oid}`,
+      { headers: { Cookie: seededRepo.cookieHeader } }
     );
     expect(commitResponse.status).toBe(200);
     const commitJson = (await commitResponse.json()) as {
@@ -133,8 +144,9 @@ describe("pack-first read path routes", () => {
     });
     expect(commitJson.inPacks).toBeUndefined();
 
-    const oidResponse = await SELF.fetch(
-      `https://example.com/${owner}/${repo}/admin/debug-oid/${seeded.nextBlob.oid}`
+    const oidResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/admin/debug-oid/${seeded.nextBlob.oid}`,
+      { headers: { Cookie: seededRepo.cookieHeader } }
     );
     expect(oidResponse.status).toBe(200);
     const oidJson = (await oidResponse.json()) as {
@@ -152,19 +164,26 @@ describe("pack-first read path routes", () => {
   it("renders pack .refs sidecar status on the admin page", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-admin-refs-sidecar");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     const packKey = seeded.packKeys[0];
     if (!packKey) throw new Error("missing seeded pack key");
 
-    const presentResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin`);
+    const presentResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/admin`,
+      { headers: { Cookie: seededRepo.cookieHeader } }
+    );
     expect(presentResponse.status).toBe(200);
     const presentHtml = await presentResponse.text();
     expect(presentHtml).toContain("Reference sidecar is present in R2");
 
     await env.REPO_BUCKET.delete(packRefsKey(packKey));
 
-    const missingResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin`);
+    const missingResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/admin`,
+      { headers: { Cookie: seededRepo.cookieHeader } }
+    );
     expect(missingResponse.status).toBe(200);
     const missingHtml = await missingResponse.text();
     expect(missingHtml).toContain("Reference sidecar is missing from R2");
@@ -173,13 +192,15 @@ describe("pack-first read path routes", () => {
   it("rejects deleting an active pack through the admin route", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-delete-guard");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     const activePackName = seeded.packKeys[0]?.split("/").pop();
     if (!activePackName) throw new Error("missing active pack name");
 
-    const stateResponse = await SELF.fetch(
-      `https://example.com/${owner}/${repo}/admin/debug-state`
+    const stateResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/admin/debug-state`,
+      { headers: { Cookie: seededRepo.cookieHeader } }
     );
     expect(stateResponse.status).toBe(200);
     const stateJson = (await stateResponse.json()) as {
@@ -189,9 +210,9 @@ describe("pack-first read path routes", () => {
     expect(stateJson.activePacks?.[0]?.key).toBe(seeded.packKeys[0]);
     expect(typeof stateJson.packCatalogVersion).toBe("number");
 
-    const deleteResponse = await SELF.fetch(
+    const deleteResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/admin/pack/${encodeURIComponent(activePackName)}`,
-      { method: "DELETE" }
+      { method: "DELETE", headers: { Cookie: seededRepo.cookieHeader } }
     );
     expect(deleteResponse.status).toBe(409);
     const deleteJson = (await deleteResponse.json()) as { error?: string; rejected?: string };
@@ -202,12 +223,13 @@ describe("pack-first read path routes", () => {
   it("rejects deleting a pack that is not superseded", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-delete-non-superseded");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     await seedPackFirstRepo(repoId);
 
-    const deleteResponse = await SELF.fetch(
+    const deleteResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/admin/pack/${encodeURIComponent("pack-missing.pack")}`,
-      { method: "DELETE" }
+      { method: "DELETE", headers: { Cookie: seededRepo.cookieHeader } }
     );
     expect(deleteResponse.status).toBe(409);
     const deleteJson = (await deleteResponse.json()) as {
@@ -223,6 +245,7 @@ describe("pack-first read path routes", () => {
   it("renders receiving state on the admin page when a receive lease is active", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-admin-receiving");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
 
@@ -236,7 +259,10 @@ describe("pack-first read path routes", () => {
       });
     });
 
-    const response = await SELF.fetch(`https://example.com/${owner}/${repo}/admin`);
+    const response = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/admin`,
+      { headers: { Cookie: seededRepo.cookieHeader } }
+    );
     expect(response.status).toBe(200);
     const html = await response.text();
     expect(html).toContain("Receiving push...");

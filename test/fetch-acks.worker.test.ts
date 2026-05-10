@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { env, SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { pktLine, delimPkt, flushPkt, concatChunks } from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 
 function buildFetchBody({
   wants,
@@ -25,6 +26,7 @@ function buildFetchBody({
 it("upload-pack fetch returns acknowledgments before the final packfile response", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r");
+  await setupRepoForTests(env, owner, repo);
   const repoId = `${owner}/${repo}`;
   // Seed tiny repo and get commit OID via DO instance
   const id = env.REPO_DO.idFromName(repoId);
@@ -37,7 +39,7 @@ it("upload-pack fetch returns acknowledgments before the final packfile response
 
   // Negotiation (done=false) should return only acknowledgments.
   const negotiateBody = buildFetchBody({ wants: [commitOid], done: false });
-  const negotiateRes = await SELF.fetch(url, {
+  const negotiateRes = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
@@ -53,7 +55,7 @@ it("upload-pack fetch returns acknowledgments before the final packfile response
 
   // The final fetch (done=true) should return the packfile without acknowledgments.
   const fetchBody = buildFetchBody({ wants: [commitOid], done: true });
-  const fetchRes = await SELF.fetch(url, {
+  const fetchRes = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",

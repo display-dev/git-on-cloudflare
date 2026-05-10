@@ -14,8 +14,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
-
+import { env } from "cloudflare:workers";
 import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer";
 import { SubrequestLimiter, DEFAULT_SUBREQUEST_BUDGET } from "@/worker/git/operations/limits";
 import { createLogger } from "@/worker/common/logger";

@@ -1,13 +1,15 @@
 import { it, expect, describe } from "vitest";
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import type { CacheContext } from "@/worker/cache";
 import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 
 describe("computeNeededFast", () => {
   it("computes minimal closure with stop set", async () => {
     const owner = "o";
     const repo = uniqueRepoId("closure-fast");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     // Create a repo with a commit
@@ -64,6 +66,7 @@ describe("computeNeededFast", () => {
   it("returns the partial closure when the traversal times out", async () => {
     const owner = "o";
     const repo = uniqueRepoId("closure-timeout");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     const cacheCtx: CacheContext = {
@@ -100,6 +103,7 @@ describe("computeNeededFast", () => {
   it("uses memoization effectively", async () => {
     const owner = "o";
     const repo = uniqueRepoId("memo");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
 
     const id = env.REPO_DO.idFromName(repoId);

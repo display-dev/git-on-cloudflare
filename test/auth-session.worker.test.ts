@@ -1,4 +1,5 @@
-import { applyD1Migrations, env, SELF } from "cloudflare:test";
+import { applyD1Migrations } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { __test as oidcTest, sealTransaction } from "@/worker/auth/oidc";
@@ -51,7 +52,7 @@ async function signIn(sub: string, preferredUsername?: string): Promise<string> 
   const url = new URL("https://example.com/auth/callback");
   url.searchParams.set("code", "x");
   url.searchParams.set("state", state);
-  const res = await SELF.fetch(url.toString(), {
+  const res = await workerExports.default.fetch(url.toString(), {
     redirect: "manual",
     headers: { Cookie: `${OIDC_TX_COOKIE_NAME}=${cookieValue}` },
   });
@@ -65,7 +66,7 @@ async function signIn(sub: string, preferredUsername?: string): Promise<string> 
 describe("session lifecycle", () => {
   it("issues a session cookie that authorizes /auth/account", async () => {
     const token = await signIn("sub-session-1", "session-rachel");
-    const res = await SELF.fetch("https://example.com/auth/account", {
+    const res = await workerExports.default.fetch("https://example.com/auth/account", {
       headers: { Cookie: `${SESSION_COOKIE_NAME}=${token}` },
     });
     expect(res.status).toBe(200);
@@ -74,14 +75,16 @@ describe("session lifecycle", () => {
   });
 
   it("/auth/account redirects to /auth when no cookie is present", async () => {
-    const res = await SELF.fetch("https://example.com/auth/account", { redirect: "manual" });
+    const res = await workerExports.default.fetch("https://example.com/auth/account", {
+      redirect: "manual",
+    });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/auth");
   });
 
   it("rejects POST /auth/sign-out without same-origin", async () => {
     const token = await signIn("sub-signout-cross", undefined);
-    const res = await SELF.fetch("https://example.com/auth/sign-out", {
+    const res = await workerExports.default.fetch("https://example.com/auth/sign-out", {
       method: "POST",
       headers: {
         Cookie: `${SESSION_COOKIE_NAME}=${token}`,
@@ -91,7 +94,7 @@ describe("session lifecycle", () => {
     });
     expect(res.status).toBe(403);
     // Cookie remains valid for /auth/account.
-    const followup = await SELF.fetch("https://example.com/auth/account", {
+    const followup = await workerExports.default.fetch("https://example.com/auth/account", {
       headers: { Cookie: `${SESSION_COOKIE_NAME}=${token}` },
     });
     expect(followup.status).toBe(200);
@@ -99,7 +102,7 @@ describe("session lifecycle", () => {
 
   it("clears the browser cookie on same-origin sign-out", async () => {
     const token = await signIn("sub-signout-2", undefined);
-    const res = await SELF.fetch("https://example.com/auth/sign-out", {
+    const res = await workerExports.default.fetch("https://example.com/auth/sign-out", {
       method: "POST",
       headers: {
         Cookie: `${SESSION_COOKIE_NAME}=${token}`,
@@ -114,7 +117,7 @@ describe("session lifecycle", () => {
     expect(setCookie.toLowerCase()).toContain("max-age=0");
     // Stateless sealed sessions have no server-side revocation row. A copied
     // cookie remains valid until expiry or SESSION_SECRET rotation.
-    const followup = await SELF.fetch("https://example.com/auth/account", {
+    const followup = await workerExports.default.fetch("https://example.com/auth/account", {
       headers: { Cookie: `${SESSION_COOKIE_NAME}=${token}` },
       redirect: "manual",
     });
@@ -122,7 +125,7 @@ describe("session lifecycle", () => {
   });
 
   it("treats a malformed session cookie as anonymous", async () => {
-    const res = await SELF.fetch("https://example.com/auth/account", {
+    const res = await workerExports.default.fetch("https://example.com/auth/account", {
       headers: { Cookie: `${SESSION_COOKIE_NAME}=garbage` },
       redirect: "manual",
     });
@@ -135,7 +138,7 @@ describe("session lifecycle", () => {
     const original = env.SESSION_SECRET;
     env.SESSION_SECRET = "different-session-secret";
     try {
-      const res = await SELF.fetch("https://example.com/auth/account", {
+      const res = await workerExports.default.fetch("https://example.com/auth/account", {
         headers: { Cookie: `${SESSION_COOKIE_NAME}=${token}` },
         redirect: "manual",
       });
@@ -151,7 +154,7 @@ describe("session lifecycle", () => {
     const original = env.SESSION_SECRET;
     env.SESSION_SECRET = "";
     try {
-      const res = await SELF.fetch("https://example.com/auth/account", {
+      const res = await workerExports.default.fetch("https://example.com/auth/account", {
         headers: { Cookie: `${SESSION_COOKIE_NAME}=${token}` },
         redirect: "manual",
       });

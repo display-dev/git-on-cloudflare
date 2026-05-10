@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { readPath } from "@/worker/git/operations/read";
 import { encodeGitObject } from "@/worker/git/core/objects";
 import { seedPackFirstRepo } from "./util/pack-first";
@@ -10,6 +11,7 @@ import { registerTestPack } from "./util/packed-repo";
 it("readPath resolves tag to its target commit tree (tag peel)", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-readpath-tag");
+  await setupRepoForTests(env, owner, repo);
   const repoId = `${owner}/${repo}`;
   const seeded = await seedPackFirstRepo(repoId);
   const id = env.REPO_DO.idFromName(repoId);

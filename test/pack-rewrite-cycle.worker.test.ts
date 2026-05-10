@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
-
+import { env } from "cloudflare:workers";
 import { concatChunks } from "@/worker/git";
 import { bytesToHex, createLogger } from "@/worker/common";
 import { computeOid } from "@/worker/git/core/objects";

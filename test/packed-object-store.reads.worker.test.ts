@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { env, SELF } from "cloudflare:test";
-
+import { env, exports as workerExports } from "cloudflare:workers";
 import { objKey } from "@/worker/do/repo/repoState";
 import { readLooseObjectRaw } from "@/worker/git/operations/read/objects";
 import { readObject } from "@/worker/git/object-store";
 import { runDOWithRetry, seedPackedRepo, uniqueRepoId } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 
 describe("packed object store reads", () => {
   it("matches legacy reads and still works after loose objects are deleted", async () => {
@@ -47,12 +47,13 @@ describe("packed object store reads", () => {
   it("preserves raw responses in streaming mode", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-streaming-raw");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
     const { blob } = await seedPackedRepo({ env, repoId, getStub });
 
-    const res = await SELF.fetch(
+    const res = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${encodeURIComponent(blob.oid)}&name=hello.txt`
     );
     expect(res.status).toBe(200);

@@ -8,17 +8,10 @@ import {
   getRouteCacheRecord,
 } from "@/worker/db/d1/dal";
 
-// Resolver for `(:owner, :repo)` URL paths backed by the `ROUTES` KV cache
-// and the global `repositories` D1 table.
-//
-// Invariant: a route resolves only when D1 confirms the requested namespace
-// slug, repo slug, namespace id, repository id, and DO name all describe
-// the same repository. KV is a candidate cache; a stale entry from before
-// a rename or visibility flip must never authorize itself.
-//
-// Logging strategy: every branch logs at debug because this fires on every
-// :owner/:repo request. Production (LOG_LEVEL=info) stays quiet; bumping to
-// debug for an investigation immediately surfaces stale-cache patterns.
+// A route resolves only when D1 confirms the namespace slug, repo slug,
+// namespace id, repository id, and `doName` all describe the same row. KV
+// is a candidate cache; a stale entry from before a rename or visibility
+// flip must never authorize itself.
 
 export type RepositoryRoute = {
   routeNamespaceSlug: string;

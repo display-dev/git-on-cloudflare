@@ -1,4 +1,5 @@
-import { applyD1Migrations, env } from "cloudflare:test";
+import { applyD1Migrations } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { createDb } from "@/worker/db/d1/client";
@@ -14,6 +15,7 @@ import {
   insertUserIfNew,
   listNamespacesForUser,
   listPatsForUser,
+  listRepositoriesForNamespace,
   listRepositoriesForUser,
   revokePatById,
 } from "@/worker/db/d1/dal";
@@ -106,9 +108,22 @@ describe("D1 schema + DAL round-trips", () => {
     });
     expect(replay).toBeUndefined();
     expect((await findRepositoryByDoName(db, "rachel/site"))?.id).toBe("repo-1");
+    const createdLater = await insertRepositoryIfNew(db, {
+      id: "repo-2",
+      namespaceId: "ns-r",
+      createdBy: "user-r",
+      slug: "api",
+      doName: "rachel/api",
+      visibility: "public",
+      createdAt: now + 2,
+      updatedAt: now + 2,
+    });
+    expect(createdLater?.id).toBe("repo-2");
     const list = await listRepositoriesForUser(db, "user-r");
-    expect(list.map((entry) => entry.repository.slug)).toEqual(["site"]);
+    expect(list.map((entry) => entry.repository.slug)).toEqual(["api", "site"]);
     expect(list[0]?.namespace.slug).toBe("rachel");
+    const namespaceList = await listRepositoriesForNamespace(db, "ns-r", null);
+    expect(namespaceList.map((entry) => entry.slug)).toEqual(["api", "site"]);
   });
 
   it("inserts a PAT with grants and revokes it via the result-union DAL", async () => {

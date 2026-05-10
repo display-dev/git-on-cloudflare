@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createExecutionContext, env, SELF } from "cloudflare:test";
-
+import { createExecutionContext } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
 import { computeOid, encodeGitObject } from "@/worker/git/core/objects";
 import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
@@ -13,6 +13,7 @@ import {
   toRequestBody,
   uniqueRepoId,
 } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { seedPackFirstRepo } from "./util/pack-first";
 import { doPrefix, packRefsKey, r2PackDirPrefix } from "@/worker/keys";
 import {
@@ -85,7 +86,7 @@ async function pushBody(
     stream?: boolean;
   }
 ): Promise<Response> {
-  return await SELF.fetch(url, {
+  return await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body: options?.stream ? streamBody(body) : body,
@@ -93,7 +94,7 @@ async function pushBody(
 }
 
 async function readOwnerRegistry(owner: string): Promise<string[]> {
-  const response = await SELF.fetch(`https://example.com/${owner}/admin/registry`);
+  const response = await workerExports.default.fetch(`https://example.com/${owner}/admin/registry`);
   expect(response.status).toBe(200);
   const payload = (await response.json()) as { repos?: string[] };
   return Array.isArray(payload.repos) ? payload.repos : [];
@@ -103,6 +104,7 @@ describe("streaming receive-pack", () => {
   it("returns 499 when the request is already aborted before receive work starts", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-aborted-start");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -139,6 +141,7 @@ describe("streaming receive-pack", () => {
   it("streams a create push and fetch still works after deleting all loose copies", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-create");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -179,26 +182,29 @@ describe("streaming receive-pack", () => {
 
     await deleteLooseObjectCopies(env, seeded.getStub, seeded.objectOids);
 
-    const rawResponse = await SELF.fetch(
+    const rawResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${blob.oid}&name=README.md`
     );
     expect(rawResponse.status).toBe(200);
     expect(await rawResponse.text()).toBe("version three\n");
 
-    const fetchResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/git-upload-pack`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        "Git-Protocol": "version=2",
-      },
-      body: toRequestBody(
-        buildFetchBody({
-          wants: [commit.oid],
-          haves: [seeded.nextCommit.oid],
-          done: true,
-        })
-      ),
-    });
+    const fetchResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/git-upload-pack`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          "Git-Protocol": "version=2",
+        },
+        body: toRequestBody(
+          buildFetchBody({
+            wants: [commit.oid],
+            haves: [seeded.nextCommit.oid],
+            done: true,
+          })
+        ),
+      }
+    );
     expect(fetchResponse.status).toBe(200);
     const fetchBytes = new Uint8Array(await fetchResponse.arrayBuffer());
     expect(new TextDecoder().decode(fetchBytes.subarray(4, 13))).toBe("packfile\n");
@@ -207,6 +213,7 @@ describe("streaming receive-pack", () => {
   it("reports upload, scan, resolve, and final status over side-band-64k", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-sideband");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -270,6 +277,7 @@ describe("streaming receive-pack", () => {
   it("suppresses side-band progress when the client requests quiet", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-sideband-quiet");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -299,6 +307,7 @@ describe("streaming receive-pack", () => {
   it("handles delete-only pushes in streaming mode", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-delete");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -346,7 +355,10 @@ describe("streaming receive-pack", () => {
       "ok refs/heads/feature"
     );
 
-    const refsResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/refs`);
+    const refsResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/admin/refs`,
+      { headers: { Cookie: seededRepo.cookieHeader } }
+    );
     const refs = (await refsResponse.json()) as Array<{ name: string; oid: string }>;
     expect(refs.find((ref) => ref.name === "refs/heads/feature")).toBeUndefined();
   });
@@ -354,6 +366,7 @@ describe("streaming receive-pack", () => {
   it("updates owner registry entries after streaming pushes add or remove the live refs set", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-registry");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -387,6 +400,7 @@ describe("streaming receive-pack", () => {
   it("rejects stale old-oids and leaves no staged receive packs behind", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-stale");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -428,6 +442,7 @@ describe("streaming receive-pack", () => {
   it("accepts thin packs with active external bases, rejects missing ones, and clears the receive lease after failure", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-thin");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -523,6 +538,7 @@ describe("streaming receive-pack", () => {
   it("returns unpack error over side-band-64k when resolve fails after streaming has started", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-sideband-failure");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -581,6 +597,7 @@ describe("streaming receive-pack", () => {
   it("returns 499 and cleans up when the request aborts during the streaming upload", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-abort-upload");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -643,6 +660,7 @@ describe("streaming receive-pack", () => {
   it("returns 503 when a streaming receive lease is already active", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-busy");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -668,6 +686,7 @@ describe("streaming receive-pack", () => {
   it("rejects invalid refs without leaving staged receive packs behind", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-receive-invalid-ref");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);

@@ -1,4 +1,5 @@
-import { applyD1Migrations, env, SELF } from "cloudflare:test";
+import { applyD1Migrations } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createDb } from "@/worker/db/d1/client";
@@ -57,7 +58,7 @@ async function signInAndGetCookie(sub: string, preferredUsername: string): Promi
   const url = new URL("https://example.com/auth/callback");
   url.searchParams.set("code", "x");
   url.searchParams.set("state", state);
-  const res = await SELF.fetch(url.toString(), {
+  const res = await workerExports.default.fetch(url.toString(), {
     redirect: "manual",
     headers: { Cookie: `${OIDC_TX_COOKIE_NAME}=${sealed}` },
   });
@@ -74,7 +75,7 @@ describe("PAT management endpoints", () => {
     const bobCookie = await signInAndGetCookie("sub-bob", "pat-bob");
 
     // Create token for Alice scoped to her namespace.
-    const create = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const create = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -93,7 +94,7 @@ describe("PAT management endpoints", () => {
     expect(created.plaintext.startsWith(`${created.prefix}_`)).toBe(true);
 
     // Plaintext is not retrievable on subsequent list.
-    const list = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const list = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       headers: { Cookie: `${SESSION_COOKIE_NAME}=${aliceCookie}` },
     });
     expect(list.status).toBe(200);
@@ -122,24 +123,33 @@ describe("PAT management endpoints", () => {
     expect(stored?.hash).toMatch(/^[0-9a-f]{64}$/);
 
     // Bob cannot revoke Alice's token.
-    const cross = await SELF.fetch(`https://example.com/auth/api/tokens/${created.id}`, {
-      method: "DELETE",
-      headers: { Cookie: `${SESSION_COOKIE_NAME}=${bobCookie}`, Origin: "https://example.com" },
-    });
+    const cross = await workerExports.default.fetch(
+      `https://example.com/auth/api/tokens/${created.id}`,
+      {
+        method: "DELETE",
+        headers: { Cookie: `${SESSION_COOKIE_NAME}=${bobCookie}`, Origin: "https://example.com" },
+      }
+    );
     expect(cross.status).toBe(403);
 
     // Alice can.
-    const revoke = await SELF.fetch(`https://example.com/auth/api/tokens/${created.id}`, {
-      method: "DELETE",
-      headers: { Cookie: `${SESSION_COOKIE_NAME}=${aliceCookie}`, Origin: "https://example.com" },
-    });
+    const revoke = await workerExports.default.fetch(
+      `https://example.com/auth/api/tokens/${created.id}`,
+      {
+        method: "DELETE",
+        headers: { Cookie: `${SESSION_COOKIE_NAME}=${aliceCookie}`, Origin: "https://example.com" },
+      }
+    );
     expect(revoke.status).toBe(200);
 
     // Re-revoke is idempotent (200 ok with already-revoked treated as ok).
-    const revoke2 = await SELF.fetch(`https://example.com/auth/api/tokens/${created.id}`, {
-      method: "DELETE",
-      headers: { Cookie: `${SESSION_COOKIE_NAME}=${aliceCookie}`, Origin: "https://example.com" },
-    });
+    const revoke2 = await workerExports.default.fetch(
+      `https://example.com/auth/api/tokens/${created.id}`,
+      {
+        method: "DELETE",
+        headers: { Cookie: `${SESSION_COOKIE_NAME}=${aliceCookie}`, Origin: "https://example.com" },
+      }
+    );
     expect(revoke2.status).toBe(200);
 
     // The PAT row still exists with revokedAt set.
@@ -149,7 +159,7 @@ describe("PAT management endpoints", () => {
 
   it("rejects POST without same-origin Origin header", async () => {
     const cookie = await signInAndGetCookie("sub-cross", "pat-cross");
-    const res = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const res = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -168,7 +178,7 @@ describe("PAT management endpoints", () => {
 
   it("rejects POST when the namespace is not the viewer's", async () => {
     const cookie = await signInAndGetCookie("sub-other", "pat-other");
-    const res = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const res = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -187,7 +197,7 @@ describe("PAT management endpoints", () => {
 
   it("rejects POST when scope is missing from the body", async () => {
     const cookie = await signInAndGetCookie("sub-no-scope", "pat-no-scope");
-    const res = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const res = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -208,7 +218,7 @@ describe("PAT management endpoints", () => {
 
   it("rejects POST when level is missing from the body", async () => {
     const cookie = await signInAndGetCookie("sub-no-level", "pat-no-level");
-    const res = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const res = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -228,7 +238,7 @@ describe("PAT management endpoints", () => {
 
   it("rejects POST when level is not 'pull' or 'push'", async () => {
     const cookie = await signInAndGetCookie("sub-bad-level", "pat-bad-level");
-    const res = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const res = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -265,7 +275,7 @@ describe("PAT management endpoints", () => {
       updatedAt: Date.now(),
     });
 
-    const create = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const create = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -283,7 +293,7 @@ describe("PAT management endpoints", () => {
     expect(create.status).toBe(200);
     const created = (await create.json()) as { id: string; plaintext: string; prefix: string };
 
-    const list = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const list = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       headers: { Cookie: `${SESSION_COOKIE_NAME}=${cookie}` },
     });
     expect(list.status).toBe(200);
@@ -309,7 +319,7 @@ describe("PAT management endpoints", () => {
 
   it("rejects POST scope:'repo' when the repo does not exist", async () => {
     const cookie = await signInAndGetCookie("sub-repo-missing", "pat-rmissing");
-    const res = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const res = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -347,7 +357,7 @@ describe("PAT management endpoints", () => {
     });
     // Then sign in as user B and try to mint a PAT against A's repo.
     const intruderCookie = await signInAndGetCookie("sub-repo-intruder", "pat-rintruder");
-    const res = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const res = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -367,7 +377,7 @@ describe("PAT management endpoints", () => {
 
   it("rejects POST scope:'repo' with a malformed repoSlug", async () => {
     const cookie = await signInAndGetCookie("sub-repo-badslug", "pat-rbadslug");
-    const res = await SELF.fetch("https://example.com/auth/api/tokens", {
+    const res = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

@@ -1,7 +1,5 @@
-import type { CacheContext } from "@/worker/cache";
 import { readPath } from "@/worker/git";
 import {
-  isValidOwnerRepo,
   isValidRef,
   isValidPath,
   formatSize,
@@ -10,23 +8,20 @@ import {
   getHighlightLangsForBlobSmart,
 } from "@/shared/web";
 import { handleError } from "@/client/server/error";
-import { repoKey } from "@/worker/keys";
-import { loadViewer } from "@/worker/auth/session";
-import { badRequest } from "./helpers";
+import { badRequest, isRequestPrivate, resolveUiRepoAccess } from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 
 export async function handleBlob(c: AppContext<"/:owner/:repo/blob">) {
-  const request = c.req.raw;
   const env = c.env;
-  const ctx = c.executionCtx;
   const owner = c.req.param("owner");
   const repo = c.req.param("repo");
-  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
-    return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
-  }
-  const repoId = repoKey(owner, repo);
-  const u = new URL(request.url);
+  const access = await resolveUiRepoAccess(c, owner, repo);
+  if (access.kind === "response") return access.response;
+  const { route, cacheCtx } = access;
+  const repoId = route.doName;
+  const isPrivate = isRequestPrivate(cacheCtx);
+  const u = new URL(c.req.url);
   const ref = u.searchParams.get("ref") || "main";
   const path = u.searchParams.get("path") || "";
   if (!isValidRef(ref)) {
@@ -46,11 +41,10 @@ export async function handleBlob(c: AppContext<"/:owner/:repo/blob">) {
     });
   }
   try {
-    const cacheCtx: CacheContext = { req: request, ctx };
     const result = await readPath(env, repoId, ref, path, cacheCtx);
     if (result.type !== "blob") return new Response("Not a blob\n", { status: 400 });
     const fileName = path || result.oid;
-    const viewer = await loadViewer(c);
+    const viewer = access.viewer;
 
     // Generate breadcrumbs and parent link (same pattern as tree.ts)
     const parts = (path || "").split("/").filter(Boolean);
@@ -100,6 +94,7 @@ export async function handleBlob(c: AppContext<"/:owner/:repo/blob">) {
           parentHref,
         },
         {
+          cacheControl: isPrivate ? "no-store" : undefined,
           failureBody: "Failed to render view",
           viewer,
         }
@@ -165,6 +160,7 @@ export async function handleBlob(c: AppContext<"/:owner/:repo/blob">) {
     }
 
     return renderUiDocumentResponse(env, "blob", templateData, {
+      cacheControl: isPrivate ? "no-store" : undefined,
       failureBody: "Failed to render view",
       viewer,
     });

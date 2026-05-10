@@ -5,6 +5,10 @@ import { useEffect, useMemo, useState } from "react";
 import { hydrateIsland } from "@/client/hydrate";
 import { Button, Card, EmptyState, ErrorBanner, Input } from "@/client/components/ui";
 import { Copy, FolderGit2, KeyRound, Trash2 } from "lucide-react";
+import {
+  REPOSITORIES_CHANGED_EVENT,
+  type RepositoriesChangedDetail,
+} from "@/client/islands/repositories";
 
 // Mirror of `PatGrantLevel` from `@/worker/db/d1/schema/patNamespaceGrants`.
 // The island purposely re-declares wire-shape types in its own file (see
@@ -84,10 +88,11 @@ function formatGrants(token: TokensIslandSummary): string {
 
 export function TokensIsland({
   primaryNamespaceSlug,
-  repositories,
+  repositories: initialRepositories,
   tokens: initialTokens,
 }: TokensIslandProps) {
   const [tokens, setTokens] = useState(initialTokens);
+  const [repositories, setRepositories] = useState(initialRepositories);
   const [scope, setScope] = useState<Scope>("namespace");
   const [name, setName] = useState("");
   const [namespaceSlug, setNamespaceSlug] = useState(primaryNamespaceSlug ?? "");
@@ -118,6 +123,20 @@ export function TokensIsland({
     if (!revealedToken) return;
     setCopied(false);
   }, [revealedToken]);
+
+  // Subscribe to repository creates/visibility changes from the
+  // `repositories` island so the repo selector here updates without a
+  // page reload. The event detail mirrors the SSR shape.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<RepositoriesChangedDetail>).detail;
+      if (!detail || !Array.isArray(detail.repositories)) return;
+      setRepositories(detail.repositories);
+    };
+    window.addEventListener(REPOSITORIES_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(REPOSITORIES_CHANGED_EVENT, handler);
+  }, []);
 
   useEffect(() => {
     if (scope !== "repo") return;

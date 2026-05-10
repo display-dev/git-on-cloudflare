@@ -1,15 +1,17 @@
 import { it, expect } from "vitest";
-import { SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { uniqueRepoId } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { decodePktLines } from "@/worker/git";
 
 it("advertises upload-pack v2 over info/refs", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-info-refs");
+  await setupRepoForTests(env, owner, repo);
 
   const url = new URL(`https://example.com/${owner}/${repo}/info/refs`);
   url.searchParams.set("service", "git-upload-pack");
-  const res = await SELF.fetch(new Request(url, { method: "GET" }));
+  const res = await workerExports.default.fetch(new Request(url, { method: "GET" }));
   expect(res.status).toBe(200);
   expect(res.headers.get("Content-Type")).toContain("git-upload-pack-advertisement");
   const bytes = new Uint8Array(await res.arrayBuffer());

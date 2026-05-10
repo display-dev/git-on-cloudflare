@@ -1,5 +1,6 @@
 import { it, expect } from "vitest";
-import { env, runDurableObjectAlarm } from "cloudflare:test";
+import { runDurableObjectAlarm } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 import { runDOWithRetry } from "./util/test-helpers";
 

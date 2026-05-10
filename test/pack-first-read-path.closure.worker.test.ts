@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
-
+import { env } from "cloudflare:workers";
 import { listCommitChangedFiles } from "@/worker/git";
 import {
   hasObjectsBatch,
@@ -17,6 +16,7 @@ import {
   seedLegacyPackedRepo,
   uniqueRepoId,
 } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { buildPack } from "./util/git-pack";
 import { buildTreePayload } from "./util/packed-repo";
 import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first";
@@ -84,6 +84,7 @@ function makeTracingLimiter(labels: string[]) {
 describe("pack-first read path closure", () => {
   it("treats empty batch ref results as resolved without per-object fallback reads", async () => {
     const repo = uniqueRepoId("pack-needed-fast-empty-refs");
+    await setupRepoForTests(env, "o", repo);
     const repoId = `o/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await deleteLooseObjectCopies(env, seeded.getStub, seeded.objectOids);
@@ -98,6 +99,7 @@ describe("pack-first read path closure", () => {
 
   it("keeps loose-only wants as partial results instead of inventing compatibility refs", async () => {
     const repo = uniqueRepoId("pack-needed-fast-pack-only");
+    await setupRepoForTests(env, "o", repo);
     const repoId = `o/${repo}`;
     const getStub = () => env.REPO_DO.get(env.REPO_DO.idFromName(repoId));
     const author = "You <you@example.com> 0 +0000";
@@ -134,6 +136,7 @@ describe("pack-first read path closure", () => {
 
   it("coalesces concurrent idx loads and only decrements the request budget once per pack", async () => {
     const repo = uniqueRepoId("pack-idx-coalesce");
+    await setupRepoForTests(env, "o", repo);
     const repoId = `o/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     const activeCatalog = await callStubWithRetry(seeded.getStub, (stub) =>
@@ -168,6 +171,7 @@ describe("pack-first read path closure", () => {
 
   it("reuses hinted idx loads across requests without another R2 fetch", async () => {
     const repo = uniqueRepoId("pack-idx-cross-request");
+    await setupRepoForTests(env, "o", repo);
     const repoId = `o/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     const activeCatalog = await callStubWithRetry(seeded.getStub, (stub) =>
@@ -204,6 +208,7 @@ describe("pack-first read path closure", () => {
 
   it("reads a packed base object with one coalesced range read", async () => {
     const repo = uniqueRepoId("pack-read-single-range");
+    await setupRepoForTests(env, "o", repo);
     const repoId = `o/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await deleteLooseObjectCopies(env, seeded.getStub, seeded.objectOids);
@@ -231,6 +236,7 @@ describe("pack-first read path closure", () => {
 
   it("does not let a bad pack-size hint poison later idx loads", async () => {
     const repo = uniqueRepoId("pack-idx-hint-poison");
+    await setupRepoForTests(env, "o", repo);
     const repoId = `o/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     const activeCatalog = await callStubWithRetry(seeded.getStub, (stub) =>
@@ -293,6 +299,7 @@ describe("pack-first read path closure", () => {
 
   it("marks packed diff reads as soft-budget truncated once packed subrequests are counted", async () => {
     const repo = uniqueRepoId("pack-soft-budget");
+    await setupRepoForTests(env, "o", repo);
     const repoId = `o/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await deleteLooseObjectCopies(env, seeded.getStub, seeded.objectOids);

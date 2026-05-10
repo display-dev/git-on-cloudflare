@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { SELF, env } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { gzip } from "@/worker/common";
 
 function buildFetchBody({
@@ -35,6 +36,7 @@ function buildLsRefsBody(args: string[] = []) {
 it("upload-pack fetch accepts gzip-encoded request bodies", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-gzip-fetch");
+  await setupRepoForTests(env, owner, repo);
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
   const { commitOid } = await runDOWithRetry(
@@ -44,7 +46,7 @@ it("upload-pack fetch accepts gzip-encoded request bodies", async () => {
 
   const body = await gzip(buildFetchBody({ wants: [commitOid], done: true }));
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
@@ -63,9 +65,10 @@ it("upload-pack fetch accepts gzip-encoded request bodies", async () => {
 it("upload-pack ls-refs accepts gzip-encoded request bodies", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-gzip-lsrefs");
+  await setupRepoForTests(env, owner, repo);
   const body = await gzip(buildLsRefsBody(["ref-prefix refs/heads/"]));
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
@@ -86,9 +89,10 @@ it("upload-pack ls-refs accepts gzip-encoded request bodies", async () => {
 it("upload-pack rejects unsupported content encodings", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-encoding-unsupported");
+  await setupRepoForTests(env, owner, repo);
   const body = buildLsRefsBody(["ref-prefix refs/heads/"]);
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
@@ -105,9 +109,10 @@ it("upload-pack rejects unsupported content encodings", async () => {
 it("upload-pack rejects invalid gzip payloads", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-encoding-invalid");
+  await setupRepoForTests(env, owner, repo);
   const body = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x00]);
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",

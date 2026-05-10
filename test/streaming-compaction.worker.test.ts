@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { env, SELF } from "cloudflare:test";
-
+import { env, exports as workerExports } from "cloudflare:workers";
 import { getRepoStub } from "@/worker/common";
 import { bytesToHex } from "@/worker/common/hex";
 import { encodeGitObject } from "@/worker/git/core/objects";
@@ -16,6 +15,7 @@ import {
   buildPack,
   buildAppendOnlyDelta,
 } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { seedPackFirstRepo } from "./util/pack-first";
 import { indexTestPack } from "./util/test-indexer";
 import { decodeReportStatus, promoteToStreaming } from "./util/streaming-helpers";
@@ -34,8 +34,15 @@ type DebugState = {
   compaction?: { queued?: boolean };
 };
 
-async function getDebugState(owner: string, repo: string): Promise<DebugState> {
-  const response = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/debug-state`);
+async function getDebugState(
+  owner: string,
+  repo: string,
+  cookieHeader: string
+): Promise<DebugState> {
+  const response = await workerExports.default.fetch(
+    `https://example.com/${owner}/${repo}/admin/debug-state`,
+    { headers: { Cookie: cookieHeader } }
+  );
   expect(response.status).toBe(200);
   return (await response.json()) as DebugState;
 }
@@ -44,6 +51,7 @@ describe("streaming compaction", () => {
   it("previews and requests real compaction work only after streaming overflow exists", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-admin");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -61,11 +69,11 @@ describe("streaming compaction", () => {
       });
       sendSpy.mockClear();
 
-      const previewResponse = await SELF.fetch(
+      const previewResponse = await workerExports.default.fetch(
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
           body: JSON.stringify({}),
         }
       );
@@ -85,11 +93,11 @@ describe("streaming compaction", () => {
       expect(previewJson.plan?.sourceTier).toBe(0);
       expect(previewJson.plan?.targetTier).toBe(1);
 
-      const requestResponse = await SELF.fetch(
+      const requestResponse = await workerExports.default.fetch(
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
           body: JSON.stringify({ dryRun: false }),
         }
       );
@@ -115,6 +123,7 @@ describe("streaming compaction", () => {
   it("keeps the admin request queued when queue enqueue fails after DO state is recorded", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-admin-enqueue-failure");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -133,11 +142,11 @@ describe("streaming compaction", () => {
       sendSpy.mockClear();
       sendSpy.mockRejectedValue(new Error("queue unavailable"));
 
-      const requestResponse = await SELF.fetch(
+      const requestResponse = await workerExports.default.fetch(
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
           body: JSON.stringify({ dryRun: false }),
         }
       );
@@ -151,7 +160,7 @@ describe("streaming compaction", () => {
       expect(requestJson.status).toBe("queued");
       expect(requestJson.shouldEnqueue).toBe(true);
 
-      const stateAfterRequest = await getDebugState(owner, repo);
+      const stateAfterRequest = await getDebugState(owner, repo, seededRepo.cookieHeader);
       expect(stateAfterRequest.compaction?.queued).toBe(true);
       expect(sendSpy).toHaveBeenCalledTimes(1);
     } finally {
@@ -162,6 +171,7 @@ describe("streaming compaction", () => {
   it("previews compaction plan even after clearing compactionWantedAt", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-preview-cleared");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -180,30 +190,34 @@ describe("streaming compaction", () => {
       sendSpy.mockClear();
 
       // Request compaction so compactionWantedAt is set.
-      const requestResponse = await SELF.fetch(
+      const requestResponse = await workerExports.default.fetch(
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
           body: JSON.stringify({ dryRun: false }),
         }
       );
       expect(requestResponse.status).toBe(202);
 
       // Clear the recorded request.
-      const clearResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/compact`, {
-        method: "DELETE",
-      });
+      const clearResponse = await workerExports.default.fetch(
+        `https://example.com/${owner}/${repo}/admin/compact`,
+        {
+          method: "DELETE",
+          headers: { Cookie: seededRepo.cookieHeader },
+        }
+      );
       expect(clearResponse.status).toBe(200);
       const clearJson = (await clearResponse.json()) as { cleared?: boolean };
       expect(clearJson.cleared).toBe(true);
 
       // Preview should still show the plan with queued: false.
-      const previewResponse = await SELF.fetch(
+      const previewResponse = await workerExports.default.fetch(
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
           body: JSON.stringify({}),
         }
       );
@@ -226,6 +240,7 @@ describe("streaming compaction", () => {
   it("compacts superseded packs and keeps fetch and raw reads correct without loose objects", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-run");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     const stub = getRepoStub(env, repoId);
@@ -248,7 +263,7 @@ describe("streaming compaction", () => {
     expect(compacted.acked).toBe(true);
     expect(compacted.retried).toBe(false);
 
-    const stateAfterCompaction = await getDebugState(owner, repo);
+    const stateAfterCompaction = await getDebugState(owner, repo, seededRepo.cookieHeader);
     expect(stateAfterCompaction.compaction?.queued).toBe(false);
     expect(stateAfterCompaction.activePacks?.some((pack) => pack.kind === "compact")).toBe(true);
     expect(stateAfterCompaction.supersededPacks?.length).toBe(4);
@@ -259,24 +274,27 @@ describe("streaming compaction", () => {
       true
     );
 
-    const rawResponse = await SELF.fetch(
+    const rawResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${pushed.objectOids.at(-3)}&name=README.md`
     );
     expect(rawResponse.status).toBe(200);
     expect(await rawResponse.text()).toBe("streaming update 3\n");
 
-    const fetchResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/git-upload-pack`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        "Git-Protocol": "version=2",
-      },
-      body: buildFetchBody({
-        wants: [pushed.currentCommitOid],
-        haves: [seeded.nextCommit.oid],
-        done: true,
-      }),
-    } as any);
+    const fetchResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/git-upload-pack`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          "Git-Protocol": "version=2",
+        },
+        body: buildFetchBody({
+          wants: [pushed.currentCommitOid],
+          haves: [seeded.nextCommit.oid],
+          done: true,
+        }),
+      } as any
+    );
     expect(fetchResponse.status).toBe(200);
     expect(
       decodeReportStatus(new Uint8Array(await fetchResponse.arrayBuffer())).length
@@ -292,7 +310,7 @@ describe("streaming compaction", () => {
     ).toBe(true);
 
     // The superseded catalog rows remain visible for admin/debug until explicit cleanup.
-    const finalState = await getDebugState(owner, repo);
+    const finalState = await getDebugState(owner, repo, seededRepo.cookieHeader);
     expect(finalState.supersededPacks?.length).toBe(4);
 
     void stub;
@@ -301,6 +319,7 @@ describe("streaming compaction", () => {
   it("admin remove deletes pack, idx, and ref sidecar for a superseded pack", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-admin-remove");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -317,7 +336,7 @@ describe("streaming compaction", () => {
     expect(compacted.acked).toBe(true);
     expect(compacted.retried).toBe(false);
 
-    const stateAfterCompaction = await getDebugState(owner, repo);
+    const stateAfterCompaction = await getDebugState(owner, repo, seededRepo.cookieHeader);
     const supersededPackKey = stateAfterCompaction.supersededPacks?.[0]?.key;
     if (!supersededPackKey) throw new Error("missing superseded pack");
 
@@ -328,9 +347,9 @@ describe("streaming compaction", () => {
     const packName = supersededPackKey.split("/").pop();
     if (!packName) throw new Error("missing pack name");
 
-    const deleteResponse = await SELF.fetch(
+    const deleteResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/admin/pack/${encodeURIComponent(packName)}`,
-      { method: "DELETE" }
+      { method: "DELETE", headers: { Cookie: seededRepo.cookieHeader } }
     );
     expect(deleteResponse.status).toBe(200);
     const deleteJson = (await deleteResponse.json()) as {
@@ -356,6 +375,7 @@ describe("streaming compaction", () => {
   it("returns retry when a receive lease appears before compaction commit", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-receive-priority");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     const getStub = () => env.REPO_DO.get(env.REPO_DO.idFromName(repoId));
@@ -403,13 +423,14 @@ describe("streaming compaction", () => {
       expect(result.reason).toBe("receive-active");
     }
 
-    const state = await getDebugState(owner, repo);
+    const state = await getDebugState(owner, repo, seededRepo.cookieHeader);
     expect(state.activePacks?.every((pack) => pack.kind !== "compact")).toBe(true);
   });
 
   it("returns retry when packsetVersion changes before compaction commit", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-packset-changed");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     const getStub = () => env.REPO_DO.get(env.REPO_DO.idFromName(repoId));
@@ -454,7 +475,7 @@ describe("streaming compaction", () => {
       expect(result.reason).toBe("packset-changed");
     }
 
-    const state = await getDebugState(owner, repo);
+    const state = await getDebugState(owner, repo, seededRepo.cookieHeader);
     expect(state.activePacks?.every((pack) => pack.kind !== "compact")).toBe(true);
   });
 
@@ -472,6 +493,7 @@ describe("streaming compaction", () => {
 
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-self-ref");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -545,7 +567,7 @@ describe("streaming compaction", () => {
     });
 
     // Verify compaction plan selects the 4 source packs (oldest tier-0).
-    const preState = await getDebugState(owner, repo);
+    const preState = await getDebugState(owner, repo, seededRepo.cookieHeader);
     expect(preState.activePacks?.length).toBe(5);
     expect(preState.activePacks?.filter((p) => p.tier === 0).length).toBe(5);
 
@@ -559,7 +581,7 @@ describe("streaming compaction", () => {
     expect(result.retried).toBe(false);
 
     // Verify post-compaction state: one compacted pack, 4 source packs superseded.
-    const postState = await getDebugState(owner, repo);
+    const postState = await getDebugState(owner, repo, seededRepo.cookieHeader);
     expect(postState.activePacks?.some((p) => p.kind === "compact")).toBe(true);
     expect(postState.supersededPacks?.length).toBe(4);
     expect(postState.compaction?.queued).toBe(false);
@@ -582,6 +604,7 @@ describe("streaming compaction", () => {
 
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-fetch-dup");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -693,18 +716,21 @@ describe("streaming compaction", () => {
     expect(compactResult.acked).toBe(true);
     expect(compactResult.retried).toBe(false);
 
-    const postState = await getDebugState(owner, repo);
+    const postState = await getDebugState(owner, repo, seededRepo.cookieHeader);
     expect(postState.activePacks?.some((p) => p.kind === "compact")).toBe(true);
 
     // Fetch all objects (clone scenario) — this is the path that was broken.
-    const fetchResponse = await SELF.fetch(`https://example.com/${owner}/${repo}/git-upload-pack`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        "Git-Protocol": "version=2",
-      },
-      body: buildFetchBody({ wants: [newestCommit.oid], done: true }),
-    } as any);
+    const fetchResponse = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/git-upload-pack`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          "Git-Protocol": "version=2",
+        },
+        body: buildFetchBody({ wants: [newestCommit.oid], done: true }),
+      } as any
+    );
     expect(fetchResponse.status).toBe(200);
 
     // Extract sideband-encoded pack bytes from the response.
@@ -749,7 +775,7 @@ describe("streaming compaction", () => {
       await deleteSupersededOnce(repoId, supersededKeys);
     }
 
-    const fetchResponse2 = await SELF.fetch(
+    const fetchResponse2 = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/git-upload-pack`,
       {
         method: "POST",
@@ -793,6 +819,7 @@ describe("streaming compaction", () => {
   it("keeps active pack counts bounded after repeated pushes and compaction drains", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-bounded");
+    const seededRepo = await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const seeded = await seedPackFirstRepo(repoId);
     await promoteToStreaming(owner, repo);
@@ -806,13 +833,13 @@ describe("streaming compaction", () => {
     });
 
     for (let attempt = 0; attempt < 6; attempt++) {
-      const queuedState = await getDebugState(owner, repo);
+      const queuedState = await getDebugState(owner, repo, seededRepo.cookieHeader);
       if (!queuedState.compaction?.queued) break;
       const result = await compactOnce(repoId);
       expect(result.acked || result.retried).toBe(true);
     }
 
-    const finalState = await getDebugState(owner, repo);
+    const finalState = await getDebugState(owner, repo, seededRepo.cookieHeader);
     const counts = new Map<number, number>();
     for (const pack of finalState.activePacks || []) {
       counts.set(pack.tier, (counts.get(pack.tier) || 0) + 1);

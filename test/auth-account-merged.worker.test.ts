@@ -1,4 +1,5 @@
-import { applyD1Migrations, env, SELF } from "cloudflare:test";
+import { applyD1Migrations } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { __test as oidcTest, sealTransaction } from "@/worker/auth/oidc";
@@ -51,7 +52,7 @@ async function signIn(sub: string, preferredUsername?: string): Promise<string> 
   const url = new URL("https://example.com/auth/callback");
   url.searchParams.set("code", "x");
   url.searchParams.set("state", state);
-  const res = await SELF.fetch(url.toString(), {
+  const res = await workerExports.default.fetch(url.toString(), {
     redirect: "manual",
     headers: { Cookie: `${OIDC_TX_COOKIE_NAME}=${cookieValue}` },
   });
@@ -65,7 +66,7 @@ async function signIn(sub: string, preferredUsername?: string): Promise<string> 
 describe("merged /auth/account hub", () => {
   it("renders identity, namespaces, repositories, and the tokens island on one page", async () => {
     const token = await signIn("sub-merged-1", "merged-rachel");
-    const res = await SELF.fetch("https://example.com/auth/account", {
+    const res = await workerExports.default.fetch("https://example.com/auth/account", {
       headers: { Cookie: `${SESSION_COOKIE_NAME}=${token}` },
     });
     expect(res.status).toBe(200);
@@ -88,7 +89,7 @@ describe("merged /auth/account hub", () => {
 
   it("renders the merged page even when the user has no preferred_username claim", async () => {
     const token = await signIn("sub-merged-no-slug", undefined);
-    const res = await SELF.fetch("https://example.com/auth/account", {
+    const res = await workerExports.default.fetch("https://example.com/auth/account", {
       headers: { Cookie: `${SESSION_COOKIE_NAME}=${token}` },
     });
     expect(res.status).toBe(200);
@@ -99,7 +100,7 @@ describe("merged /auth/account hub", () => {
 
   it("/auth/tokens no longer routes to the management page", async () => {
     const token = await signIn("sub-tokens-route-gone", "route-gone");
-    const res = await SELF.fetch("https://example.com/auth/tokens", {
+    const res = await workerExports.default.fetch("https://example.com/auth/tokens", {
       headers: { Cookie: `${SESSION_COOKIE_NAME}=${token}` },
       redirect: "manual",
     });

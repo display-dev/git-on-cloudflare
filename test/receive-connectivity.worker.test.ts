@@ -1,13 +1,14 @@
 import { it, expect } from "vitest";
-import { SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/worker/git";
-import { uniqueRepoId } from "./util/test-helpers";
-import { buildPack, zero40 } from "./util/test-helpers";
+import { uniqueRepoId, buildPack, zero40 } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { bytesToHex } from "@/worker/common/hex";
 
 it("receive-pack connectivity: rejects commit whose root tree is missing", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-connectivity-missing-tree");
+  const seededRepo = await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // Construct a commit that points to a tree OID that is NOT present anywhere on the server
@@ -36,7 +37,7 @@ it("receive-pack connectivity: rejects commit whose root tree is missing", async
   const cmd = `${zero40()} ${commitOid} refs/heads/main\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
 
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,
@@ -52,7 +53,10 @@ it("receive-pack connectivity: rejects commit whose root tree is missing", async
   expect(ng && /missing-objects/.test(ng)).toBeTruthy();
 
   // Verify ref was NOT created
-  const refsRes = await SELF.fetch(`https://example.com/${owner}/${repo}/admin/refs`);
+  const refsRes = await workerExports.default.fetch(
+    `https://example.com/${owner}/${repo}/admin/refs`,
+    { headers: { Cookie: seededRepo.cookieHeader } }
+  );
   expect(refsRes.status).toBe(200);
   const refs = await refsRes.json<any>();
   expect(refs.find((r: any) => r.name === "refs/heads/main")).toBeUndefined();
@@ -61,6 +65,7 @@ it("receive-pack connectivity: rejects commit whose root tree is missing", async
 it("receive-pack connectivity: accepts annotated tag pointing to commit with present tree", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-tag-commit-ok");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // Build empty tree and commit
@@ -111,7 +116,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to commit with pre
 
   const cmd = `${zero40()} ${tagOid} refs/tags/v1\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,
@@ -126,6 +131,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to commit with pre
 it("receive-pack connectivity: accepts annotated tag pointing to tree present", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-tag-tree-ok");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   const treePayload = new Uint8Array(0);
@@ -157,7 +163,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to tree present", 
   ]);
   const cmd = `${zero40()} ${tagOid} refs/tags/v2\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,
@@ -172,6 +178,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to tree present", 
 it("receive-pack connectivity: rejects annotated tag pointing to commit with missing tree", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-tag-commit-missing-tree");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
   const missingTreeOid = "c".repeat(40);
   const author = `You <you@example.com> 0 +0000`;
@@ -208,7 +215,7 @@ it("receive-pack connectivity: rejects annotated tag pointing to commit with mis
   ]);
   const cmd = `${zero40()} ${tagOid} refs/tags/v3\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,
@@ -224,6 +231,7 @@ it("receive-pack connectivity: rejects annotated tag pointing to commit with mis
 it("receive-pack connectivity: accepts direct ref to tree present", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-tree-ref-ok");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // Build an empty tree
@@ -241,7 +249,7 @@ it("receive-pack connectivity: accepts direct ref to tree present", async () => 
 
   const cmd = `${zero40()} ${treeOid} refs/tags/tree-only\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,
@@ -256,6 +264,7 @@ it("receive-pack connectivity: accepts direct ref to tree present", async () => 
 it("receive-pack connectivity: accepts direct ref to blob present", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-blob-ref-ok");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   const blobPayload = new TextEncoder().encode("hello\n");
@@ -272,7 +281,7 @@ it("receive-pack connectivity: accepts direct ref to blob present", async () => 
 
   const cmd = `${zero40()} ${blobOid} refs/tags/blob-only\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,
@@ -287,6 +296,7 @@ it("receive-pack connectivity: accepts direct ref to blob present", async () => 
 it("receive-pack connectivity: accepts nested tag->tag->tree present", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-nested-tag-tree-ok");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   const treePayload = new Uint8Array(0);
@@ -335,7 +345,7 @@ it("receive-pack connectivity: accepts nested tag->tag->tree present", async () 
 
   const cmd = `${zero40()} ${tag2Oid} refs/tags/v2\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,

@@ -1,11 +1,13 @@
 import { it, expect } from "vitest";
-import { SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { pktLine, flushPkt, concatChunks } from "@/worker/git";
-import { buildPack, makeTree, zero40 } from "./util/test-helpers";
+import { buildPack, makeTree, uniqueRepoId, zero40 } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 
 it("receive-pack connectivity: rejects commit whose parent is missing", async () => {
   const owner = "o";
-  const repo = "r-missing-parent";
+  const repo = uniqueRepoId("r-missing-parent");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // Build an empty tree and a commit that points to a nonexistent parent
@@ -37,7 +39,7 @@ it("receive-pack connectivity: rejects commit whose parent is missing", async ()
   const cmd = `${zero40()} ${commitOid} refs/heads/dev\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
 
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,

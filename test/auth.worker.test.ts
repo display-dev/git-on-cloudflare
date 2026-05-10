@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { pktLine, flushPkt, concatChunks } from "@/worker/git";
 import { asBufferSource, deflate } from "@/worker/common";
+import { setupRepoForTests } from "./util/repoSeed";
 
 function encodeObjHeader(type: number, size: number): Uint8Array {
   let first = (type << 4) | (size & 0x0f);
@@ -52,7 +53,7 @@ function basicAuth(user: string, pass: string) {
 
 async function seedOwner(owner: string, token: string) {
   // Use the /auth management API with Bearer admin token configured via vitest.auth.config.ts
-  const res = await SELF.fetch("https://example.com/auth/api/users", {
+  const res = await workerExports.default.fetch("https://example.com/auth/api/users", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -64,14 +65,14 @@ async function seedOwner(owner: string, token: string) {
 }
 
 it("auth: management API uses bearer admin auth", async () => {
-  const wrong = await SELF.fetch("https://example.com/auth/api/users", {
+  const wrong = await workerExports.default.fetch("https://example.com/auth/api/users", {
     headers: {
       Authorization: "Bearer adm",
     },
   } as any);
   expect(wrong.status).toBe(401);
 
-  const ok = await SELF.fetch("https://example.com/auth/api/users", {
+  const ok = await workerExports.default.fetch("https://example.com/auth/api/users", {
     headers: {
       Authorization: "Bearer admin",
     },
@@ -87,6 +88,7 @@ it("auth: centralized auth rejects push without Basic and accepts with matching 
   const repo = "auth-repo";
   const token = "alicesecret";
   await seedOwner(owner, token);
+  await setupRepoForTests(env, owner, repo);
 
   // Build a trivial tree+commit pack
   const treePayload = new Uint8Array(0);
@@ -121,7 +123,7 @@ it("auth: centralized auth rejects push without Basic and accepts with matching 
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // No auth → 401
-  const r1 = await SELF.fetch(url, {
+  const r1 = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,
@@ -129,7 +131,7 @@ it("auth: centralized auth rejects push without Basic and accepts with matching 
   expect(r1.status).toBe(401);
 
   // Wrong username → 401
-  const r2 = await SELF.fetch(url, {
+  const r2 = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-receive-pack-request",
@@ -140,7 +142,7 @@ it("auth: centralized auth rejects push without Basic and accepts with matching 
   expect(r2.status).toBe(401);
 
   // Correct username but wrong token → 401
-  const r3 = await SELF.fetch(url, {
+  const r3 = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-receive-pack-request",
@@ -151,7 +153,7 @@ it("auth: centralized auth rejects push without Basic and accepts with matching 
   expect(r3.status).toBe(401);
 
   // Correct username + token → 200
-  const r4 = await SELF.fetch(url, {
+  const r4 = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-receive-pack-request",
@@ -162,27 +164,28 @@ it("auth: centralized auth rejects push without Basic and accepts with matching 
   expect(r4.status).toBe(200);
 });
 
-it("auth: per-repo admin endpoints require Basic when centralized auth is enabled", async () => {
+it("auth: per-repo admin endpoints reject Basic credentials and require session membership", async () => {
   const owner = "alice2";
   const repo = "auth-repo2";
   const token = "s3cr3t";
   await seedOwner(owner, token);
+  const seededRepo = await setupRepoForTests(env, owner, repo);
 
   const refsUrl = `https://example.com/${owner}/${repo}/admin/refs`;
 
-  // No auth → 401
-  const a1 = await SELF.fetch(refsUrl);
+  // No auth -> 401
+  const a1 = await workerExports.default.fetch(refsUrl);
   expect(a1.status).toBe(401);
 
-  // Wrong user → 401
-  const a2 = await SELF.fetch(refsUrl, {
-    headers: { Authorization: basicAuth("bob", token) },
+  // Legacy AuthDO Basic credential is no longer accepted on repo admin.
+  const a2 = await workerExports.default.fetch(refsUrl, {
+    headers: { Authorization: basicAuth(owner, token) },
   } as any);
   expect(a2.status).toBe(401);
 
-  // Correct user/token → 200 (empty list initially)
-  const a3 = await SELF.fetch(refsUrl, {
-    headers: { Authorization: basicAuth(owner, token) },
+  // Session cookie for a member -> 200.
+  const a3 = await workerExports.default.fetch(refsUrl, {
+    headers: { Cookie: seededRepo.cookieHeader },
   } as any);
   expect(a3.status).toBe(200);
   const refs = await a3.json();

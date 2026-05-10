@@ -1,12 +1,14 @@
 import { it, expect } from "vitest";
-import { SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { uniqueRepoId } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { decodePktLines } from "@/worker/git";
 import { seedPackFirstRepo } from "./util/pack-first";
 
 it("advertises streaming receive-pack capabilities including side-band-64k", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-recv-adv");
+  await setupRepoForTests(env, owner, repo);
   const repoId = `${owner}/${repo}`;
 
   await seedPackFirstRepo(repoId);
@@ -14,7 +16,7 @@ it("advertises streaming receive-pack capabilities including side-band-64k", asy
   const url = new URL(`https://example.com/${owner}/${repo}/info/refs`);
   url.searchParams.set("service", "git-receive-pack");
 
-  const res = await SELF.fetch(new Request(url, { method: "GET" }));
+  const res = await workerExports.default.fetch(new Request(url, { method: "GET" }));
   expect(res.status).toBe(200);
   expect(res.headers.get("Content-Type")).toContain("git-receive-pack-advertisement");
 

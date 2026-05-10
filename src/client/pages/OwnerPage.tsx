@@ -1,10 +1,16 @@
-import { Folder } from "lucide-react";
+import { Folder, Lock } from "lucide-react";
+
 import { EmptyState } from "@/client/components/EmptyState";
 import { PageHeader } from "@/client/components/ui/page-header";
 
+export type OwnerPageRepo = {
+  slug: string;
+  visibility: "public" | "private";
+};
+
 export type OwnerPageProps = {
   owner: string;
-  repos: string[];
+  repos: OwnerPageRepo[];
 };
 
 export function OwnerPage({ owner, repos }: OwnerPageProps) {
@@ -22,27 +28,38 @@ export function OwnerPage({ owner, repos }: OwnerPageProps) {
       <h2>Repositories</h2>
       <div className="mt-6 grid gap-6 md:grid-cols-2">
         {repos.length ? (
-          repos.map((repo, i) => (
-            <a
-              key={repo}
-              href={`/${owner}/${repo}`}
-              className="group block animate-slide-up opacity-0 rounded-2xl border border-zinc-300 dark:border-zinc-800/60 bg-white shadow-sm dark:bg-zinc-900/50 dark:shadow-none p-5 hover:-translate-y-0.5 transition-transform cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-700/60 hover:shadow-md"
-              style={{ animationDelay: `${Math.min(i, 7) * 60}ms` }}
-            >
-              <div className="flex items-center gap-3">
-                <span className="inline-grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-zinc-100 text-zinc-500 transition-colors group-hover:bg-accent-50 group-hover:text-accent-500 dark:bg-zinc-800 dark:text-zinc-400 dark:group-hover:bg-accent-900/20 dark:group-hover:text-accent-400">
-                  <Folder className="h-[1.1rem] w-[1.1rem]" aria-hidden="true" />
-                </span>
-                <div className="text-lg font-medium">
-                  <span className="text-zinc-500 dark:text-zinc-400">{owner}</span>
-                  <span className="mx-1 text-zinc-300 dark:text-zinc-600">/</span>
-                  <span className="transition-colors group-hover:text-accent-500 dark:group-hover:text-accent-400">
-                    {repo}
+          repos.map((repo, i) => {
+            const isPrivate = repo.visibility === "private";
+            const Icon = isPrivate ? Lock : Folder;
+            return (
+              <a
+                key={repo.slug}
+                href={`/${owner}/${repo.slug}`}
+                className="group block animate-slide-up opacity-0 rounded-2xl border border-zinc-300 dark:border-zinc-800/60 bg-white shadow-sm dark:bg-zinc-900/50 dark:shadow-none p-5 hover:-translate-y-0.5 transition-transform cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-700/60 hover:shadow-md"
+                style={{ animationDelay: `${Math.min(i, 7) * 60}ms` }}
+              >
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`inline-grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-zinc-100 transition-colors group-hover:bg-accent-50 dark:bg-zinc-800 dark:group-hover:bg-accent-900/20 ${
+                      isPrivate
+                        ? "text-amber-700 group-hover:text-amber-700 dark:text-amber-400 dark:group-hover:text-amber-400"
+                        : "text-zinc-500 group-hover:text-accent-500 dark:text-zinc-400 dark:group-hover:text-accent-400"
+                    }`}
+                    aria-label={isPrivate ? "Private repository" : undefined}
+                  >
+                    <Icon className="h-[1.1rem] w-[1.1rem]" aria-hidden="true" />
                   </span>
+                  <div className="text-lg font-medium">
+                    <span className="text-zinc-500 dark:text-zinc-400">{owner}</span>
+                    <span className="mx-1 text-zinc-300 dark:text-zinc-600">/</span>
+                    <span className="transition-colors group-hover:text-accent-500 dark:group-hover:text-accent-400">
+                      {repo.slug}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            </a>
-          ))
+              </a>
+            );
+          })
         ) : (
           <div className="col-span-full">
             <EmptyState

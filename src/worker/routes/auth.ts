@@ -12,17 +12,23 @@ import { validateSlugForRoute } from "@/shared/slugs";
 import { createDb, type Db } from "@/worker/db/d1/client";
 import {
   claimNamespace,
+  deleteRouteCacheRecord,
+  findNamespaceById,
   findNamespaceBySlug,
+  findRepositoryById,
   findRepositoryByNamespaceAndSlug,
   findUserByTesseraSub,
   insertMembershipIfMissing,
   insertPatWithGrants,
+  insertRepositoryIfNew,
   insertUserIfNew,
   listNamespacesForUser,
   listPatGrantsByIds,
   listPatsForUser,
   listRepositoriesForUser,
+  putRouteCacheRecord,
   revokePatById,
+  updateRepositoryVisibility,
   type PatGrantLevel,
   type PersonalAccessTokenRow,
 } from "@/worker/db/d1/dal";
@@ -511,6 +517,201 @@ export function registerAuthRoutes(router: AppRouter) {
       level,
     });
     return json({ id: patId, plaintext: generated.plaintext, prefix: generated.publicPrefix });
+  });
+
+  router.get(`/auth/api/repositories`, async (c) => {
+    const viewer = await loadViewer(c);
+    if (!viewer) return json({ error: "Unauthorized" }, 401);
+    const db = createDb(c.env.DB);
+    const rows = await listRepositoriesForUser(db, viewer.userId);
+    return json({
+      repositories: rows.map((row) => ({
+        id: row.repository.id,
+        slug: row.repository.slug,
+        namespaceSlug: row.namespace.slug,
+        visibility: row.repository.visibility as "public" | "private",
+        updatedAt: row.repository.updatedAt,
+      })),
+    });
+  });
+
+  router.post(`/auth/api/repositories`, async (c) => {
+    const log = createLogger(c.env.LOG_LEVEL, { service: "RepoCreate" });
+    const violation = sameOriginViolation(c);
+    if (violation) {
+      log.warn("repo-create:same-origin-violation");
+      return violation;
+    }
+    const viewer = await loadViewer(c);
+    if (!viewer) {
+      log.info("repo-create:not-authenticated");
+      return json({ error: "Unauthorized" }, 401);
+    }
+    const body = await safeParseJsonRequest(c.req.raw);
+    const namespaceSlugRaw =
+      isJsonObject(body) && typeof body.namespaceSlug === "string"
+        ? body.namespaceSlug.trim().toLowerCase()
+        : "";
+    const slugRaw =
+      isJsonObject(body) && typeof body.slug === "string" ? body.slug.trim().toLowerCase() : "";
+    const visibility =
+      isJsonObject(body) && (body.visibility === "public" || body.visibility === "private")
+        ? body.visibility
+        : null;
+    if (visibility === null) {
+      log.warn("repo-create:invalid-visibility");
+      return json({ ok: false, reason: "invalid-visibility" } as const, 400);
+    }
+    const namespaceValidation = validateSlugForRoute(namespaceSlugRaw);
+    if (!namespaceValidation.ok) {
+      log.warn("repo-create:invalid-slug", { field: "namespaceSlug" });
+      return json({ ok: false, reason: "invalid-slug" } as const, 400);
+    }
+    const slugValidation = validateSlugForRoute(slugRaw);
+    if (!slugValidation.ok) {
+      log.warn("repo-create:invalid-slug", { field: "slug" });
+      return json({ ok: false, reason: "invalid-slug" } as const, 400);
+    }
+    const db = createDb(c.env.DB);
+    const namespace = await findNamespaceBySlug(db, namespaceValidation.slug);
+    if (!namespace) {
+      log.warn("repo-create:namespace-not-found", { namespaceSlug: namespaceValidation.slug });
+      return json({ ok: false, reason: "namespace-not-found" } as const, 404);
+    }
+    if (!(await viewerIsNamespaceMember(db, viewer.userId, namespace.id))) {
+      log.warn("repo-create:not-member", {
+        userId: viewer.userId,
+        namespaceId: namespace.id,
+      });
+      return json({ ok: false, reason: "not-member" } as const, 403);
+    }
+    const now = Date.now();
+    const repositoryId = newPrefixedId("repo");
+    // `doName` for fresh repos uses `repo:<id-suffix>`; legacy backfilled
+    // rows keep the historical `<owner>/<repo>` form. The colon namespace
+    // prevents future collisions if a namespace ever uses dashes that look
+    // like `<owner>/<repo>`.
+    const doName = `repo:${repositoryId.slice("repo_".length)}`;
+    const inserted = await insertRepositoryIfNew(db, {
+      id: repositoryId,
+      namespaceId: namespace.id,
+      createdBy: viewer.userId,
+      slug: slugValidation.slug,
+      doName,
+      visibility,
+      createdAt: now,
+      updatedAt: now,
+    });
+    if (!inserted) {
+      // Race lost: another writer committed `(namespaceId, slug)` between
+      // our membership check and the insert. The user sees this as
+      // slug-taken and can pick another name.
+      log.warn("repo-create:slug-taken", {
+        namespaceId: namespace.id,
+        slug: slugValidation.slug,
+      });
+      return json({ ok: false, reason: "slug-taken" } as const, 409);
+    }
+    try {
+      await putRouteCacheRecord(c.env, namespaceValidation.slug, slugValidation.slug, {
+        repositoryId: inserted.id,
+        namespaceId: namespace.id,
+        doName,
+        updatedAt: now,
+      });
+    } catch (error) {
+      log.warn("repo-create:route-cache-put-failed", {
+        repositoryId: inserted.id,
+        error: String(error),
+      });
+      // Best-effort. Anonymous KV-miss reads still resolve via the D1
+      // fallback in `resolveRepositoryRoute`; authenticated/PAT paths do
+      // the same. KV will converge on the next put.
+    }
+    log.info("repo-create:ok", {
+      userId: viewer.userId,
+      repositoryId: inserted.id,
+      namespaceSlug: namespaceValidation.slug,
+      slug: slugValidation.slug,
+      visibility,
+    });
+    return json({
+      ok: true,
+      id: inserted.id,
+      namespaceSlug: namespaceValidation.slug,
+      slug: slugValidation.slug,
+      visibility,
+      updatedAt: now,
+    } as const);
+  });
+
+  router.patch(`/auth/api/repositories/:repositoryId`, async (c) => {
+    const log = createLogger(c.env.LOG_LEVEL, { service: "RepoVisibility" });
+    const violation = sameOriginViolation(c);
+    if (violation) {
+      log.warn("repo-visibility:same-origin-violation");
+      return violation;
+    }
+    const viewer = await loadViewer(c);
+    if (!viewer) return json({ error: "Unauthorized" }, 401);
+    const repositoryId = c.req.param("repositoryId");
+    const body = await safeParseJsonRequest(c.req.raw);
+    const visibility =
+      isJsonObject(body) && (body.visibility === "public" || body.visibility === "private")
+        ? body.visibility
+        : null;
+    if (visibility === null) {
+      log.warn("repo-visibility:invalid-payload", { repositoryId });
+      return json({ ok: false, reason: "invalid-payload" } as const, 400);
+    }
+    const db = createDb(c.env.DB);
+    const repo = await findRepositoryById(db, repositoryId);
+    if (!repo) {
+      log.warn("repo-visibility:not-found", { repositoryId });
+      return json({ ok: false, reason: "not-found" } as const, 404);
+    }
+    if (!(await viewerIsNamespaceMember(db, viewer.userId, repo.namespaceId))) {
+      log.warn("repo-visibility:not-member", {
+        userId: viewer.userId,
+        repositoryId,
+        namespaceId: repo.namespaceId,
+      });
+      return json({ ok: false, reason: "not-member" } as const, 403);
+    }
+    const result = await updateRepositoryVisibility(db, repositoryId, visibility, Date.now());
+    if (!result.ok) {
+      log.warn("repo-visibility:not-found", { repositoryId });
+      return json({ ok: false, reason: "not-found" } as const, 404);
+    }
+    if (result.previous === "public" && result.current === "private") {
+      // Best-effort privacy hygiene: drop the route candidate so anonymous
+      // KV-miss serving returns 404 immediately at colos that had cached
+      // the public route. Correctness still comes from D1 + the resolver's
+      // KV-then-D1 verification; this is an acceleration, not a gate.
+      try {
+        const namespace = await findNamespaceById(db, repo.namespaceId);
+        if (namespace) {
+          await deleteRouteCacheRecord(c.env, namespace.slug, repo.slug);
+        }
+      } catch (error) {
+        log.warn("repo-visibility:route-cache-delete-failed", {
+          repositoryId,
+          error: String(error),
+        });
+      }
+    }
+    log.info("repo-visibility:ok", {
+      userId: viewer.userId,
+      repositoryId,
+      previous: result.previous,
+      current: result.current,
+    });
+    return json({
+      ok: true,
+      id: repositoryId,
+      visibility: result.current,
+      previous: result.previous,
+    } as const);
   });
 
   router.delete(`/auth/api/tokens/:patId`, async (c) => {

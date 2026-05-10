@@ -1,4 +1,5 @@
-import { applyD1Migrations, env, SELF } from "cloudflare:test";
+import { applyD1Migrations } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createDb } from "@/worker/db/d1/client";
@@ -69,7 +70,7 @@ async function callCallback(args: { state: string; cookie?: string; code?: strin
   const url = new URL("https://example.com/auth/callback");
   url.searchParams.set("code", args.code ?? "fake-code");
   url.searchParams.set("state", args.state);
-  return await SELF.fetch(url.toString(), {
+  return await workerExports.default.fetch(url.toString(), {
     redirect: "manual",
     headers: args.cookie ? { Cookie: args.cookie } : undefined,
   });
@@ -184,7 +185,7 @@ describe("/auth/callback", () => {
       const url = new URL("https://example.com/auth/callback");
       url.searchParams.set("code", "anything");
       url.searchParams.set("state", "state-cfg");
-      const res = await SELF.fetch(url.toString(), {
+      const res = await workerExports.default.fetch(url.toString(), {
         redirect: "manual",
         headers: { Cookie: cookie },
       });

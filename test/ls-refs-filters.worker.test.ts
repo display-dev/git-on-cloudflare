@@ -1,5 +1,5 @@
 import { it, expect } from "vitest";
-import { env, SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import {
   pktLine,
   delimPkt,
@@ -9,6 +9,7 @@ import {
   encodeGitObject,
 } from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { registerTestPack } from "./util/packed-repo";
 
 function buildLsRefsBody(args: string[] = []) {
@@ -29,6 +30,7 @@ function decodeLineTexts(bytes: Uint8Array): string[] {
 it("ls-refs: ref-prefix filters refs and peel adds peeled attribute for annotated tags", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-lsrefs-filters");
+  await setupRepoForTests(env, owner, repo);
   const repoId = `${owner}/${repo}`;
 
   // Seed minimal repo to create HEAD -> refs/heads/main
@@ -68,7 +70,7 @@ it("ls-refs: ref-prefix filters refs and peel adds peeled attribute for annotate
   // Ask only for refs/tags/* and request peeling
   const body = buildLsRefsBody(["ref-prefix refs/tags/", "peel"]);
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
@@ -94,6 +96,7 @@ it("ls-refs: ref-prefix filters refs and peel adds peeled attribute for annotate
 it("ls-refs: peel resolves many annotated tags stored across multiple packs", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-lsrefs-many-tags");
+  await setupRepoForTests(env, owner, repo);
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
   const getStub = () => env.REPO_DO.get(id);
@@ -146,7 +149,7 @@ it("ls-refs: peel resolves many annotated tags stored across multiple packs", as
   });
 
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",

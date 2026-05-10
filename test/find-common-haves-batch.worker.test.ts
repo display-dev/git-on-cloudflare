@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { env, SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { decodePktLines } from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 
 function buildFetchBody({
   wants,
@@ -63,6 +64,7 @@ function randomOid(seed: string) {
 it("findCommonHaves batches and ACKs present haves preserving order and de-dup", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-find-haves");
+  await setupRepoForTests(env, owner, repo);
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
   const { commitOid, treeOid } = await runDOWithRetry(
@@ -78,7 +80,7 @@ it("findCommonHaves batches and ACKs present haves preserving order and de-dup",
   // Wants commitOid so server will assemble a minimal pack
   const body = buildFetchBody({ wants: [commitOid], haves, done: false });
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",

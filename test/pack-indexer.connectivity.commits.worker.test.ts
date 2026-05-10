@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
-
+import { env } from "cloudflare:workers";
 import { buildPack, makeCommit, makeTree } from "./util/git-pack";
 import { createTestCacheContext } from "./util/pack-first";
 import { uniqueRepoId } from "./util/test-helpers";

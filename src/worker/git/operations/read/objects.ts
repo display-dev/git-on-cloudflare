@@ -61,7 +61,14 @@ export async function readLooseObjectRaw(
     service: "readObjectRaw",
     repoId,
   });
+  // Visibility-aware cache bypass. Private route handlers set both
+  // `no-cache-read` and `no-cache-write` on `cacheCtx.memo.flags` so this
+  // path (and the JSON cache helpers at the route layer) skip the shared
+  // Workers Cache entirely. Either flag forces the bypass branch; there is
+  // no asymmetric "read but don't write" use case in our policy.
   const bypassCacheRead = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
+  const bypassCacheWrite = cacheCtx?.memo?.flags?.has("no-cache-write") === true;
+  const bypassCache = bypassCacheRead || bypassCacheWrite;
 
   const loadFromPacks = async (): Promise<LooseObjectRead | undefined> => {
     const packed = await readObject(env, repoId, oidLc, cacheCtx);
@@ -85,7 +92,7 @@ export async function readLooseObjectRaw(
 
   if (cacheCtx) {
     const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
-    const loaded = bypassCacheRead
+    const loaded = bypassCache
       ? await loadFromPacks()
       : await cacheOrLoadObject(cacheKey, loadFromPacks, cacheCtx.ctx);
 

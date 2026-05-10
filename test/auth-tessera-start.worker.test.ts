@@ -1,4 +1,5 @@
-import { applyD1Migrations, env, SELF } from "cloudflare:test";
+import { applyD1Migrations } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { __test as oidcTest } from "@/worker/auth/oidc";
@@ -31,7 +32,9 @@ describe("/auth/start", () => {
       },
       provider
     );
-    const res = await SELF.fetch("https://example.com/auth/start", { redirect: "manual" });
+    const res = await workerExports.default.fetch("https://example.com/auth/start", {
+      redirect: "manual",
+    });
     expect(res.status).toBe(302);
     const location = res.headers.get("location") ?? "";
     expect(location.startsWith("https://auth.example.com/oauth2/authorize")).toBe(true);
@@ -49,7 +52,9 @@ describe("/auth/start", () => {
   it("redirects to /auth?error=oidc_unavailable when discovery fails", async () => {
     // No fake provider injected and the configured issuer is not reachable
     // from inside the test pool, so discovery will fail.
-    const res = await SELF.fetch("https://example.com/auth/start", { redirect: "manual" });
+    const res = await workerExports.default.fetch("https://example.com/auth/start", {
+      redirect: "manual",
+    });
     expect(res.status).toBe(302);
     const location = res.headers.get("location") ?? "";
     expect(location).toBe("/auth?error=oidc_unavailable");

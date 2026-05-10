@@ -152,6 +152,14 @@ export async function findPatGrantForNamespace(
   return rows[0];
 }
 
+// Caller decides whether to call (throttle policy lives in `gitAuth.ts`).
+export async function updatePatLastUsedAt(db: Db, patId: string, now: number): Promise<void> {
+  await db
+    .update(personalAccessTokens)
+    .set({ lastUsedAt: now })
+    .where(eq(personalAccessTokens.id, patId));
+}
+
 export type RevokePatResult =
   | { ok: true }
   | { ok: false; reason: "not-found" | "not-owner" | "already-revoked" };

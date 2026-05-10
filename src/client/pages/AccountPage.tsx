@@ -1,7 +1,8 @@
-import { FolderGit2, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 
 import { EmptyState } from "@/client/components/ui";
 import { IslandHost } from "@/client/server/IslandHost";
+import { RepositoriesIsland } from "@/client/islands/repositories";
 import { TokensIsland, type TokensIslandSummary } from "@/client/islands/tokens";
 
 export type AccountNamespace = {
@@ -24,18 +25,6 @@ export type AccountPageProps = {
   repositories: AccountRepository[];
   tokens: TokensIslandSummary[];
 };
-
-function formatRelativeTime(epochMs: number): string {
-  const delta = Date.now() - epochMs;
-  if (delta < 60_000) return "just now";
-  const minutes = Math.floor(delta / 60_000);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(epochMs).toISOString().slice(0, 10);
-}
 
 function truncateUserId(userId: string): string {
   if (userId.length <= 12) return userId;
@@ -98,53 +87,12 @@ export function AccountPage({
         <h2 className="m-0 mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">
           Repositories
         </h2>
-        {repositories.length === 0 ? (
-          <EmptyState
-            icon={<FolderGit2 className="h-5 w-5 text-zinc-400" aria-hidden="true" />}
-            title="Repositories you own will appear here."
-            detail="Legacy repositories are imported in the background; refresh after a moment if you've just signed in."
+        <IslandHost name="repositories" props={{ primaryNamespaceSlug, repositories }}>
+          <RepositoriesIsland
+            primaryNamespaceSlug={primaryNamespaceSlug}
+            repositories={repositories}
           />
-        ) : (
-          <div className="overflow-hidden rounded-2xl border border-zinc-300 dark:border-zinc-800/60">
-            <table>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Visibility</th>
-                  <th className="text-right">Updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {repositories.map((repo) => (
-                  <tr key={repo.id}>
-                    <td>
-                      <a
-                        href={`/${repo.namespaceSlug}/${repo.slug}`}
-                        className="font-mono text-sm text-zinc-900 no-underline hover:text-accent-600 dark:text-zinc-100 dark:hover:text-accent-400"
-                      >
-                        {repo.namespaceSlug}/{repo.slug}
-                      </a>
-                    </td>
-                    <td>
-                      <span
-                        className={`font-mono text-[10px] uppercase tracking-widest ${
-                          repo.visibility === "private"
-                            ? "text-amber-700 dark:text-amber-400"
-                            : "text-emerald-700 dark:text-emerald-400"
-                        }`}
-                      >
-                        {repo.visibility}
-                      </span>
-                    </td>
-                    <td className="text-right text-xs text-zinc-500">
-                      {formatRelativeTime(repo.updatedAt)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        </IslandHost>
       </section>
 
       <section id="tokens" className="scroll-mt-20">

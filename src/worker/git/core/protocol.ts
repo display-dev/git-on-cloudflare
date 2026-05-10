@@ -1,6 +1,9 @@
+import type { CacheContext } from "@/worker/cache";
+
 import { pktLine, flushPkt, concatChunks, decodePktLines } from "./pktline";
 import { asBodyInit } from "@/worker/common/webtypes";
 import { getRepoStub } from "@/worker/common/stub";
+import { getLimiter } from "@/worker/git/operations/limits";
 
 /**
  * Generates a Git capability advertisement response.
@@ -8,12 +11,15 @@ import { getRepoStub } from "@/worker/common/stub";
  * @param env - Worker environment
  * @param service - Git service (git-upload-pack or git-receive-pack)
  * @param repoId - Repository identifier
+ * @param cacheCtx - Optional request CacheContext used to share the per-request
+ *                   subrequest limiter for the underlying DO RPC.
  * @returns HTTP response with capability advertisement
  */
 export async function capabilityAdvertisement(
   env: Env,
   service: "git-upload-pack" | "git-receive-pack",
-  repoId?: string
+  repoId?: string,
+  cacheCtx?: CacheContext
 ) {
   if (service === "git-upload-pack") {
     const chunks: Uint8Array[] = [];
@@ -43,7 +49,8 @@ export async function capabilityAdvertisement(
   if (repoId) {
     try {
       const stub = getRepoStub(env, repoId);
-      const data = await stub.listRefs();
+      const limiter = getLimiter(cacheCtx);
+      const data = await limiter.run("do:caps-list-refs", () => stub.listRefs());
       if (Array.isArray(data)) refs = data as { name: string; oid: string }[];
     } catch {}
   }

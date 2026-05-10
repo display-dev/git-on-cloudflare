@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { SELF, env } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { decodePktLines } from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 
 function pktLine(s: string | Uint8Array): Uint8Array {
   const enc = typeof s === "string" ? new TextEncoder().encode(s) : s;
@@ -41,9 +42,10 @@ function buildLsRefsBody(args: string[] = []) {
 it("ls-refs: unborn HEAD advertises correctly", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-lsrefs-unborn");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
   const body = buildLsRefsBody(["ref-prefix refs/heads/"]);
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
@@ -63,6 +65,7 @@ it("ls-refs: unborn HEAD advertises correctly", async () => {
 it("ls-refs: resolved HEAD and refs are listed after seeding", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-lsrefs-resolved");
+  await setupRepoForTests(env, owner, repo);
   // Seed directly via DO (runInDurableObject)
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
@@ -73,7 +76,7 @@ it("ls-refs: resolved HEAD and refs are listed after seeding", async () => {
 
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
   const body = buildLsRefsBody(["ref-prefix refs/heads/"]);
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",

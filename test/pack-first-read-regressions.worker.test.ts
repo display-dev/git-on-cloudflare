@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env, SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { encodeGitObject } from "@/worker/git/core";
 import {
   buildPack,
@@ -10,12 +10,14 @@ import {
   toRequestBody,
   uniqueRepoId,
 } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { buildFetchBody, findBytes } from "./util/fetch-protocol";
 
 describe("pack-first read-path regressions", () => {
   it("serves UI routes from packs after all loose copies are deleted", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-first-ui");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -24,23 +26,25 @@ describe("pack-first read-path regressions", () => {
     await callStubWithRetry(getStub, (stub) => stub.getActivePackCatalog());
     await deleteLooseObjectCopies(env, getStub, seeded.objectOids);
 
-    const treeRes = await SELF.fetch(`https://example.com/${owner}/${repo}/tree?ref=main`);
+    const treeRes = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/tree?ref=main`
+    );
     expect(treeRes.status).toBe(200);
     expect(await treeRes.text()).toContain("hello.txt");
 
-    const blobRes = await SELF.fetch(
+    const blobRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/blob?ref=main&path=${encodeURIComponent("hello.txt")}`
     );
     expect(blobRes.status).toBe(200);
     expect(await blobRes.text()).toContain("hello from packed storage");
 
-    const rawRes = await SELF.fetch(
+    const rawRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/raw?oid=${encodeURIComponent(seeded.blob.oid)}&name=hello.txt`
     );
     expect(rawRes.status).toBe(200);
     expect(await rawRes.text()).toBe("hello from packed storage\n");
 
-    const rawPathRes = await SELF.fetch(
+    const rawPathRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/rawpath?ref=main&path=${encodeURIComponent("hello.txt")}&name=hello.txt`,
       {
         headers: {
@@ -51,13 +55,13 @@ describe("pack-first read-path regressions", () => {
     expect(rawPathRes.status).toBe(200);
     expect(await rawPathRes.text()).toBe("hello from packed storage\n");
 
-    const commitRes = await SELF.fetch(
+    const commitRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/commit/${encodeURIComponent(seeded.commit.oid)}`
     );
     expect(commitRes.status).toBe(200);
     expect(await commitRes.text()).toContain("packed commit");
 
-    const diffRes = await SELF.fetch(
+    const diffRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/commit/${encodeURIComponent(seeded.commit.oid)}/diff?path=${encodeURIComponent("hello.txt")}`
     );
     expect(diffRes.status).toBe(200);
@@ -73,6 +77,7 @@ describe("pack-first read-path regressions", () => {
   it("serves fetch from packs after all loose copies are deleted", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-first-fetch");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -81,14 +86,17 @@ describe("pack-first read-path regressions", () => {
     await callStubWithRetry(getStub, (stub) => stub.getActivePackCatalog());
     await deleteLooseObjectCopies(env, getStub, seeded.objectOids);
 
-    const res = await SELF.fetch(`https://example.com/${owner}/${repo}/git-upload-pack`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-request",
-        "Git-Protocol": "version=2",
-      },
-      body: toRequestBody(buildFetchBody({ wants: [seeded.commit.oid], done: true })),
-    });
+    const res = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/git-upload-pack`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          "Git-Protocol": "version=2",
+        },
+        body: toRequestBody(buildFetchBody({ wants: [seeded.commit.oid], done: true })),
+      }
+    );
 
     expect(res.status).toBe(200);
     const bytes = new Uint8Array(await res.arrayBuffer());
@@ -100,6 +108,7 @@ describe("pack-first read-path regressions", () => {
   it("serves commits and merge fragments from packs after all loose copies are deleted", async () => {
     const owner = "o";
     const repo = uniqueRepoId("pack-first-commits");
+    await setupRepoForTests(env, owner, repo);
     const repoId = `${owner}/${repo}`;
     const id = env.REPO_DO.idFromName(repoId);
     const getStub = () => env.REPO_DO.get(id);
@@ -165,13 +174,15 @@ describe("pack-first read-path regressions", () => {
       mergeCommit.oid,
     ]);
 
-    const commitsRes = await SELF.fetch(`https://example.com/${owner}/${repo}/commits?ref=main`);
+    const commitsRes = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/commits?ref=main`
+    );
     expect(commitsRes.status).toBe(200);
     const commitsHtml = await commitsRes.text();
     expect(commitsHtml).toContain("merge commit");
     expect(commitsHtml).toContain("mainline");
 
-    const fragmentsRes = await SELF.fetch(
+    const fragmentsRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/commits/fragments/${encodeURIComponent(mergeCommit.oid)}?limit=10`
     );
     expect(fragmentsRes.status).toBe(200);

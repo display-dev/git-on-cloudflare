@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
-
+import { env } from "cloudflare:workers";
 import { concatChunks, encodeGitObject } from "@/worker/git/core";
 import { readObject } from "@/worker/git/object-store";
 import {

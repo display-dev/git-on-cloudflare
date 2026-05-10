@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/worker/git";
-import { buildPack } from "./util/test-helpers";
+import { buildPack, uniqueRepoId } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 
 function zero40() {
   return "0".repeat(40);
@@ -9,7 +10,8 @@ function zero40() {
 
 it("receive-pack: rejects update to HEAD ref as invalid", async () => {
   const owner = "o";
-  const repo = "r-push-invalid-head";
+  const repo = uniqueRepoId("r-push-invalid-head");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // Empty pack (no objects) is sufficient to trigger ref-name validation, which happens before unpack
@@ -17,7 +19,7 @@ it("receive-pack: rejects update to HEAD ref as invalid", async () => {
   const cmd = `${zero40()} ${"a".repeat(40)} HEAD\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
 
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,
@@ -33,7 +35,8 @@ it("receive-pack: rejects update to HEAD ref as invalid", async () => {
 
 it("receive-pack: rejects invalid ref name with spaces", async () => {
   const owner = "o";
-  const repo = "r-push-invalid-ref";
+  const repo = uniqueRepoId("r-push-invalid-ref");
+  await setupRepoForTests(env, owner, repo);
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   const pack = await buildPack([]);
@@ -41,7 +44,7 @@ it("receive-pack: rejects invalid ref name with spaces", async () => {
   const cmd = `${zero40()} ${"b".repeat(40)} ${badRef}\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
 
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-git-receive-pack-request" },
     body,

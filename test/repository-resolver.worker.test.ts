@@ -1,4 +1,5 @@
-import { applyD1Migrations, env } from "cloudflare:test";
+import { applyD1Migrations } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createDb } from "@/worker/db/d1/client";

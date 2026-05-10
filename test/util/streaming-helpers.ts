@@ -1,5 +1,5 @@
 import { expect } from "vitest";
-import { SELF } from "cloudflare:test";
+import { exports as workerExports } from "cloudflare:workers";
 
 import { concatChunks, flushPkt, pktLine, decodePktLines } from "@/worker/git/core";
 import { encodeGitObject } from "@/worker/git/core/objects";
@@ -114,11 +114,14 @@ export async function pushStreamingUpdate(
     capabilities: "report-status ofs-delta agent=test",
   });
 
-  const response = await SELF.fetch(`https://example.com/${owner}/${repo}/git-receive-pack`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body: built.body,
-  } as any);
+  const response = await workerExports.default.fetch(
+    `https://example.com/${owner}/${repo}/git-receive-pack`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-git-receive-pack-request" },
+      body: built.body,
+    } as any
+  );
   expect(response.status).toBe(200);
   expect(decodeReportStatus(new Uint8Array(await response.arrayBuffer()))).toContain(
     "ok refs/heads/main"

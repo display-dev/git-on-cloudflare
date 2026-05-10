@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
-
+import { env } from "cloudflare:workers";
 import { getDb, supersedePackCatalogRows } from "@/worker/do/repo/db";
 import {
   buildPack,

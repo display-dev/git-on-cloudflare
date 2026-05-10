@@ -7,8 +7,12 @@ import {
 } from "@/worker/common";
 import { repoKey } from "@/worker/keys";
 import { verifyAuth } from "@/worker/auth";
+import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
+import { loadSessionMembership } from "@/worker/auth/sessionMembership";
+import { getLimiter } from "@/worker/git/operations/limits";
 import { listReposForOwner, addRepoToOwner, removeRepoFromOwner } from "@/worker/registry";
 import { isJsonObject, safeParseJsonRequest, type JsonValue } from "@/shared/web";
+import { requestCacheContext } from "./ui/helpers";
 import type { AppContext, AppRouter } from "./hono";
 
 type RefPayload = {
@@ -35,30 +39,55 @@ function isHeadPayload(value: JsonValue | null): value is HeadPayload {
   );
 }
 
-export function registerAdminRoutes(router: AppRouter) {
-  async function handleCompatCompactionPost(c: AppContext<"/:owner/:repo/admin/compact">) {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
+type RepoAdminGate =
+  | { kind: "ok"; route: RepositoryRoute; limiter: ReturnType<typeof getLimiter> }
+  | { kind: "response"; response: Response };
+
+async function requireRepoAdmin(c: AppContext): Promise<RepoAdminGate> {
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
+  if (!owner || !repo) {
+    return { kind: "response", response: json({ error: "Not found" }, 404) };
+  }
+  const route = await resolveRepositoryRoute(c.env, owner, repo);
+  if (!route) {
+    return { kind: "response", response: json({ error: "Not found" }, 404) };
+  }
+  const membership = await loadSessionMembership(c, route.namespaceId);
+  if (membership.kind === "anonymous") {
+    return { kind: "response", response: json({ error: "Unauthorized" }, 401) };
+  }
+  if (membership.kind === "signed-in-non-member") {
+    if (route.visibility === "private") {
+      return { kind: "response", response: json({ error: "Not found" }, 404) };
     }
-    const body = await safeParseJsonRequest(request);
+    return { kind: "response", response: json({ error: "Forbidden" }, 403) };
+  }
+  return { kind: "ok", route, limiter: getLimiter(requestCacheContext(c)) };
+}
+
+export function registerAdminRoutes(router: AppRouter) {
+  async function handleCompactionPost(c: AppContext<"/:owner/:repo/admin/compact">) {
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
+    const env = c.env;
+    const body = await safeParseJsonRequest(c.req.raw);
     const dryRun = !isJsonObject(body) || body.dryRun !== false;
-    const repoId = repoKey(owner, repo);
-    const stub = getRepoStub(env, repoId);
+    const stub = getRepoStub(env, route.doName);
     const log = createLogger(env.LOG_LEVEL, {
       service: "AdminRoutes",
-      repoId,
+      repoId: route.doName,
     });
     try {
-      const res = dryRun ? await stub.previewCompaction() : await stub.requestCompaction();
+      const res = dryRun
+        ? await limiter.run("do:admin-preview-compaction", () => stub.previewCompaction())
+        : await limiter.run("do:admin-request-compaction", () => stub.requestCompaction());
       if (!dryRun && res.status === "queued" && res.shouldEnqueue) {
         const queueTask = env.REPO_MAINT_QUEUE.send({
           kind: "compaction",
           doId: stub.id.toString(),
-          repoId,
+          repoId: route.doName,
         })
           .then(() => {
             log.info("admin:compaction-enqueue-requested", {
@@ -66,9 +95,6 @@ export function registerAdminRoutes(router: AppRouter) {
             });
           })
           .catch((error) => {
-            // The DO has already recorded `compactionWantedAt`, so queue failure
-            // delays background work but must not turn an accepted request into
-            // a hard HTTP failure.
             log.warn("admin:compaction-enqueue-failed", {
               doId: stub.id.toString(),
               error: String(error),
@@ -84,24 +110,21 @@ export function registerAdminRoutes(router: AppRouter) {
     }
   }
 
-  async function handleCompatCompactionDelete(c: AppContext<"/:owner/:repo/admin/compact">) {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
+  async function handleCompactionDelete(c: AppContext<"/:owner/:repo/admin/compact">) {
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
+    const stub = getRepoStub(c.env, route.doName);
     try {
-      const res = await stub.clearCompactionRequest();
+      const res = await limiter.run("do:admin-clear-compaction", () =>
+        stub.clearCompactionRequest()
+      );
       return json({ ok: true, ...res }, 200, { "Cache-Control": "no-cache" });
     } catch (e) {
       return json({ ok: false, error: String(e) }, 500);
     }
   }
 
-  // Owner registry: list current repos from KV
   router.get(`/:owner/admin/registry`, async (c) => {
     const request = c.req.raw;
     const env = c.env;
@@ -113,11 +136,9 @@ export function registerAdminRoutes(router: AppRouter) {
     return json({ owner, repos });
   });
 
-  router.delete(`/:owner/:repo/admin/compact`, handleCompatCompactionDelete);
-  router.post(`/:owner/:repo/admin/compact`, handleCompatCompactionPost);
+  router.delete(`/:owner/:repo/admin/compact`, handleCompactionDelete);
+  router.post(`/:owner/:repo/admin/compact`, handleCompactionPost);
 
-  // Owner registry: backfill/sync membership
-  // POST body: { repos?: string[] } — if provided, (re)validate those; otherwise, revalidate existing KV entries
   router.post(`/:owner/admin/registry/sync`, async (c) => {
     const request = c.req.raw;
     const env = c.env;
@@ -131,7 +152,6 @@ export function registerAdminRoutes(router: AppRouter) {
         ? input.repos.filter((repo): repo is string => typeof repo === "string" && repo.length > 0)
         : [];
     if (targets.length === 0) {
-      // revalidate existing KV entries only
       targets = await listReposForOwner(env, owner);
     }
     const updated: { added: string[]; removed: string[]; unchanged: string[] } = {
@@ -139,12 +159,13 @@ export function registerAdminRoutes(router: AppRouter) {
       removed: [],
       unchanged: [],
     };
+    const cacheCtx = requestCacheContext(c);
+    const limiter = getLimiter(cacheCtx);
     for (const repo of targets) {
       const stub = getRepoStub(env, repoKey(owner, repo));
-      // consider present if refs has entries
       let present = false;
       try {
-        const refs = await stub.listRefs();
+        const refs = await limiter.run("do:legacy-registry-list-refs", () => stub.listRefs());
         present = Array.isArray(refs) && refs.length > 0;
       } catch {}
       if (present) {
@@ -158,18 +179,17 @@ export function registerAdminRoutes(router: AppRouter) {
     return json({ owner, ...updated });
   });
 
-  // Admin refs
+  // -------------------------------------------------------------------------
+  // Repo-scoped admin endpoints. Auth model: tessera session + namespace
+  // membership. PATs and AuthDO Basic must NOT authorize these routes.
+
   router.get(`/:owner/:repo/admin/refs`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
+    const stub = getRepoStub(c.env, route.doName);
     try {
-      const refs = await stub.listRefs();
+      const refs = await limiter.run("do:admin-list-refs", () => stub.listRefs());
       return json(refs);
     } catch {
       return json([]);
@@ -177,15 +197,11 @@ export function registerAdminRoutes(router: AppRouter) {
   });
 
   router.put(`/:owner/:repo/admin/refs`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    const body = await safeParseJsonRequest(request);
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
+    const stub = getRepoStub(c.env, route.doName);
+    const body = await safeParseJsonRequest(c.req.raw);
     if (!Array.isArray(body)) {
       return new Response("Invalid refs payload\n", { status: 400 });
     }
@@ -193,22 +209,17 @@ export function registerAdminRoutes(router: AppRouter) {
     if (refs.length !== body.length) {
       return new Response("Invalid refs payload\n", { status: 400 });
     }
-    await stub.setRefs(refs);
+    await limiter.run("do:admin-set-refs", () => stub.setRefs(refs));
     return new Response("OK\n");
   });
 
-  // Admin head
   router.get(`/:owner/:repo/admin/head`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
+    const stub = getRepoStub(c.env, route.doName);
     try {
-      const head = await stub.getHead();
+      const head = await limiter.run("do:admin-get-head", () => stub.getHead());
       return json(head);
     } catch {
       return new Response("Not found\n", { status: 404 });
@@ -216,102 +227,78 @@ export function registerAdminRoutes(router: AppRouter) {
   });
 
   router.put(`/:owner/:repo/admin/head`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
-    const body = await safeParseJsonRequest(request);
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
+    const stub = getRepoStub(c.env, route.doName);
+    const body = await safeParseJsonRequest(c.req.raw);
     if (!isHeadPayload(body)) {
       return new Response("Invalid head payload\n", { status: 400 });
     }
-    await stub.setHead(body);
+    await limiter.run("do:admin-set-head", () => stub.setHead(body));
     return new Response("OK\n");
   });
 
-  // Debug: dump DO state (JSON)
   router.get(`/:owner/:repo/admin/debug-state`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const stub = getRepoStub(env, repoKey(owner, repo));
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
+    const stub = getRepoStub(c.env, route.doName);
     try {
-      const state = await stub.debugState();
+      const state = await limiter.run("do:admin-debug-state", () => stub.debugState());
       return json(state);
     } catch {
       return json({});
     }
   });
 
-  // Debug: check a specific commit's tree presence
   router.get(`/:owner/:repo/admin/debug-commit/:commit`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
     const commit = c.req.param("commit");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
     if (!isValidOid(commit)) {
       return new Response("Invalid commit\n", { status: 400 });
     }
-    const stub = getRepoStub(env, repoKey(owner, repo));
+    const stub = getRepoStub(c.env, route.doName);
     try {
-      const result = await stub.debugCheckCommit(commit);
+      const result = await limiter.run("do:admin-debug-commit", () =>
+        stub.debugCheckCommit(commit)
+      );
       return json(result);
     } catch (e) {
       return json({ error: String(e) }, 500);
     }
   });
 
-  // Debug: check if an OID exists in loose, R2 loose, and/or packs
   router.get(`/:owner/:repo/admin/debug-oid/:oid`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
     const oid = c.req.param("oid");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
     if (!isValidOid(oid)) {
       return new Response("Invalid OID\n", { status: 400 });
     }
-    const stub = getRepoStub(env, repoKey(owner, repo));
+    const stub = getRepoStub(c.env, route.doName);
     try {
-      const result = await stub.debugCheckOid(oid);
+      const result = await limiter.run("do:admin-debug-oid", () => stub.debugCheckOid(oid));
       return json(result);
     } catch (e) {
       return json({ error: String(e) }, 500);
     }
   });
 
-  // Admin: Remove a specific pack file
   router.delete(`/:owner/:repo/admin/pack/:packKey`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    const repo = c.req.param("repo");
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
     const packKey = c.req.param("packKey");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-
     if (!packKey) {
       return json({ error: "Pack key is required" }, 400);
     }
-
-    const stub = getRepoStub(env, repoKey(owner, repo));
+    const stub = getRepoStub(c.env, route.doName);
     try {
-      const result = await stub.removePack(packKey);
+      const result = await limiter.run("do:admin-remove-pack", () => stub.removePack(packKey));
       if (result.rejected) {
         const error =
           result.rejected === "active-pack"
@@ -332,18 +319,14 @@ export function registerAdminRoutes(router: AppRouter) {
     }
   });
 
-  // Admin: DANGEROUS - completely purge repo (all R2 objects + DO storage)
+  // DANGEROUS: completely purge repo (all R2 objects + DO storage).
   router.delete(`/:owner/:repo/admin/purge`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-
-    // Require explicit confirmation
-    const body = await safeParseJsonRequest(request);
+    const body = await safeParseJsonRequest(c.req.raw);
     const confirm = isJsonObject(body) && typeof body.confirm === "string" ? body.confirm : "";
     if (confirm !== `purge-${owner}/${repo}`) {
       return json(
@@ -355,13 +338,10 @@ export function registerAdminRoutes(router: AppRouter) {
       );
     }
 
-    const stub = getRepoStub(env, repoKey(owner, repo));
+    const stub = getRepoStub(c.env, route.doName);
     try {
-      const result = await stub.purgeRepo();
-
-      // Remove from owner registry
-      await removeRepoFromOwner(env, owner, repo);
-
+      const result = await limiter.run("do:admin-purge", () => stub.purgeRepo());
+      await removeRepoFromOwner(c.env, route.routeNamespaceSlug, route.routeRepoSlug);
       return json({ ok: true, ...result });
     } catch (e) {
       return json({ ok: false, error: String(e) }, 500);

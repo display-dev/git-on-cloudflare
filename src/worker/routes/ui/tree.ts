@@ -1,8 +1,6 @@
 import type { TreeEntry } from "@/worker/git";
-import type { CacheContext } from "@/worker/cache";
 import { readPath } from "@/worker/git";
 import {
-  isValidOwnerRepo,
   isValidRef,
   isValidPath,
   bytesToText,
@@ -14,24 +12,21 @@ import { renderUiView } from "@/client/server/render";
 import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
-import { repoKey } from "@/worker/keys";
-import { loadViewer } from "@/worker/auth/session";
-import { badRequest } from "./helpers";
+import { badRequest, isRequestPrivate, resolveUiRepoAccess } from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 import type { ReadPathResult } from "@/worker/git";
 
 export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
-  const request = c.req.raw;
   const env = c.env;
-  const ctx = c.executionCtx;
   const owner = c.req.param("owner");
   const repo = c.req.param("repo");
-  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
-    return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
-  }
-  const repoId = repoKey(owner, repo);
-  const u = new URL(request.url);
+  const access = await resolveUiRepoAccess(c, owner, repo);
+  if (access.kind === "response") return access.response;
+  const { route, cacheCtx } = access;
+  const repoId = route.doName;
+  const isPrivate = isRequestPrivate(cacheCtx);
+  const u = new URL(c.req.url);
   const ref = u.searchParams.get("ref") || "main";
   const path = u.searchParams.get("path") || "";
   if (!isValidRef(ref)) {
@@ -51,31 +46,35 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
     });
   }
 
-  // Build cache key for tree content
-  const cacheKeyTree = buildCacheKeyFrom(request, "/_cache/tree", {
-    repo: repoId,
-    ref,
-    path,
-  });
+  const loadTree = async (): Promise<ReadPathResult | null> => {
+    try {
+      return await readPath(env, repoId, ref, path, cacheCtx);
+    } catch {
+      return null;
+    }
+  };
+  let result: ReadPathResult | null;
+  if (isPrivate) {
+    result = await loadTree();
+  } else {
+    const cacheKeyTree = buildCacheKeyFrom(c.req.raw, "/_cache/tree", {
+      repo: repoId,
+      ref,
+      path,
+    });
+    result = await cacheOrLoadJSONWithTTL<ReadPathResult | null>(
+      cacheKeyTree,
+      loadTree,
+      (value) => (value && value.type === "tree" ? 60 : 300),
+      c.executionCtx
+    );
+  }
 
-  const result = await cacheOrLoadJSONWithTTL<ReadPathResult | null>(
-    cacheKeyTree,
-    async () => {
-      try {
-        const cacheCtx: CacheContext = { req: request, ctx };
-        return await readPath(env, repoId, ref, path, cacheCtx);
-      } catch {
-        return null;
-      }
-    },
-    (value) => (value && value.type === "tree" ? 60 : 300),
-    ctx
-  );
-
-  // Handle missing tree/blob result gracefully (e.g., non-existent repo or path)
+  // Handle missing tree/blob result gracefully (path not found inside an
+  // existing repo). Repo-not-found is already handled by `resolveUiRepoAccess`
+  // upstream.
   if (!result) {
     try {
-      const viewer = await loadViewer(c);
       const errHtml = await renderUiView(
         env,
         "error",
@@ -87,12 +86,15 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
           refEnc: encodeURIComponent(ref),
           path,
         },
-        { viewer }
+        { viewer: access.viewer }
       );
       if (errHtml) {
         return new Response(errHtml, {
           status: 404,
-          headers: { "Content-Type": "text/html; charset=utf-8" },
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": isPrivate ? "no-store" : "no-store, no-cache, must-revalidate",
+          },
         });
       }
     } catch {}
@@ -162,8 +164,8 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
         parts.length > 0
           ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
           : null;
-      const progress = await getRepoActivity(env, repoId);
-      const viewer = await loadViewer(c);
+      const progress = await getRepoActivity(env, repoId, cacheCtx);
+      const viewer = access.viewer;
       return renderUiDocumentResponse(
         env,
         "tree",
@@ -178,6 +180,7 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
           entries,
         },
         {
+          cacheControl: isPrivate ? "no-store" : undefined,
           failureBody: "Failed to render view",
           viewer,
         }
@@ -187,11 +190,10 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
       const text = bytesToText(result.content);
       const lineCount = text === "" ? 0 : text.split(/\r?\n/).length;
       const title = path || result.oid;
-      // Infer language and load only what we need (use smart inference with content)
       const langs = getHighlightLangsForBlobSmart(title, text);
       const codeLang = langs[0] || null;
-      const progress = await getRepoActivity(env, repoId);
-      const viewer = await loadViewer(c);
+      const progress = await getRepoActivity(env, repoId, cacheCtx);
+      const viewer = access.viewer;
       return renderUiDocumentResponse(
         env,
         "blob",
@@ -209,6 +211,7 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
           lineCount,
         },
         {
+          cacheControl: isPrivate ? "no-store" : undefined,
           failureBody: "Failed to render view",
           viewer,
         }

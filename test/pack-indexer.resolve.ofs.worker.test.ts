@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
-
+import { env } from "cloudflare:workers";
 import { buildPack, buildAppendOnlyDelta } from "./util/git-pack";
 import { uniqueRepoId } from "./util/test-helpers";
 import {

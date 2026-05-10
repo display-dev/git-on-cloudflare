@@ -1,5 +1,5 @@
 import { it, expect } from "vitest";
-import { env, SELF } from "cloudflare:test";
+import { env, exports as workerExports } from "cloudflare:workers";
 import { asTypedStorage } from "@/worker/do/repo/repoState";
 import type { RepoStateSchema } from "@/worker/do/repo/repoState";
 import {
@@ -12,6 +12,7 @@ import {
   decodePktLines,
 } from "@/worker/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
+import { setupRepoForTests } from "./util/repoSeed";
 import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db";
 import { asBufferSource, deflate } from "@/worker/common";
 import { doPrefix, r2PackKey } from "@/worker/keys";
@@ -60,6 +61,7 @@ function buildFetchBody({
 it("multi-pack union assembles packfile from two R2 packs", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r-multipack");
+  await setupRepoForTests(env, owner, repo);
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
   const getStub = () => env.REPO_DO.get(id);
@@ -127,7 +129,7 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
 
   // Streaming v2: two-phase fetch. First negotiate (done=false)
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-  const negotiate = await SELF.fetch(url, {
+  const negotiate = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
@@ -141,7 +143,7 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
   expect(negoText.includes("packfile\n")).toBe(false);
 
   // Final fetch (done=true) returns only packfile section
-  const res = await SELF.fetch(url, {
+  const res = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
