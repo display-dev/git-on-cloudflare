@@ -1,3 +1,5 @@
+import { type LegacyBackfillMessage, type RepoQueueMessageHandle } from "./types";
+
 import { validateSlugForRoute } from "@/shared/slugs";
 import { createLogger, newPrefixedId } from "@/worker/common";
 import { createDb } from "@/worker/db/d1/client";
@@ -20,15 +22,6 @@ import {
 // `visibility`. If any D1 upsert or KV put fails, we retry the message so
 // the cursor cannot be lost between pages.
 
-export type LegacyBackfillMessage = {
-  kind: "legacy-backfill";
-  userId: string;
-  namespaceSlug: string;
-  cursor?: string;
-};
-
-type RepoMaintenanceMessage<Body> = MessageBatch<Body>["messages"][number];
-
 const RETRY_DELAY_SECONDS = 30;
 // Conservative cap so a namespace with thousands of legacy repos cannot
 // exceed the per-request subrequest budget in a single backfill message.
@@ -43,7 +36,7 @@ function legacyDoName(namespaceSlug: string, repoSlug: string): string {
 }
 
 export async function handleLegacyBackfillMessage(
-  message: Omit<RepoMaintenanceMessage<LegacyBackfillMessage>, "body">,
+  message: Omit<RepoQueueMessageHandle<LegacyBackfillMessage>, "body">,
   body: LegacyBackfillMessage,
   env: Env,
   _ctx: ExecutionContext
@@ -176,7 +169,7 @@ export async function handleLegacyBackfillMessage(
       cursor: listResult.cursor,
     };
     try {
-      await env.REPO_MAINT_QUEUE.send(continuation);
+      await env.REPO_TASKS_QUEUE.send(continuation);
     } catch (error) {
       log.warn("backfill:continuation-enqueue-failed", {
         userId: user.id,

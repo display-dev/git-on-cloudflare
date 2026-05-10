@@ -3,6 +3,7 @@ import type { CacheContext } from "@/worker/cache";
 import { pktLine, flushPkt, concatChunks, decodePktLines } from "./pktline";
 import { asBodyInit } from "@/worker/common/webtypes";
 import { getRepoStub } from "@/worker/common/stub";
+import { responseCacheControl } from "@/worker/cache/policy";
 import { getLimiter } from "@/worker/git/operations/limits";
 
 /**
@@ -37,7 +38,7 @@ export async function capabilityAdvertisement(
       status: 200,
       headers: {
         "Content-Type": "application/x-git-upload-pack-advertisement",
-        "Cache-Control": "no-cache",
+        "Cache-Control": responseCacheControl(cacheCtx),
       },
     });
   }
@@ -84,7 +85,10 @@ export async function capabilityAdvertisement(
     status: 200,
     headers: {
       "Content-Type": "application/x-git-receive-pack-advertisement",
-      "Cache-Control": "no-cache",
+      // Receive-pack is credentialed and only reached after PAT auth; never
+      // allow shared caches to retain capability advertisements regardless
+      // of repo visibility.
+      "Cache-Control": responseCacheControl(cacheCtx, { mutating: true }),
     },
   });
 }

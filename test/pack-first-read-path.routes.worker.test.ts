@@ -212,7 +212,10 @@ describe("pack-first read path routes", () => {
 
     const deleteResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/admin/pack/${encodeURIComponent(activePackName)}`,
-      { method: "DELETE", headers: { Cookie: seededRepo.cookieHeader } }
+      {
+        method: "DELETE",
+        headers: { Cookie: seededRepo.cookieHeader, Origin: "https://example.com" },
+      }
     );
     expect(deleteResponse.status).toBe(409);
     const deleteJson = (await deleteResponse.json()) as { error?: string; rejected?: string };
@@ -229,7 +232,10 @@ describe("pack-first read path routes", () => {
 
     const deleteResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/admin/pack/${encodeURIComponent("pack-missing.pack")}`,
-      { method: "DELETE", headers: { Cookie: seededRepo.cookieHeader } }
+      {
+        method: "DELETE",
+        headers: { Cookie: seededRepo.cookieHeader, Origin: "https://example.com" },
+      }
     );
     expect(deleteResponse.status).toBe(409);
     const deleteJson = (await deleteResponse.json()) as {

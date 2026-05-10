@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
-import { env, exports as workerExports } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/worker/git";
-import { buildPack, uniqueRepoId } from "./util/test-helpers";
+import { buildPack, postReceivePack, uniqueRepoId } from "./util/test-helpers";
 import { setupRepoForTests } from "./util/repoSeed";
 
 function zero40() {
@@ -19,11 +19,7 @@ it("receive-pack: rejects update to HEAD ref as invalid", async () => {
   const cmd = `${zero40()} ${"a".repeat(40)} HEAD\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
 
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   expect(res.status).toBe(200);
   const lines = decodePktLines(new Uint8Array(await res.arrayBuffer()))
     .filter((i) => i.type === "line")
@@ -44,11 +40,7 @@ it("receive-pack: rejects invalid ref name with spaces", async () => {
   const cmd = `${zero40()} ${"b".repeat(40)} ${badRef}\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
 
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   expect(res.status).toBe(200);
   const lines = decodePktLines(new Uint8Array(await res.arrayBuffer()))
     .filter((i) => i.type === "line")

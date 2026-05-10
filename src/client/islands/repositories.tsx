@@ -175,7 +175,7 @@ export function RepositoriesIsland({
           <EmptyState
             icon={<FolderGit2 className="h-5 w-5 text-zinc-400" aria-hidden="true" />}
             title="Repositories you own will appear here."
-            detail="Create one below, or push to an existing namespace via PAT."
+            detail="Create one below; once it exists, you can use a PAT to clone or push."
           />
           {!showForm ? (
             <Button type="button" variant="primary" size="md" onClick={() => setShowForm(true)}>

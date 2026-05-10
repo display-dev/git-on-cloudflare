@@ -1,5 +1,6 @@
 import { newPrefixedId } from "@/worker/common";
 import { SESSION_COOKIE_NAME } from "@/worker/auth/cookies";
+import { generatePatPlaintext, hashPatPlaintext } from "@/worker/auth/pat";
 import { __test as sessionTest } from "@/worker/auth/session";
 import { createDb } from "@/worker/db/d1/client";
 import {
@@ -7,6 +8,7 @@ import {
   findNamespaceBySlug,
   findRepositoryByNamespaceAndSlug,
   insertMembershipIfMissing,
+  insertPatWithGrants,
   insertRepositoryIfNew,
   insertUserIfNew,
   putRouteCacheRecord,
@@ -137,12 +139,11 @@ export async function seedRepo(env: Env, args: SeedRepoArgs): Promise<SeededRepo
 }
 
 export type SetupRepoForTestsResult = SeededRepo & {
-  // Pre-baked Cookie header value for the seeded user's session. Tests that
-  // hit member-gated routes (admin JSON, private UI) attach this to fetches.
   cookieHeader: string;
+  pushAuthHeader: string;
+  patPlaintext: string;
 };
 
-// Migrations + repo seed + session cookie minted for the seeded user.
 export async function setupRepoForTests(
   env: Env,
   namespaceSlug: string,
@@ -152,12 +153,53 @@ export async function setupRepoForTests(
   await ensureD1Migrations(env);
   const seeded = await seedRepo(env, { namespaceSlug, repoSlug, ...opts });
   const cookieHeader = await mintSessionCookie(env, seeded.userId);
-  return { ...seeded, cookieHeader };
+  const pat = await mintNamespacePushPat(env, seeded.userId, seeded.namespaceId);
+  const pushAuthHeader = `Basic ${btoa(`${namespaceSlug}:${pat.plaintext}`)}`;
+  rememberPushAuth(namespaceSlug, repoSlug, pushAuthHeader);
+  return { ...seeded, cookieHeader, pushAuthHeader, patPlaintext: pat.plaintext };
 }
 
-// Mints a sealed session cookie for `userId`. Tests that hit member-gated
-// routes (admin JSON, private UI) attach the returned `Cookie` header to
-// their `fetch()` calls.
+async function mintNamespacePushPat(
+  env: Env,
+  userId: string,
+  namespaceId: string
+): Promise<{ patId: string; plaintext: string }> {
+  const db = createDb(env.DB);
+  const generated = generatePatPlaintext();
+  const hash = await hashPatPlaintext(generated.plaintext);
+  const patId = newPrefixedId("pat");
+  const now = Date.now();
+  await insertPatWithGrants(db, {
+    pat: {
+      id: patId,
+      userId,
+      name: "test-system-push",
+      prefix: generated.publicPrefix,
+      hash,
+      createdAt: now,
+      expiresAt: null,
+      revokedAt: null,
+      lastUsedAt: null,
+    },
+    namespaceGrants: [{ patId, namespaceId, level: "push" }],
+    repoGrants: [],
+  });
+  return { patId, plaintext: generated.plaintext };
+}
+
+// Lookup table so push helpers (`pushBody`, `pushStreamingUpdate`) can
+// retrieve the seeded namespace's push PAT without each test threading the
+// header through.
+const pushAuthByRepo = new Map<string, string>();
+
+export function rememberPushAuth(owner: string, repo: string, header: string): void {
+  pushAuthByRepo.set(`${owner}/${repo}`, header);
+}
+
+export function lookupPushAuth(owner: string, repo: string): string | undefined {
+  return pushAuthByRepo.get(`${owner}/${repo}`);
+}
+
 export async function mintSessionCookie(env: Env, userId: string): Promise<string> {
   const secret = env.SESSION_SECRET;
   if (!secret) throw new Error("mintSessionCookie: SESSION_SECRET not set");

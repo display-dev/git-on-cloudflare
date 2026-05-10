@@ -183,8 +183,8 @@ describe("legacy backfill queue handler", () => {
           } as KVNamespaceListResult<unknown, string>;
         },
       },
-      REPO_MAINT_QUEUE: {
-        ...env.REPO_MAINT_QUEUE,
+      REPO_TASKS_QUEUE: {
+        ...env.REPO_TASKS_QUEUE,
         async send() {
           throw new Error("queue-down");
         },

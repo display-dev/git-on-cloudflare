@@ -1,8 +1,6 @@
-import { createExecutionContext, env as testEnv } from "cloudflare:test";
-import {
-  handleRepoMaintenanceQueue,
-  type RepoMaintenanceQueueMessage,
-} from "@/worker/maintenance/queue";
+import { createExecutionContext } from "cloudflare:test";
+import { env as testEnv } from "cloudflare:workers";
+import { handleRepoTaskQueue, type RepoTaskQueueMessage } from "@/worker/tasks/queue";
 
 export type QueueRunResult = {
   acked: boolean;
@@ -35,17 +33,17 @@ export function createQueueSendResponse(): QueueSendResponse {
 }
 
 /**
- * Run a single maintenance queue message through the handler and return
+ * Run a single repo task queue message through the handler and return
  * whether it was acked or retried. Uses the real test `env` by default;
  * pass `overrideEnv` for tests that stub bindings.
  */
 export async function runQueueMessage(
-  body: RepoMaintenanceQueueMessage,
+  body: RepoTaskQueueMessage,
   overrideEnv?: Env
 ): Promise<QueueRunResult> {
   let acked = false;
   let retried = false;
-  const batch: MessageBatch<RepoMaintenanceQueueMessage> = {
+  const batch: MessageBatch<RepoTaskQueueMessage> = {
     queue: "git-on-cloudflare-repo-maint",
     metadata: createMessageBatchMetadata(),
     messages: [
@@ -66,6 +64,6 @@ export async function runQueueMessage(
     ackAll() {},
   };
 
-  await handleRepoMaintenanceQueue(batch, overrideEnv ?? testEnv, createExecutionContext());
+  await handleRepoTaskQueue(batch, overrideEnv ?? testEnv, createExecutionContext());
   return { acked, retried };
 }

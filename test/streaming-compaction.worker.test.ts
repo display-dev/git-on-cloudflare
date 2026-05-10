@@ -57,7 +57,7 @@ describe("streaming compaction", () => {
     await promoteToStreaming(owner, repo);
 
     const sendSpy = vi
-      .spyOn(env.REPO_MAINT_QUEUE, "send")
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
       .mockImplementation(async () => createQueueSendResponse());
     try {
       await pushOverflowingStreamingHistory({
@@ -73,7 +73,11 @@ describe("streaming compaction", () => {
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
+          headers: {
+            Cookie: seededRepo.cookieHeader,
+            "Content-Type": "application/json",
+            Origin: "https://example.com",
+          },
           body: JSON.stringify({}),
         }
       );
@@ -97,7 +101,11 @@ describe("streaming compaction", () => {
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
+          headers: {
+            Cookie: seededRepo.cookieHeader,
+            "Content-Type": "application/json",
+            Origin: "https://example.com",
+          },
           body: JSON.stringify({ dryRun: false }),
         }
       );
@@ -129,7 +137,7 @@ describe("streaming compaction", () => {
     await promoteToStreaming(owner, repo);
 
     const sendSpy = vi
-      .spyOn(env.REPO_MAINT_QUEUE, "send")
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
       .mockImplementation(async () => createQueueSendResponse());
     try {
       await pushOverflowingStreamingHistory({
@@ -146,7 +154,11 @@ describe("streaming compaction", () => {
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
+          headers: {
+            Cookie: seededRepo.cookieHeader,
+            "Content-Type": "application/json",
+            Origin: "https://example.com",
+          },
           body: JSON.stringify({ dryRun: false }),
         }
       );
@@ -177,7 +189,7 @@ describe("streaming compaction", () => {
     await promoteToStreaming(owner, repo);
 
     const sendSpy = vi
-      .spyOn(env.REPO_MAINT_QUEUE, "send")
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
       .mockImplementation(async () => createQueueSendResponse());
     try {
       await pushOverflowingStreamingHistory({
@@ -194,7 +206,11 @@ describe("streaming compaction", () => {
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
+          headers: {
+            Cookie: seededRepo.cookieHeader,
+            "Content-Type": "application/json",
+            Origin: "https://example.com",
+          },
           body: JSON.stringify({ dryRun: false }),
         }
       );
@@ -205,7 +221,7 @@ describe("streaming compaction", () => {
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "DELETE",
-          headers: { Cookie: seededRepo.cookieHeader },
+          headers: { Cookie: seededRepo.cookieHeader, Origin: "https://example.com" },
         }
       );
       expect(clearResponse.status).toBe(200);
@@ -217,7 +233,11 @@ describe("streaming compaction", () => {
         `https://example.com/${owner}/${repo}/admin/compact`,
         {
           method: "POST",
-          headers: { Cookie: seededRepo.cookieHeader, "Content-Type": "application/json" },
+          headers: {
+            Cookie: seededRepo.cookieHeader,
+            "Content-Type": "application/json",
+            Origin: "https://example.com",
+          },
           body: JSON.stringify({}),
         }
       );
@@ -349,7 +369,10 @@ describe("streaming compaction", () => {
 
     const deleteResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/admin/pack/${encodeURIComponent(packName)}`,
-      { method: "DELETE", headers: { Cookie: seededRepo.cookieHeader } }
+      {
+        method: "DELETE",
+        headers: { Cookie: seededRepo.cookieHeader, Origin: "https://example.com" },
+      }
     );
     expect(deleteResponse.status).toBe(200);
     const deleteJson = (await deleteResponse.json()) as {

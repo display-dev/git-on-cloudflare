@@ -45,6 +45,10 @@ export async function handleAdminPage(c: AppContext<"/:owner/:repo/admin">) {
   // and AuthDO Basic credentials are deliberately never accepted here.
   const membership = await loadSessionMembership(c, route.namespaceId);
   if (membership.kind === "anonymous") {
+    // Don't disclose the existence of a private repo to anonymous browsers.
+    // Public repos can redirect to sign-in because their existence is
+    // already discoverable.
+    if (route.visibility === "private") return await notFound(c);
     return c.redirect(`/auth?next=${encodeURIComponent(`/${owner}/${repo}/admin`)}`, 302);
   }
   if (membership.kind === "signed-in-non-member") {

@@ -2,6 +2,8 @@ import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
 import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
 
+import { type PackRefBackfillQueueMessage, type RepoQueueMessageHandle } from "./types";
+
 import { createLogger, getRepoStubByDoId } from "@/worker/common";
 import {
   MAX_SIMULTANEOUS_CONNECTIONS,
@@ -14,15 +16,6 @@ import { loadPackRefView } from "@/worker/git/pack/refIndex";
 
 const REF_BACKFILL_SUBREQUEST_BUDGET = 7_500;
 const REF_BACKFILL_RETRY_DELAY_SECONDS = 30;
-
-export type PackRefBackfillQueueMessage = {
-  kind: "pack-ref-backfill";
-  doId: string;
-  repoId?: string;
-  packKey: string;
-};
-
-type RepoMaintenanceMessage<Body> = MessageBatch<Body>["messages"][number];
 
 function buildBackfillCacheContext(args: { repoLabel: string; ctx: ExecutionContext }): {
   cacheCtx: CacheContext;
@@ -72,7 +65,7 @@ function isDeterministicPackFailure(error: unknown): boolean {
 }
 
 export async function handlePackRefBackfillMessage(
-  message: Omit<RepoMaintenanceMessage<PackRefBackfillQueueMessage>, "body">,
+  message: Omit<RepoQueueMessageHandle<PackRefBackfillQueueMessage>, "body">,
   body: PackRefBackfillQueueMessage,
   env: Env,
   ctx: ExecutionContext

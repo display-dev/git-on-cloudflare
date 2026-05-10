@@ -8,6 +8,7 @@ import { shortRefName } from "@/shared/git/ref-display";
 import { formatSize, HttpError, isValidOwnerRepo } from "@/shared/web";
 import { handleError } from "@/client/server/error";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
+import { isRequestPrivate, markRequestPrivate } from "@/worker/cache/policy";
 import { loadSessionMembership } from "@/worker/auth/sessionMembership";
 import { loadViewer } from "@/worker/auth/session";
 import { createLogger } from "@/worker/common/logger";
@@ -61,16 +62,10 @@ export function requestCacheContext(c: AppContext): CacheContext {
   return { req: c.req.raw, ctx: c.executionCtx };
 }
 
-export function markRequestPrivate(cacheCtx: CacheContext): void {
-  cacheCtx.memo = cacheCtx.memo || {};
-  cacheCtx.memo.flags = cacheCtx.memo.flags || new Set<string>();
-  cacheCtx.memo.flags.add("no-cache-read");
-  cacheCtx.memo.flags.add("no-cache-write");
-}
-
-export function isRequestPrivate(cacheCtx: CacheContext | undefined): boolean {
-  return cacheCtx?.memo?.flags?.has("no-cache-read") === true;
-}
+// Re-export the cache-policy predicates so existing UI handlers don't need
+// to know they live in the cache layer. The lower Git/protocol modules
+// import directly from `@/worker/cache/policy`.
+export { isRequestPrivate, markRequestPrivate };
 
 export async function loadHeadAndRefsCached(
   env: Env,
@@ -98,14 +93,20 @@ export async function loadHeadAndRefsCached(
 }
 
 // Shared 404 response for repo-serving handlers. Centralizes the SSR shell +
-// viewer load so handlers don't reach into `index.ts` internals.
-export async function notFound(c: AppContext, title?: string): Promise<Response> {
-  const viewer = await loadViewer(c);
+// viewer load so handlers don't reach into `index.ts` internals. Callers
+// that have already resolved a viewer can pass it through to avoid a
+// second D1 round trip.
+export async function notFound(
+  c: AppContext,
+  title?: string,
+  viewer?: Viewer | null
+): Promise<Response> {
+  const resolvedViewer = viewer === undefined ? await loadViewer(c) : viewer;
   return renderUiDocumentResponse(c.env, "404", title ? { title } : {}, {
     status: 404,
     failureBody: "Not found\n",
     failureStatus: 404,
-    viewer,
+    viewer: resolvedViewer,
   });
 }
 
@@ -168,9 +169,16 @@ export async function resolveUiRepoAccess(
   const log = createLogger(c.env.LOG_LEVEL, { service: "UiAcl", repoId: route.doName });
   if (membership.kind !== "member") {
     log.debug("ui-acl:private-non-member-404", { kind: membership.kind });
+    // `loadSessionMembership` returns the viewer for signed-in-non-member
+    // results; reuse it so the 404 page renders the correct shell without a
+    // second D1 round-trip.
+    const passthroughViewer = membership.kind === "signed-in-non-member" ? membership.viewer : null;
     return {
       kind: "response",
-      response: options.responseShape === "json" ? notFoundJson() : await notFound(c),
+      response:
+        options.responseShape === "json"
+          ? notFoundJson()
+          : await notFound(c, undefined, passthroughViewer),
     };
   }
   markRequestPrivate(cacheCtx);

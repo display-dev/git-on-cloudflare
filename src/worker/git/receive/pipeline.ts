@@ -349,7 +349,7 @@ export async function executeReceivePipeline(
     if (finalize.shouldQueueCompaction) {
       args.log.info("receive:compaction-requested", { repoId: args.repoId });
       args.ctx.waitUntil(
-        args.env.REPO_MAINT_QUEUE.send({
+        args.env.REPO_TASKS_QUEUE.send({
           kind: "compaction",
           doId: args.stub.id.toString(),
           repoId: args.repoId,

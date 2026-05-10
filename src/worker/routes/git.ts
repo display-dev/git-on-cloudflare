@@ -14,14 +14,13 @@ import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream";
 import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
 import { asBodyInit, createLogger, gunzip } from "@/worker/common";
 import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
+import { isRequestPrivate, markRequestPrivate, responseCacheControl } from "@/worker/cache/policy";
 import { isValidOwnerRepo } from "@/shared/web";
-import { addRepoToOwner, removeRepoFromOwner } from "@/worker/registry";
 import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
-import { verifyAuth } from "@/worker/auth";
 import { authenticateGitRequest, scheduleTouchPatLastUsedAt } from "@/worker/auth/gitAuth";
 import { createDb } from "@/worker/db/d1/client";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
-import { isRequestPrivate, markRequestPrivate, requestCacheContext } from "./ui/helpers";
+import { requestCacheContext } from "./ui/helpers";
 import type { AppContext, AppRouter } from "./hono";
 
 // Realm string emitted on Basic auth challenges so git CLI prompts the user
@@ -57,19 +56,6 @@ function gitNotFound(): Response {
       "Cache-Control": "no-store",
     },
   });
-}
-
-async function applyLegacyOwnerRegistrySideEffects(
-  env: Env,
-  route: RepositoryRoute,
-  changed: boolean,
-  empty: boolean
-): Promise<void> {
-  if (!changed) return;
-  try {
-    if (empty) await removeRepoFromOwner(env, route.routeNamespaceSlug, route.routeRepoSlug);
-    else await addRepoToOwner(env, route.routeNamespaceSlug, route.routeRepoSlug);
-  } catch {}
 }
 
 async function decodeUploadPackBody(request: Request): Promise<Uint8Array | Response> {
@@ -199,7 +185,7 @@ async function handleUploadPackPOST(
       status: 200,
       headers: {
         "Content-Type": "application/x-git-upload-pack-result",
-        "Cache-Control": isRequestPrivate(cacheCtx) ? "no-store" : "no-cache",
+        "Cache-Control": responseCacheControl(cacheCtx),
       },
     });
   }
@@ -219,7 +205,7 @@ async function handleReceivePackPOST(
 ) {
   const log = createLogger(env.LOG_LEVEL, { service: "ReceiveAcl", repoId: route.doName });
   return await handleStreamingReceivePackPOST(env, route.doName, request, ctx, {
-    onRepoStateChanged: async ({ changed, empty }) => {
+    onRepoStateChanged: async ({ changed }) => {
       if (!changed) return;
       try {
         await touchRepositoryUpdatedAt(createDb(env.DB), route.repositoryId, Date.now());
@@ -230,7 +216,6 @@ async function handleReceivePackPOST(
           error: String(error),
         });
       }
-      await applyLegacyOwnerRegistrySideEffects(env, route, changed, empty);
     },
   });
 }
@@ -273,13 +258,15 @@ function gateGitRead(
   }
 }
 
-// Private repos always require a valid PAT with push. Public repos fall
-// back to `verifyAuth` so push stays open when `AUTH_ADMIN_TOKEN` is unset.
+// Push (receive-pack) requires a PAT with `level === "push"` regardless of
+// repo visibility. Public repos do NOT fall through to anonymous push: the
+// resolved D1 row is the only authority, and it has no per-repo "anyone can
+// push" toggle. Treat any non-PAT-push principal as an auth challenge or
+// 403 by reason.
 async function gateGitPush(
   c: AppContext,
   route: RepositoryRoute,
   auth: Awaited<ReturnType<typeof authenticateGitRequest>>,
-  request: Request,
   isDiscovery: boolean
 ): Promise<Response | null> {
   const log = createLogger(c.env.LOG_LEVEL, { service: "GitAcl", repoId: route.doName });
@@ -290,7 +277,7 @@ async function gateGitPush(
     }
     return null;
   }
-  if (auth.kind === "pat-rejected" && auth.reason !== "malformed") {
+  if (auth.kind === "pat-rejected") {
     if (auth.reason === "grant-missing") {
       log.info("git-acl:pat-rejected", { reason: auth.reason });
       return forbidden();
@@ -298,14 +285,13 @@ async function gateGitPush(
     log.info("git-acl:pat-rejected", { reason: auth.reason });
     return basicChallenge();
   }
-  if (route.visibility === "private") {
-    log.info("git-acl:push-401-challenge", { reason: "private-no-pat", discovery: isDiscovery });
-    return basicChallenge();
-  }
-  if (await verifyAuth(c.env, route.routeNamespaceSlug, request, false)) {
-    return null;
-  }
-  log.info("git-acl:push-401-challenge", { reason: "legacy-rejected", discovery: isDiscovery });
+  // anonymous | missing-credentials -> 401 challenge so the git client
+  // re-issues with Basic credentials.
+  log.info("git-acl:push-401-challenge", {
+    reason: auth.kind === "anonymous" ? "anonymous" : "missing-credentials",
+    discovery: isDiscovery,
+    visibility: route.visibility,
+  });
   return basicChallenge();
 }
 
@@ -329,7 +315,7 @@ export function registerGitRoutes(router: AppRouter) {
     const auth = await authenticateGitRequest(c.env, c.req.raw, route);
     const blocked =
       service === "git-receive-pack"
-        ? await gateGitPush(c, route, auth, c.req.raw, true)
+        ? await gateGitPush(c, route, auth, true)
         : gateGitRead(c, route, auth);
     if (blocked) return blocked;
     if (auth.kind === "pat") {
@@ -365,7 +351,7 @@ export function registerGitRoutes(router: AppRouter) {
     const cacheCtx = requestCacheContext(c);
     markRequestPrivate(cacheCtx);
     const auth = await authenticateGitRequest(c.env, c.req.raw, route);
-    const blocked = await gateGitPush(c, route, auth, c.req.raw, false);
+    const blocked = await gateGitPush(c, route, auth, false);
     if (blocked) return blocked;
     if (auth.kind === "pat") {
       scheduleTouchPatLastUsedAt(c.env, c.executionCtx, auth.verified, "write");

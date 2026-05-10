@@ -3,4 +3,4 @@
  */
 
 export * from "./cache";
-// KV pack metadata cache removed
+export * from "./policy";

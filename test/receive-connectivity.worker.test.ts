@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/worker/git";
-import { uniqueRepoId, buildPack, zero40 } from "./util/test-helpers";
+import { postReceivePack, uniqueRepoId, buildPack, zero40 } from "./util/test-helpers";
 import { setupRepoForTests } from "./util/repoSeed";
 import { bytesToHex } from "@/worker/common/hex";
 
@@ -37,11 +37,7 @@ it("receive-pack connectivity: rejects commit whose root tree is missing", async
   const cmd = `${zero40()} ${commitOid} refs/heads/main\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
 
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   expect(res.status).toBe(200);
 
   // report-status should contain ng for the ref due to missing-objects
@@ -116,11 +112,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to commit with pre
 
   const cmd = `${zero40()} ${tagOid} refs/tags/v1\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   const lines = decodePktLines(new Uint8Array(await res.arrayBuffer()))
     .filter((i) => i.type === "line")
     .map((i: any) => (i.text as string).trim());
@@ -163,11 +155,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to tree present", 
   ]);
   const cmd = `${zero40()} ${tagOid} refs/tags/v2\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   const lines = decodePktLines(new Uint8Array(await res.arrayBuffer()))
     .filter((i) => i.type === "line")
     .map((i: any) => (i.text as string).trim());
@@ -215,11 +203,7 @@ it("receive-pack connectivity: rejects annotated tag pointing to commit with mis
   ]);
   const cmd = `${zero40()} ${tagOid} refs/tags/v3\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   const lines = decodePktLines(new Uint8Array(await res.arrayBuffer()))
     .filter((i) => i.type === "line")
     .map((i: any) => (i.text as string).trim());
@@ -249,11 +233,7 @@ it("receive-pack connectivity: accepts direct ref to tree present", async () => 
 
   const cmd = `${zero40()} ${treeOid} refs/tags/tree-only\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   const lines = decodePktLines(new Uint8Array(await res.arrayBuffer()))
     .filter((i) => i.type === "line")
     .map((i: any) => (i.text as string).trim());
@@ -281,11 +261,7 @@ it("receive-pack connectivity: accepts direct ref to blob present", async () => 
 
   const cmd = `${zero40()} ${blobOid} refs/tags/blob-only\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   const lines = decodePktLines(new Uint8Array(await res.arrayBuffer()))
     .filter((i) => i.type === "line")
     .map((i: any) => (i.text as string).trim());
@@ -345,11 +321,7 @@ it("receive-pack connectivity: accepts nested tag->tag->tree present", async () 
 
   const cmd = `${zero40()} ${tag2Oid} refs/tags/v2\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   const lines = decodePktLines(new Uint8Array(await res.arrayBuffer()))
     .filter((i) => i.type === "line")
     .map((i: any) => (i.text as string).trim());

@@ -273,9 +273,9 @@ describe("/auth/callback", () => {
   });
 
   // Integration coverage: the callback enqueues the legacy-backfill message
-  // via `c.executionCtx.waitUntil(env.REPO_MAINT_QUEUE.send(...))`. The
+  // via `c.executionCtx.waitUntil(env.REPO_TASKS_QUEUE.send(...))`. The
   // Miniflare runtime delivers that message to the same worker's queue
-  // consumer (`handleRepoMaintenanceQueue`), which writes to ROUTES KV.
+  // consumer (`handleRepoTaskQueue`), which writes to ROUTES KV.
   // Polling ROUTES exercises the full producer→runtime→consumer chain
   // without mocking — see Cloudflare's `queue-producer-integration-self`
   // example. Negative cases bound the wait at the same ceiling as

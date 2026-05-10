@@ -5,6 +5,7 @@ import { concatChunks, flushPkt, pktLine, decodePktLines } from "@/worker/git/co
 import { encodeGitObject } from "@/worker/git/core/objects";
 import { buildPack } from "./git-pack";
 import { buildTreePayload } from "./packed-repo";
+import { lookupPushAuth } from "./repoSeed";
 
 /**
  * No-op: all repos are now implicitly streaming.
@@ -100,7 +101,8 @@ export async function pushStreamingUpdate(
   owner: string,
   repo: string,
   parentOid: string,
-  nextText: string
+  nextText: string,
+  options?: { authHeader?: string }
 ): Promise<{
   commitOid: string;
   blob: { oid: string };
@@ -114,11 +116,16 @@ export async function pushStreamingUpdate(
     capabilities: "report-status ofs-delta agent=test",
   });
 
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-git-receive-pack-request",
+  };
+  const auth = options?.authHeader ?? lookupPushAuth(owner, repo);
+  if (auth) headers.Authorization = auth;
   const response = await workerExports.default.fetch(
     `https://example.com/${owner}/${repo}/git-receive-pack`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/x-git-receive-pack-request" },
+      headers,
       body: built.body,
     } as any
   );

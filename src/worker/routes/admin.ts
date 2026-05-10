@@ -1,17 +1,12 @@
-import {
-  createLogger,
-  getRepoStub,
-  isValidOid,
-  json,
-  unauthorizedAdminBasic,
-} from "@/worker/common";
-import { repoKey } from "@/worker/keys";
-import { verifyAuth } from "@/worker/auth";
+import type { Viewer } from "@/client/server/viewer";
+
+import { createLogger, getRepoStub, isValidOid, json } from "@/worker/common";
+import { sameOriginViolation } from "@/worker/auth/origin";
 import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
 import { loadSessionMembership } from "@/worker/auth/sessionMembership";
 import { getLimiter } from "@/worker/git/operations/limits";
-import { listReposForOwner, addRepoToOwner, removeRepoFromOwner } from "@/worker/registry";
 import { isJsonObject, safeParseJsonRequest, type JsonValue } from "@/shared/web";
+import type { RepositoryDeleteMessage } from "@/worker/tasks/queue";
 import { requestCacheContext } from "./ui/helpers";
 import type { AppContext, AppRouter } from "./hono";
 
@@ -40,10 +35,25 @@ function isHeadPayload(value: JsonValue | null): value is HeadPayload {
 }
 
 type RepoAdminGate =
-  | { kind: "ok"; route: RepositoryRoute; limiter: ReturnType<typeof getLimiter> }
+  | {
+      kind: "ok";
+      route: RepositoryRoute;
+      viewer: Viewer;
+      limiter: ReturnType<typeof getLimiter>;
+    }
   | { kind: "response"; response: Response };
 
+// Centralizes the auth + non-disclosure + CSRF policy for repo-scoped admin
+// endpoints. PATs and AuthDO Basic credentials are deliberately ignored:
+// admin is browser-session-only.
 async function requireRepoAdmin(c: AppContext): Promise<RepoAdminGate> {
+  // CSRF check first so a missing/cross-origin mutating request fails before
+  // we read D1. `sameOriginViolation` short-circuits safe methods (GET, HEAD,
+  // OPTIONS), so debug/list endpoints stay reachable from background tabs.
+  const violation = sameOriginViolation(c);
+  if (violation) {
+    return { kind: "response", response: violation };
+  }
   const owner = c.req.param("owner");
   const repo = c.req.param("repo");
   if (!owner || !repo) {
@@ -55,6 +65,10 @@ async function requireRepoAdmin(c: AppContext): Promise<RepoAdminGate> {
   }
   const membership = await loadSessionMembership(c, route.namespaceId);
   if (membership.kind === "anonymous") {
+    // Don't disclose existence of private repos to anonymous callers.
+    if (route.visibility === "private") {
+      return { kind: "response", response: json({ error: "Not found" }, 404) };
+    }
     return { kind: "response", response: json({ error: "Unauthorized" }, 401) };
   }
   if (membership.kind === "signed-in-non-member") {
@@ -63,7 +77,12 @@ async function requireRepoAdmin(c: AppContext): Promise<RepoAdminGate> {
     }
     return { kind: "response", response: json({ error: "Forbidden" }, 403) };
   }
-  return { kind: "ok", route, limiter: getLimiter(requestCacheContext(c)) };
+  return {
+    kind: "ok",
+    route,
+    viewer: membership.viewer,
+    limiter: getLimiter(requestCacheContext(c)),
+  };
 }
 
 export function registerAdminRoutes(router: AppRouter) {
@@ -84,7 +103,7 @@ export function registerAdminRoutes(router: AppRouter) {
         ? await limiter.run("do:admin-preview-compaction", () => stub.previewCompaction())
         : await limiter.run("do:admin-request-compaction", () => stub.requestCompaction());
       if (!dryRun && res.status === "queued" && res.shouldEnqueue) {
-        const queueTask = env.REPO_MAINT_QUEUE.send({
+        const queueTask = env.REPO_TASKS_QUEUE.send({
           kind: "compaction",
           doId: stub.id.toString(),
           repoId: route.doName,
@@ -125,63 +144,14 @@ export function registerAdminRoutes(router: AppRouter) {
     }
   }
 
-  router.get(`/:owner/admin/registry`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const repos = await listReposForOwner(env, owner);
-    return json({ owner, repos });
-  });
-
   router.delete(`/:owner/:repo/admin/compact`, handleCompactionDelete);
   router.post(`/:owner/:repo/admin/compact`, handleCompactionPost);
 
-  router.post(`/:owner/admin/registry/sync`, async (c) => {
-    const request = c.req.raw;
-    const env = c.env;
-    const owner = c.req.param("owner");
-    if (!(await verifyAuth(env, owner, request, true))) {
-      return unauthorizedAdminBasic();
-    }
-    const input = await safeParseJsonRequest(request);
-    let targets =
-      isJsonObject(input) && Array.isArray(input.repos)
-        ? input.repos.filter((repo): repo is string => typeof repo === "string" && repo.length > 0)
-        : [];
-    if (targets.length === 0) {
-      targets = await listReposForOwner(env, owner);
-    }
-    const updated: { added: string[]; removed: string[]; unchanged: string[] } = {
-      added: [],
-      removed: [],
-      unchanged: [],
-    };
-    const cacheCtx = requestCacheContext(c);
-    const limiter = getLimiter(cacheCtx);
-    for (const repo of targets) {
-      const stub = getRepoStub(env, repoKey(owner, repo));
-      let present = false;
-      try {
-        const refs = await limiter.run("do:legacy-registry-list-refs", () => stub.listRefs());
-        present = Array.isArray(refs) && refs.length > 0;
-      } catch {}
-      if (present) {
-        await addRepoToOwner(env, owner, repo);
-        updated.added.push(repo);
-      } else {
-        await removeRepoFromOwner(env, owner, repo);
-        updated.removed.push(repo);
-      }
-    }
-    return json({ owner, ...updated });
-  });
-
   // -------------------------------------------------------------------------
   // Repo-scoped admin endpoints. Auth model: tessera session + namespace
-  // membership. PATs and AuthDO Basic must NOT authorize these routes.
+  // membership, plus same-origin for mutating verbs (`requireRepoAdmin`
+  // calls `sameOriginViolation` itself). PATs and AuthDO Basic must NOT
+  // authorize these routes.
 
   router.get(`/:owner/:repo/admin/refs`, async (c) => {
     const gate = await requireRepoAdmin(c);
@@ -319,13 +289,22 @@ export function registerAdminRoutes(router: AppRouter) {
     }
   });
 
-  // DANGEROUS: completely purge repo (all R2 objects + DO storage).
+  // DANGEROUS: completely delete the repository - D1 row, ROUTES KV, R2
+  // objects, and DO storage. The request handler authorizes via
+  // `requireRepoAdmin` (session + membership + same-origin) and confirms
+  // the danger-zone payload, then enqueues a `repository-delete` task. The
+  // queue consumer owns every side-effecting step so a queue-send failure
+  // cannot leave D1 partially mutated and R2/DO orphaned.
   router.delete(`/:owner/:repo/admin/purge`, async (c) => {
     const gate = await requireRepoAdmin(c);
     if (gate.kind === "response") return gate.response;
-    const { route, limiter } = gate;
+    const { route, viewer } = gate;
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
+    const log = createLogger(c.env.LOG_LEVEL, {
+      service: "AdminPurge",
+      repoId: route.doName,
+    });
     const body = await safeParseJsonRequest(c.req.raw);
     const confirm = isJsonObject(body) && typeof body.confirm === "string" ? body.confirm : "";
     if (confirm !== `purge-${owner}/${repo}`) {
@@ -338,13 +317,28 @@ export function registerAdminRoutes(router: AppRouter) {
       );
     }
 
-    const stub = getRepoStub(c.env, route.doName);
+    const message: RepositoryDeleteMessage = {
+      kind: "repository-delete",
+      repositoryId: route.repositoryId,
+      namespaceId: route.namespaceId,
+      namespaceSlug: route.routeNamespaceSlug,
+      repoSlug: route.routeRepoSlug,
+      doName: route.doName,
+      actor: viewer.userId,
+      requestedAt: Date.now(),
+    };
     try {
-      const result = await limiter.run("do:admin-purge", () => stub.purgeRepo());
-      await removeRepoFromOwner(c.env, route.routeNamespaceSlug, route.routeRepoSlug);
-      return json({ ok: true, ...result });
-    } catch (e) {
-      return json({ ok: false, error: String(e) }, 500);
+      // Required: a failed enqueue must not mutate D1/KV/R2/DO. Returning
+      // 503 lets the operator retry without leaving partial state behind.
+      await c.env.REPO_TASKS_QUEUE.send(message);
+    } catch (error) {
+      log.error("admin-purge:enqueue-failed", { error: String(error) });
+      return json({ ok: false, error: "Failed to enqueue delete; please retry" }, 503);
     }
+    log.info("admin-purge:enqueued", {
+      actor: viewer.userId,
+      requestedAt: message.requestedAt,
+    });
+    return json({ ok: true, queued: true }, 202);
   });
 }

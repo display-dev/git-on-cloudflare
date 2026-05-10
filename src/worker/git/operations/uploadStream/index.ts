@@ -2,6 +2,7 @@ import type { CacheContext } from "@/worker/cache";
 import type { ServeUploadPackPlan } from "../fetch/types";
 
 import { pktLine } from "@/worker/git/core";
+import { responseCacheControl } from "@/worker/cache/policy";
 import { createLogger } from "@/worker/common";
 import { getLimiter, countSubrequest } from "../limits";
 import { parseFetchArgs } from "../args";
@@ -49,7 +50,7 @@ export async function handleFetchV2Streaming(
   }
 
   if (wants.length === 0) {
-    return buildAckOnlyResponse([]);
+    return buildAckOnlyResponse([], cacheCtx);
   }
 
   if (!done) {
@@ -58,7 +59,7 @@ export async function handleFetchV2Streaming(
       ackOids = await findCommonHaves(env, repoId, haves, cacheCtx);
       log.debug("stream:fetch:negotiation", { haves: haves.length, acks: ackOids.length });
     }
-    return buildAckOnlyResponse(ackOids);
+    return buildAckOnlyResponse(ackOids, cacheCtx);
   }
 
   // Keep fetch readiness ahead of the response so clients still receive the
@@ -149,7 +150,7 @@ export async function handleFetchV2Streaming(
     status: 200,
     headers: {
       "Content-Type": "application/x-git-upload-pack-result",
-      "Cache-Control": "no-cache",
+      "Cache-Control": responseCacheControl(cacheCtx),
     },
   });
 }

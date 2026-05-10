@@ -7,7 +7,7 @@ import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 
 import { doPrefix } from "@/worker/keys";
 import { text, createLogger } from "@/worker/common";
-import { purgeRepo, removePack, type RemovePackResult } from "./packOperations";
+import { clearRepositoryStorage, removePack, type RemovePackResult } from "./packOperations";
 import {
   abortCompactionLease,
   abortReceiveLease,
@@ -307,9 +307,11 @@ export class RepoDurableObject extends DurableObject {
     });
   }
 
-  public async purgeRepo(): Promise<{ deletedR2: number; deletedDO: boolean }> {
-    await this.ensureAccessAndAlarm();
-    return await purgeRepo(this.ctx, this.env);
+  // DO-only storage clear used by the `repository-delete` queue consumer
+  // after R2 cleanup. Callers must NOT chain this from a Worker handler that
+  // also enumerates R2 - that would be the forbidden Worker -> DO -> R2 hop.
+  public async clearRepositoryStorage(): Promise<{ deletedDO: boolean }> {
+    return await clearRepositoryStorage(this.ctx, this.env);
   }
 
   public async removePack(packKey: string): Promise<RemovePackResult> {

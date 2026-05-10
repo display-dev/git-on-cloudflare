@@ -83,14 +83,16 @@ it("auth: management API uses bearer admin auth", async () => {
   expect(Array.isArray(body.users)).toBe(true);
 });
 
-it("auth: centralized auth rejects push without Basic and accepts with matching owner", async () => {
+it("auth: receive-pack requires a push PAT and rejects legacy AuthDO Basic credentials", async () => {
+  // Receive-pack does not use legacy AuthDO Basic tokens. Only a PAT with
+  // `level: "push"` matching the namespace can push. This test pins that
+  // contract: pushing with Basic + the AuthDO-seeded token returns 401.
   const owner = "alice";
   const repo = "auth-repo";
   const token = "alicesecret";
   await seedOwner(owner, token);
   await setupRepoForTests(env, owner, repo);
 
-  // Build a trivial tree+commit pack
   const treePayload = new Uint8Array(0);
   const treeHeader = new TextEncoder().encode(`tree ${treePayload.byteLength}\0`);
   const treeRaw = new Uint8Array(treeHeader.length + treePayload.length);
@@ -141,7 +143,7 @@ it("auth: centralized auth rejects push without Basic and accepts with matching 
   } as any);
   expect(r2.status).toBe(401);
 
-  // Correct username but wrong token → 401
+  // Correct username but wrong token → 401 (malformed PAT shape)
   const r3 = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
@@ -152,7 +154,7 @@ it("auth: centralized auth rejects push without Basic and accepts with matching 
   } as any);
   expect(r3.status).toBe(401);
 
-  // Correct username + token → 200
+  // Correct username + AuthDO token → 401 (legacy fallback removed)
   const r4 = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
@@ -161,7 +163,7 @@ it("auth: centralized auth rejects push without Basic and accepts with matching 
     },
     body,
   } as any);
-  expect(r4.status).toBe(200);
+  expect(r4.status).toBe(401);
 });
 
 it("auth: per-repo admin endpoints reject Basic credentials and require session membership", async () => {

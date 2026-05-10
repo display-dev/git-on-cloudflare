@@ -1,8 +1,10 @@
 /**
  * Pack operations for repository maintenance
  *
- * This module provides operations for managing packs including
- * removal of specific packs and complete repository purging.
+ * This module provides operations for managing packs and clearing
+ * Durable Object storage. R2 enumeration during a full repo delete is
+ * handled by the `repository-delete` queue consumer to keep the
+ * Worker -> DO -> R2 boundary clean.
  */
 
 import type { Logger } from "@/worker/common/logger";
@@ -159,49 +161,31 @@ export async function removePack(
 }
 
 /**
- * DANGEROUS: Completely purge all repository data
- * Deletes all R2 objects and all DO storage
- * @param ctx - Durable Object state context
- * @param env - Worker environment
- * @returns Statistics about deleted objects
+ * Clears the per-repo Durable Object storage and any pending alarm.
+ * R2 cleanup is owned by the `repository-delete` queue consumer so we keep
+ * the DO call free of cross-runtime hops (no Worker -> DO -> R2 chain).
  */
-export async function purgeRepo(
+export async function clearRepositoryStorage(
   ctx: DurableObjectState,
   env: Env
-): Promise<{ deletedR2: number; deletedDO: boolean }> {
+): Promise<{ deletedDO: boolean }> {
   const log = createLogger(env.LOG_LEVEL, {
-    service: "packOperations:purgeRepo",
+    service: "packOperations:clearRepositoryStorage",
     doId: ctx.id.toString(),
   });
 
-  let deletedR2 = 0;
-  const prefix = doPrefix(ctx.id.toString());
+  await ctx.storage.deleteAll();
+  log.info("clear:storage-deleted-all");
 
-  // Delete all R2 objects for this repo
+  // `deleteAll()` does not always cancel a pending alarm. Clearing it
+  // explicitly keeps the post-delete DO inert so a stray scheduled tick
+  // cannot reach into a now-empty storage and log noise.
   try {
-    // List and delete all objects under do/<id>/
-    let cursor: string | undefined;
-    do {
-      const res = await env.REPO_BUCKET.list({ prefix, cursor });
-      const objects = res.objects || [];
-
-      if (objects.length > 0) {
-        // Delete in batches
-        const keys = objects.map((o) => o.key);
-        await env.REPO_BUCKET.delete(keys);
-        deletedR2 += keys.length;
-        log.info("purge:deleted-r2-batch", { count: keys.length });
-      }
-
-      cursor = res.truncated ? res.cursor : undefined;
-    } while (cursor);
-  } catch (e) {
-    log.error("purge:r2-delete-error", { error: String(e) });
+    await ctx.storage.deleteAlarm();
+    log.debug("clear:alarm-deleted");
+  } catch (error) {
+    log.warn("clear:delete-alarm-failed", { error: String(error) });
   }
 
-  // Delete all DO storage
-  await ctx.storage.deleteAll();
-  log.info("purge:deleted-do-storage");
-
-  return { deletedR2, deletedDO: true };
+  return { deletedDO: true };
 }

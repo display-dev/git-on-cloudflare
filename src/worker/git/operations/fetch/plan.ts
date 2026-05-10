@@ -55,7 +55,7 @@ function schedulePackRefBackfill(args: {
     return;
   }
 
-  const send = args.env.REPO_MAINT_QUEUE.send({
+  const send = args.env.REPO_TASKS_QUEUE.send({
     kind: "pack-ref-backfill",
     doId,
     repoId: args.repoId,

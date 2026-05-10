@@ -13,7 +13,7 @@ import {
   toRequestBody,
   uniqueRepoId,
 } from "./util/test-helpers";
-import { setupRepoForTests } from "./util/repoSeed";
+import { lookupPushAuth, setupRepoForTests } from "./util/repoSeed";
 import { seedPackFirstRepo } from "./util/pack-first";
 import { doPrefix, packRefsKey, r2PackDirPrefix } from "@/worker/keys";
 import {
@@ -79,25 +79,29 @@ async function listStagedReceivePacks(repoId: string): Promise<string[]> {
   return listed.objects.map((object) => object.key).filter((key) => key.includes("/pack-rx-"));
 }
 
+function pushAuthFromUrl(url: string): string | undefined {
+  const match = /https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/git-receive-pack/.exec(url);
+  return match ? lookupPushAuth(match[1]!, match[2]!) : undefined;
+}
+
 async function pushBody(
   url: string,
   body: Uint8Array,
   options?: {
     stream?: boolean;
+    authHeader?: string;
   }
 ): Promise<Response> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-git-receive-pack-request",
+  };
+  const auth = options?.authHeader ?? pushAuthFromUrl(url);
+  if (auth) headers.Authorization = auth;
   return await workerExports.default.fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
+    headers,
     body: options?.stream ? streamBody(body) : body,
   } as any);
-}
-
-async function readOwnerRegistry(owner: string): Promise<string[]> {
-  const response = await workerExports.default.fetch(`https://example.com/${owner}/admin/registry`);
-  expect(response.status).toBe(200);
-  const payload = (await response.json()) as { repos?: string[] };
-  return Array.isArray(payload.repos) ? payload.repos : [];
 }
 
 describe("streaming receive-pack", () => {
@@ -361,40 +365,6 @@ describe("streaming receive-pack", () => {
     );
     const refs = (await refsResponse.json()) as Array<{ name: string; oid: string }>;
     expect(refs.find((ref) => ref.name === "refs/heads/feature")).toBeUndefined();
-  });
-
-  it("updates owner registry entries after streaming pushes add or remove the live refs set", async () => {
-    const owner = "o";
-    const repo = uniqueRepoId("stream-receive-registry");
-    await setupRepoForTests(env, owner, repo);
-    const repoId = `${owner}/${repo}`;
-    const seeded = await seedPackFirstRepo(repoId);
-    await promoteToStreaming(owner, repo);
-
-    expect(await readOwnerRegistry(owner)).not.toContain(repo);
-
-    const pushed = await pushStreamingUpdate(
-      owner,
-      repo,
-      seeded.nextCommit.oid,
-      "registry update\n"
-    );
-    expect(await readOwnerRegistry(owner)).toContain(repo);
-
-    const deleteResponse = await pushBody(
-      `https://example.com/${owner}/${repo}/git-receive-pack`,
-      concatChunks([
-        pktLine(`${pushed.commitOid} ${zero40()} refs/heads/main\0 report-status\n`),
-        flushPkt(),
-      ]),
-      { stream: true }
-    );
-    expect(deleteResponse.status).toBe(200);
-    expect(decodeReportStatus(new Uint8Array(await deleteResponse.arrayBuffer()))).toContain(
-      "ok refs/heads/main"
-    );
-
-    expect(await readOwnerRegistry(owner)).not.toContain(repo);
   });
 
   it("rejects stale old-oids and leaves no staged receive packs behind", async () => {

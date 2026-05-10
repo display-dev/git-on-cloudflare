@@ -73,7 +73,7 @@
   "queues": {
     "producers": [
       {
-        "binding": "REPO_MAINT_QUEUE",
+        "binding": "REPO_TASKS_QUEUE",
         "queue": "git-on-cloudflare-repo-maint"
       }
     ],

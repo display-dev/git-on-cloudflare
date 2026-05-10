@@ -3,7 +3,6 @@ import { createDb } from "@/worker/db/d1/client";
 import { updatePatLastUsedAt } from "@/worker/db/d1/dal/tokens";
 import type { RepositoryRoute } from "@/worker/repositories/route";
 
-import { getBasicCredentials } from "./verify";
 import {
   PAT_LAST_USED_READ_THROTTLE_MS,
   shouldTouchPatLastUsedAt,
@@ -12,6 +11,27 @@ import {
   type PatVerifyError,
   type PatVerifyOk,
 } from "./pat";
+
+// Decode `Authorization: Basic <b64>` into `{ username, password }`. The
+// caller decides whether the credentials are valid; this helper does no
+// authorization. Used by Git endpoints that accept PAT credentials over
+// HTTP Basic.
+export function getBasicCredentials(req: Request): { username: string; password: string } | null {
+  const header = req.headers.get("Authorization") || "";
+  const match = /^Basic\s+(.+)$/i.exec(header);
+  if (!match) return null;
+  try {
+    const decoded = atob(match[1]!);
+    const idx = decoded.indexOf(":");
+    if (idx === -1) return { username: decoded, password: "" };
+    return {
+      username: decoded.slice(0, idx),
+      password: decoded.slice(idx + 1),
+    };
+  } catch {
+    return null;
+  }
+}
 
 // UI handlers must not import this module; it is the only path that reaches
 // `verifyPat`. The kept invariant: PAT credentials authorize git endpoints

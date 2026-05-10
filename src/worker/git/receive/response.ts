@@ -26,7 +26,9 @@ export function buildReceiveResultResponse(args: {
     status: 200,
     headers: {
       "Content-Type": "application/x-git-receive-pack-result",
-      "Cache-Control": "no-cache",
+      // Receive-pack is credentialed and mutating; never sit in shared
+      // caches regardless of repo visibility.
+      "Cache-Control": "no-store",
       "X-Repo-Changed": args.changed ? "1" : "0",
       "X-Repo-Empty": args.empty ? "1" : "0",
     },

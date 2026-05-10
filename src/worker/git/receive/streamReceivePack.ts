@@ -225,7 +225,8 @@ function createSidebandReceiveResponse(args: {
     status: 200,
     headers: {
       "Content-Type": "application/x-git-receive-pack-result",
-      "Cache-Control": "no-cache",
+      // Credentialed mutating path; never share in caches.
+      "Cache-Control": "no-store",
     },
   });
 }

@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
-import { env, exports as workerExports } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { pktLine, flushPkt, concatChunks } from "@/worker/git";
-import { buildPack, makeTree, uniqueRepoId, zero40 } from "./util/test-helpers";
+import { buildPack, makeTree, postReceivePack, uniqueRepoId, zero40 } from "./util/test-helpers";
 import { setupRepoForTests } from "./util/repoSeed";
 
 it("receive-pack connectivity: rejects commit whose parent is missing", async () => {
@@ -39,11 +39,7 @@ it("receive-pack connectivity: rejects commit whose parent is missing", async ()
   const cmd = `${zero40()} ${commitOid} refs/heads/dev\0 report-status ofs-delta agent=test\n`;
   const body = concatChunks([pktLine(cmd), flushPkt(), pack]);
 
-  const res = await workerExports.default.fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-git-receive-pack-request" },
-    body,
-  } as any);
+  const res = await postReceivePack(url, body);
   expect(res.status).toBe(200);
   const bytes = new Uint8Array(await res.arrayBuffer());
   const lines = (await import("@/worker/git"))

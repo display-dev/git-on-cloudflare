@@ -12,7 +12,6 @@ import { validateSlugForRoute } from "@/shared/slugs";
 import { createDb, type Db } from "@/worker/db/d1/client";
 import {
   claimNamespace,
-  deleteRouteCacheRecord,
   findNamespaceById,
   findNamespaceBySlug,
   findRepositoryById,
@@ -26,7 +25,6 @@ import {
   listPatGrantsByIds,
   listPatsForUser,
   listRepositoriesForUser,
-  putRouteCacheRecord,
   revokePatById,
   updateRepositoryVisibility,
   type PatGrantLevel,
@@ -67,8 +65,36 @@ import {
 } from "@/worker/auth/pat";
 import type { AppContext, AppRouter } from "./hono";
 import { renderUiDocumentResponse } from "./uiResponse";
-import type { LegacyBackfillMessage } from "@/worker/maintenance/queue";
+import type { LegacyBackfillMessage, RouteCacheSyncMessage } from "@/worker/tasks/queue";
 import type { TokensIslandSummary } from "@/client/islands/tokens";
+
+// Best-effort enqueue of a `route-cache-sync` task after a D1 mutation that
+// changes ROUTES KV state (repo create, visibility flip, future rename).
+// D1 is canonical and the resolver D1 fallback covers the gap until the
+// queue drains, so a send failure is logged but does not fail the request.
+function enqueueRouteCacheSync(
+  c: AppContext,
+  log: ReturnType<typeof createLogger>,
+  payload: { repositoryId: string; namespaceSlug: string; repoSlug: string }
+): void {
+  const message: RouteCacheSyncMessage = {
+    kind: "route-cache-sync",
+    repositoryId: payload.repositoryId,
+    namespaceSlug: payload.namespaceSlug,
+    repoSlug: payload.repoSlug,
+    enqueuedAt: Date.now(),
+  };
+  c.executionCtx.waitUntil(
+    c.env.REPO_TASKS_QUEUE.send(message).catch((error) => {
+      log.warn("route-cache-sync:enqueue-failed", {
+        repositoryId: payload.repositoryId,
+        namespaceSlug: payload.namespaceSlug,
+        repoSlug: payload.repoSlug,
+        error: String(error),
+      });
+    })
+  );
+}
 
 // Build the wire-shape summary that the management UI consumes. Grants are
 // fetched in two batched queries (one per grant table) and grouped by PAT
@@ -340,7 +366,7 @@ export function registerAuthRoutes(router: AppRouter) {
       // Best-effort: queue failure must not fail login. Replay via the
       // dashboard if the operator notices missing imports.
       c.executionCtx.waitUntil(
-        c.env.REPO_MAINT_QUEUE.send(message).catch((error) =>
+        c.env.REPO_TASKS_QUEUE.send(message).catch((error) =>
           log.warn("oidc:callback-backfill-enqueue-failed", {
             userId,
             namespaceSlug: claimedNamespaceSlug,
@@ -612,22 +638,11 @@ export function registerAuthRoutes(router: AppRouter) {
       });
       return json({ ok: false, reason: "slug-taken" } as const, 409);
     }
-    try {
-      await putRouteCacheRecord(c.env, namespaceValidation.slug, slugValidation.slug, {
-        repositoryId: inserted.id,
-        namespaceId: namespace.id,
-        doName,
-        updatedAt: now,
-      });
-    } catch (error) {
-      log.warn("repo-create:route-cache-put-failed", {
-        repositoryId: inserted.id,
-        error: String(error),
-      });
-      // Best-effort. Anonymous KV-miss reads still resolve via the D1
-      // fallback in `resolveRepositoryRoute`; authenticated/PAT paths do
-      // the same. KV will converge on the next put.
-    }
+    enqueueRouteCacheSync(c, log, {
+      repositoryId: inserted.id,
+      namespaceSlug: namespaceValidation.slug,
+      repoSlug: slugValidation.slug,
+    });
     log.info("repo-create:ok", {
       userId: viewer.userId,
       repositoryId: inserted.id,
@@ -683,20 +698,24 @@ export function registerAuthRoutes(router: AppRouter) {
       log.warn("repo-visibility:not-found", { repositoryId });
       return json({ ok: false, reason: "not-found" } as const, 404);
     }
-    if (result.previous === "public" && result.current === "private") {
-      // Best-effort privacy hygiene: drop the route candidate so anonymous
-      // KV-miss serving returns 404 immediately at colos that had cached
-      // the public route. Correctness still comes from D1 + the resolver's
-      // KV-then-D1 verification; this is an acceleration, not a gate.
-      try {
-        const namespace = await findNamespaceById(db, repo.namespaceId);
-        if (namespace) {
-          await deleteRouteCacheRecord(c.env, namespace.slug, repo.slug);
-        }
-      } catch (error) {
-        log.warn("repo-visibility:route-cache-delete-failed", {
+    if (result.previous !== result.current) {
+      // Reconcile ROUTES KV via the queue. The consumer reads D1 at
+      // execution time and converges KV to canonical state, so a
+      // public->private flip drops the route candidate and a
+      // private->public flip puts it. We capture the slugs from the
+      // current row so the consumer can drop any stale captured key as
+      // well as set the canonical key.
+      const namespace = await findNamespaceById(db, repo.namespaceId);
+      if (namespace) {
+        enqueueRouteCacheSync(c, log, {
           repositoryId,
-          error: String(error),
+          namespaceSlug: namespace.slug,
+          repoSlug: repo.slug,
+        });
+      } else {
+        log.warn("repo-visibility:namespace-missing-for-sync", {
+          repositoryId,
+          namespaceId: repo.namespaceId,
         });
       }
     }

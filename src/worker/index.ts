@@ -7,7 +7,7 @@ import type { AppBindings, AppContext } from "./routes/hono";
 import { renderUiDocumentResponse } from "./routes/uiResponse";
 import { loadViewer } from "./auth/session";
 import { json } from "./common";
-import { handleRepoMaintenanceQueue, type RepoMaintenanceQueueMessage } from "./maintenance/queue";
+import { handleRepoTaskQueue, type RepoTaskQueueMessage } from "./tasks/queue";
 
 const app = new Hono<AppBindings>({ strict: false });
 // Register Git protocol routes (info/refs, upload-pack, receive-pack)
@@ -68,8 +68,8 @@ export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
     return app.fetch(request, env, ctx);
   },
-  async queue(batch: MessageBatch<RepoMaintenanceQueueMessage>, env: Env, ctx: ExecutionContext) {
-    return await handleRepoMaintenanceQueue(batch, env, ctx);
+  async queue(batch: MessageBatch<RepoTaskQueueMessage>, env: Env, ctx: ExecutionContext) {
+    return await handleRepoTaskQueue(batch, env, ctx);
   },
 };
 

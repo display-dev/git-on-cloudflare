@@ -2,6 +2,9 @@
  * Shared test utilities for Git operations.
  */
 
+import { exports as workerExports } from "cloudflare:workers";
+import { lookupPushAuth } from "./repoSeed";
+
 type StringEnvKey = {
   [K in keyof Env]: Env[K] extends string | undefined ? K : never;
 }[keyof Env];
@@ -50,4 +53,27 @@ export function toRequestBody(bytes: Uint8Array): ArrayBuffer {
  */
 export function uniqueRepoId(prefix = "r"): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// POST to git-receive-pack with the seeded push PAT auto-attached. The owner
+// and repo are parsed from the URL and matched against the auth registered
+// by `setupRepoForTests`. Tests that want to assert auth failures should
+// build the request themselves rather than going through this helper.
+export async function postReceivePack(
+  url: string,
+  body: Uint8Array,
+  options?: { authHeader?: string; signal?: AbortSignal }
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-git-receive-pack-request",
+  };
+  const match = /https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/git-receive-pack/.exec(url);
+  const auth = options?.authHeader ?? (match ? lookupPushAuth(match[1]!, match[2]!) : undefined);
+  if (auth) headers.Authorization = auth;
+  return await workerExports.default.fetch(url, {
+    method: "POST",
+    headers,
+    body: toRequestBody(body),
+    signal: options?.signal,
+  });
 }

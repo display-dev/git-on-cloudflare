@@ -123,6 +123,23 @@ export async function touchRepositoryUpdatedAt(
   await db.update(repositories).set({ updatedAt: now }).where(eq(repositories.id, repositoryId));
 }
 
+// Deletes a repository row by id. Schema FK cascades remove `pat_repo_grants`
+// for that repo. Namespace-scoped grants in `pat_namespace_grants` are
+// intentionally untouched: they still cover any other or future repo in the
+// same namespace.
+//
+// Returns true on first run, false on replay (row already absent). Callers
+// must enforce membership before invoking; this DAL has no auth opinion so
+// the queue consumer can use it after the request-path gate has already
+// run.
+export async function deleteRepositoryById(db: Db, repositoryId: string): Promise<boolean> {
+  const result = await db
+    .delete(repositories)
+    .where(eq(repositories.id, repositoryId))
+    .returning({ id: repositories.id });
+  return result.length === 1;
+}
+
 export type UpdateRepositoryVisibilityResult =
   | { ok: true; previous: "public" | "private"; current: "public" | "private" }
   | { ok: false; reason: "not-found" };

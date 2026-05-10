@@ -270,7 +270,7 @@ export async function rearmCompactionQueueFromAlarm(args: {
 
   const doId = args.ctx.id.toString();
   try {
-    await args.env.REPO_MAINT_QUEUE.send({
+    await args.env.REPO_TASKS_QUEUE.send({
       kind: "compaction",
       doId,
     });

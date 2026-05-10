@@ -3,6 +3,12 @@ import type { Logger } from "@/worker/common/logger";
 import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
 import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
 
+import {
+  type CompactionDeleteQueueMessage,
+  type CompactionQueueMessage,
+  type RepoQueueMessageHandle,
+} from "./types";
+
 import { createLogger, getRepoStubByDoId } from "@/worker/common";
 import { buildCompactionNeededOids } from "@/worker/git/compaction/plan";
 import {
@@ -24,21 +30,6 @@ const COMPACTION_SUBREQUEST_BUDGET = 7_500;
 const COMPACTION_RETRY_DELAY_SECONDS = 30;
 const COMPACTION_CONFLICT_RETRY_DELAY_SECONDS = 10;
 const COMPACTION_DELETE_DELAY_SECONDS = 60;
-
-export type CompactionQueueMessage = {
-  kind: "compaction";
-  doId: string;
-  repoId?: string;
-};
-
-export type CompactionDeleteQueueMessage = {
-  kind: "compaction-delete";
-  doId: string;
-  repoId?: string;
-  packKeys: string[];
-};
-
-type RepoMaintenanceMessage<Body> = MessageBatch<Body>["messages"][number];
 
 function buildQueueCacheContext(args: { repoLabel: string; ctx: ExecutionContext }): {
   cacheCtx: CacheContext;
@@ -150,7 +141,7 @@ function queueRetry(
 }
 
 export async function handleCompactionMessage(
-  message: Omit<RepoMaintenanceMessage<CompactionQueueMessage>, "body">,
+  message: Omit<RepoQueueMessageHandle<CompactionQueueMessage>, "body">,
   body: CompactionQueueMessage,
   env: Env,
   ctx: ExecutionContext
@@ -354,7 +345,7 @@ export async function handleCompactionMessage(
     leaseToken = undefined;
     if (commit.shouldRequeue) {
       ctx.waitUntil(
-        env.REPO_MAINT_QUEUE.send({
+        env.REPO_TASKS_QUEUE.send({
           kind: "compaction",
           doId: body.doId,
           repoId: body.repoId,
@@ -366,7 +357,7 @@ export async function handleCompactionMessage(
 
     if (commit.supersededPackKeys.length > 0) {
       ctx.waitUntil(
-        env.REPO_MAINT_QUEUE.send(
+        env.REPO_TASKS_QUEUE.send(
           {
             kind: "compaction-delete",
             doId: body.doId,
@@ -406,7 +397,7 @@ export async function handleCompactionMessage(
 }
 
 export async function handleCompactionDeleteMessage(
-  message: Omit<RepoMaintenanceMessage<CompactionDeleteQueueMessage>, "body">,
+  message: Omit<RepoQueueMessageHandle<CompactionDeleteQueueMessage>, "body">,
   body: CompactionDeleteQueueMessage,
   env: Env,
   _ctx: ExecutionContext

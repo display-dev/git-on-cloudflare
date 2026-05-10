@@ -5,6 +5,7 @@ import { resolveRepositoryRoute } from "@/worker/repositories/route";
 
 import { ensureD1Migrations } from "./util/d1Setup";
 import { mintSessionCookie, seedRepo } from "./util/repoSeed";
+import { runQueueMessage } from "./util/queue";
 import { newPrefixedId } from "@/worker/common";
 import { createDb } from "@/worker/db/d1/client";
 import { insertUserIfNew, claimNamespace, insertMembershipIfMissing } from "@/worker/db/d1/dal";
@@ -186,7 +187,7 @@ describe("POST /auth/api/repositories", () => {
 });
 
 describe("PATCH /auth/api/repositories/:repositoryId", () => {
-  it("public->private removes the route KV record (privacy hygiene)", async () => {
+  it("public->private flip enqueues route-cache-sync that removes the route KV record", async () => {
     const ns = `rcv-${Math.random().toString(36).slice(2, 8)}`;
     const member = await createMember(ns);
     const seed = await seedRepo(env, {
@@ -217,6 +218,16 @@ describe("PATCH /auth/api/repositories/:repositoryId", () => {
     };
     expect(payload.visibility).toBe("private");
     expect(payload.previous).toBe("public");
+    // The request only enqueues; drive the consumer manually to converge.
+    // The consumer reads D1 (now private), so it deletes the canonical key.
+    const result = await runQueueMessage({
+      kind: "route-cache-sync",
+      repositoryId: seed.repositoryId,
+      namespaceSlug: ns,
+      repoSlug: "site",
+      enqueuedAt: Date.now(),
+    });
+    expect(result.acked).toBe(true);
     expect(await env.ROUTES.get(seed.routeCacheKey)).toBeNull();
   });
 
