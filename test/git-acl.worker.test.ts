@@ -227,6 +227,48 @@ describe("Git ACL: push paths", () => {
     expect(res.headers.get("WWW-Authenticate")).toMatch(/Basic/);
   });
 
+  it("private + anonymous + missing route cache + info-refs receive-pack -> 401 challenge", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-priv-recv-miss-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "private",
+      skipRouteCache: true,
+    });
+    const res = await workerExports.default.fetch(infoRefs(seed, "git-receive-pack"));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toMatch(/Basic/);
+  });
+
+  it("public + anonymous + missing route cache + info-refs receive-pack -> 401 challenge", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-pub-recv-miss-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "public",
+      skipRouteCache: true,
+    });
+    const res = await workerExports.default.fetch(infoRefs(seed, "git-receive-pack"));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toMatch(/Basic/);
+  });
+
+  it("private + anonymous + missing route cache + receive-pack POST -> 401 challenge", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-priv-post-miss-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "private",
+      skipRouteCache: true,
+    });
+    const res = await workerExports.default.fetch(receivePackUrl(seed), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-receive-pack-request",
+      },
+      body: new Uint8Array(),
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toMatch(/Basic/);
+  });
+
   it("private + PAT pull-only + receive-pack POST -> 403", async () => {
     const seed = await seedRepo(env, {
       namespaceSlug: `acl-pull-push-${Math.random().toString(36).slice(2, 8)}`,

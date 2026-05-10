@@ -245,6 +245,21 @@ async function resolveGitRoute(
   });
 }
 
+function challengeUnresolvedPushRoute(
+  c: AppContext,
+  owner: string,
+  repo: string,
+  isDiscovery: boolean
+): Response {
+  const log = createLogger(c.env.LOG_LEVEL, { service: "GitAcl" });
+  log.info("git-acl:push-route-miss-401-challenge", {
+    owner,
+    repo,
+    discovery: isDiscovery,
+  });
+  return basicChallenge();
+}
+
 function gateD1FallbackGitAuth(
   c: AppContext,
   route: RepositoryRoute,
@@ -341,7 +356,17 @@ export function registerGitRoutes(router: AppRouter) {
       return new Response("Missing or unsupported service\n", { status: 400 });
     }
     const route = await resolveGitRoute(c, owner, repo);
-    if (!route) return gitNotFound();
+    if (!route) {
+      // Git sends the first receive-pack discovery request before it has
+      // credentials. If the route cache has no candidate yet (or the repo is
+      // private and intentionally absent from ROUTES), challenge so the client
+      // can retry with Basic/PAT. A request that already carried a Basic
+      // password has used D1 fallback and remains a real 404 when unresolved.
+      if (service === "git-receive-pack" && !gitRequestAllowsD1Fallback(c.req.raw)) {
+        return challengeUnresolvedPushRoute(c, owner, repo, true);
+      }
+      return gitNotFound();
+    }
     const cacheCtx = requestCacheContext(c);
     if (route.visibility === "private") markRequestPrivate(cacheCtx);
     const auth = await authenticateGitRequest(c.env, c.req.raw, route);
@@ -383,7 +408,12 @@ export function registerGitRoutes(router: AppRouter) {
     const repo = c.req.param("repo");
     if (!validateRouteSlugs(owner, repo)) return gitNotFound();
     const route = await resolveGitRoute(c, owner, repo);
-    if (!route) return gitNotFound();
+    if (!route) {
+      if (!gitRequestAllowsD1Fallback(c.req.raw)) {
+        return challengeUnresolvedPushRoute(c, owner, repo, false);
+      }
+      return gitNotFound();
+    }
     const cacheCtx = requestCacheContext(c);
     markRequestPrivate(cacheCtx);
     const auth = await authenticateGitRequest(c.env, c.req.raw, route);
