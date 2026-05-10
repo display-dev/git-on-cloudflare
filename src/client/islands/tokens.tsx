@@ -365,7 +365,7 @@ function ScopeSegmented({ scope, onChange }: ScopeSegmentedProps) {
     "text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 dark:hover:bg-zinc-800/40 dark:hover:text-zinc-300";
   return (
     <div
-      className="inline-flex w-full overflow-hidden rounded-xl border border-zinc-300 dark:border-zinc-800/60"
+      className="flex w-full flex-col overflow-hidden rounded-xl border border-zinc-300 sm:flex-row dark:border-zinc-800/60"
       role="radiogroup"
       aria-label="Token scope"
     >
@@ -383,7 +383,7 @@ function ScopeSegmented({ scope, onChange }: ScopeSegmentedProps) {
       </button>
       <button
         type="button"
-        className={`${baseHalf} border-l border-zinc-300 ${scope === "repo" ? activeHalf : inactiveHalf} dark:border-zinc-800/60`}
+        className={`${baseHalf} border-t border-zinc-300 sm:border-t-0 sm:border-l ${scope === "repo" ? activeHalf : inactiveHalf} dark:border-zinc-800/60`}
         onClick={() => onChange("repo")}
         role="radio"
         aria-checked={scope === "repo"}
@@ -465,7 +465,7 @@ function RepoTiles({ repositories, selectedSlug, onChange }: RepoTilesProps) {
             checked={selectedSlug === repo.slug}
             onChange={() => onChange(repo.slug)}
           />
-          <span className="truncate font-mono text-sm text-zinc-800 group-has-[:checked]:text-accent-600 dark:text-zinc-200 dark:group-has-[:checked]:text-accent-400">
+          <span className="min-w-0 truncate font-mono text-sm text-zinc-800 group-has-[:checked]:text-accent-600 dark:text-zinc-200 dark:group-has-[:checked]:text-accent-400">
             {repo.slug}
           </span>
           <span
@@ -495,8 +495,8 @@ function TokenRow({ token, onRevoke }: TokenRowProps) {
   if (revoked && token.revokedAt) metaParts.push(`revoked ${formatDate(token.revokedAt)}`);
   if (grants) metaParts.push(grants);
   return (
-    <li className="group flex items-center justify-between gap-4 px-5 py-3.5 sm:px-6">
-      <div className="flex min-w-0 flex-col gap-0.5">
+    <li className="group flex flex-col items-start justify-between gap-3 px-5 py-3.5 sm:flex-row sm:items-center sm:gap-4 sm:px-6">
+      <div className="flex w-full min-w-0 flex-col gap-0.5">
         <span
           className={`text-sm font-medium ${
             revoked
@@ -506,7 +506,9 @@ function TokenRow({ token, onRevoke }: TokenRowProps) {
         >
           {token.name}
         </span>
-        <span className="truncate font-mono text-xs text-zinc-500">{metaParts.join(" · ")}</span>
+        <span className="font-mono text-xs break-words text-zinc-500 sm:truncate">
+          {metaParts.join(" · ")}
+        </span>
       </div>
       {revoked ? null : (
         <Button
@@ -514,7 +516,7 @@ function TokenRow({ token, onRevoke }: TokenRowProps) {
           variant="danger"
           size="sm"
           onClick={() => void onRevoke(token.id)}
-          className="opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+          className="self-end transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
         >
           <Trash2 className="h-4 w-4" aria-hidden="true" />
           Revoke
