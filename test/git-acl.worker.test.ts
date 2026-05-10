@@ -76,6 +76,48 @@ describe("Git ACL: read paths", () => {
     expect(res.headers.get("Content-Type")).toContain("git-upload-pack-advertisement");
   });
 
+  it("public + anonymous + missing route cache -> 404", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-pub-miss-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "public",
+      skipRouteCache: true,
+    });
+    const res = await workerExports.default.fetch(infoRefs(seed, "git-upload-pack"));
+    expect(res.status).toBe(404);
+  });
+
+  it("public + valid PAT + missing route cache -> 200", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-pat-miss-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "public",
+      skipRouteCache: true,
+    });
+    const plaintext = await seedPat({
+      userId: seed.userId,
+      level: "pull",
+      scope: { kind: "repo", repoId: seed.repositoryId },
+    });
+    const res = await workerExports.default.fetch(infoRefs(seed, "git-upload-pack"), {
+      headers: { Authorization: basicAuth(seed.namespaceSlug, plaintext) },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("public + malformed PAT + missing route cache -> 401", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-badpat-miss-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "public",
+      skipRouteCache: true,
+    });
+    const res = await workerExports.default.fetch(infoRefs(seed, "git-upload-pack"), {
+      headers: { Authorization: basicAuth(seed.namespaceSlug, "not-a-pat") },
+    });
+    expect(res.status).toBe(401);
+  });
+
   it("private + anonymous + info-refs upload-pack -> 404 (non-disclosure)", async () => {
     const seed = await seedRepo(env, {
       namespaceSlug: `acl-priv-${Math.random().toString(36).slice(2, 8)}`,
@@ -91,6 +133,24 @@ describe("Git ACL: read paths", () => {
       namespaceSlug: `acl-pat-pull-${Math.random().toString(36).slice(2, 8)}`,
       repoSlug: "site",
       visibility: "private",
+    });
+    const plaintext = await seedPat({
+      userId: seed.userId,
+      level: "pull",
+      scope: { kind: "repo", repoId: seed.repositoryId },
+    });
+    const res = await workerExports.default.fetch(infoRefs(seed, "git-upload-pack"), {
+      headers: { Authorization: basicAuth(seed.namespaceSlug, plaintext) },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("private + valid PAT + missing route cache -> 200", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-priv-pat-miss-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "private",
+      skipRouteCache: true,
     });
     const plaintext = await seedPat({
       userId: seed.userId,

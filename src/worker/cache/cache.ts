@@ -161,7 +161,7 @@ export async function cachePutJSON(
  * Git objects are content-addressable and immutable, so we can use long TTLs.
  *
  * @param req - The incoming request (for origin)
- * @param repoId - Repository identifier (owner/repo)
+ * @param repoId - RepoDO storage identity (`doName` in D1)
  * @param oid - Object ID (SHA-1 hash)
  * @returns Cache key request
  */

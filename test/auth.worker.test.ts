@@ -51,46 +51,19 @@ function basicAuth(user: string, pass: string) {
   return `Basic ${b64}`;
 }
 
-async function seedOwner(owner: string, token: string) {
-  // Use the /auth management API with Bearer admin token configured via vitest.auth.config.ts
+it("auth: owner token management API is absent", async () => {
   const res = await workerExports.default.fetch("https://example.com/auth/api/users", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "Bearer admin",
-    },
-    body: JSON.stringify({ owner, token }),
-  } as any);
-  expect(res.status).toBe(200);
-}
-
-it("auth: management API uses bearer admin auth", async () => {
-  const wrong = await workerExports.default.fetch("https://example.com/auth/api/users", {
-    headers: {
-      Authorization: "Bearer adm",
-    },
-  } as any);
-  expect(wrong.status).toBe(401);
-
-  const ok = await workerExports.default.fetch("https://example.com/auth/api/users", {
     headers: {
       Authorization: "Bearer admin",
     },
   } as any);
-  expect(ok.status).toBe(200);
-
-  const body = await ok.json<{ users: unknown[] }>();
-  expect(Array.isArray(body.users)).toBe(true);
+  expect(res.status).toBe(404);
 });
 
-it("auth: receive-pack requires a push PAT and rejects legacy AuthDO Basic credentials", async () => {
-  // Receive-pack does not use legacy AuthDO Basic tokens. Only a PAT with
-  // `level: "push"` matching the namespace can push. This test pins that
-  // contract: pushing with Basic + the AuthDO-seeded token returns 401.
+it("auth: receive-pack requires a push PAT and rejects non-PAT Basic credentials", async () => {
   const owner = "alice";
   const repo = "auth-repo";
   const token = "alicesecret";
-  await seedOwner(owner, token);
   await setupRepoForTests(env, owner, repo);
 
   const treePayload = new Uint8Array(0);
@@ -154,7 +127,7 @@ it("auth: receive-pack requires a push PAT and rejects legacy AuthDO Basic crede
   } as any);
   expect(r3.status).toBe(401);
 
-  // Correct username + AuthDO token → 401 (legacy fallback removed)
+  // Correct username + non-PAT password -> 401.
   const r4 = await workerExports.default.fetch(url, {
     method: "POST",
     headers: {
@@ -170,7 +143,6 @@ it("auth: per-repo admin endpoints reject Basic credentials and require session 
   const owner = "alice2";
   const repo = "auth-repo2";
   const token = "s3cr3t";
-  await seedOwner(owner, token);
   const seededRepo = await setupRepoForTests(env, owner, repo);
 
   const refsUrl = `https://example.com/${owner}/${repo}/admin/refs`;
@@ -179,7 +151,7 @@ it("auth: per-repo admin endpoints reject Basic credentials and require session 
   const a1 = await workerExports.default.fetch(refsUrl);
   expect(a1.status).toBe(401);
 
-  // Legacy AuthDO Basic credential is no longer accepted on repo admin.
+  // Git Basic credentials do not authorize repo admin.
   const a2 = await workerExports.default.fetch(refsUrl, {
     headers: { Authorization: basicAuth(owner, token) },
   } as any);

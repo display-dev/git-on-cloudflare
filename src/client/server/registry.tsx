@@ -3,7 +3,6 @@ import type { ReactElement } from "react";
 import { clientEntrypoints, type ClientEntrypoint } from "@/client/entrypoints";
 import { AccountPage, type AccountPageProps } from "@/client/pages/AccountPage";
 import { AdminPage, type AdminPageProps } from "@/client/pages/AdminPage";
-import { AuthPage } from "@/client/pages/AuthPage";
 import { AuthSignInPage, type AuthSignInPageProps } from "@/client/pages/AuthSignInPage";
 import { BlobPage, type BlobPageProps } from "@/client/pages/BlobPage";
 import { CommitPage, type CommitPageProps } from "@/client/pages/CommitPage";
@@ -88,12 +87,6 @@ const views: Record<string, ViewDefinition> = {
     title: "Account · git-on-cloudflare",
     clientEntrypoints: [clientEntrypoints.shell, clientEntrypoints.accountPage],
     render: renderWithProps((props: AccountPageProps) => <AccountPage {...props} />),
-  },
-  "auth-legacy": {
-    kind: "document",
-    title: "Legacy auth · git-on-cloudflare",
-    clientEntrypoints: [clientEntrypoints.shell, clientEntrypoints.authPage],
-    render: () => <AuthPage />,
   },
   admin: {
     kind: "document",

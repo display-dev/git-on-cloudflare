@@ -24,6 +24,16 @@ describe("repo task queue: malformed message handling", () => {
     expect(result.retried).toBe(false);
   });
 
+  it("removed import message kind -> ack, no retry", async () => {
+    const result = await runQueueMessage({
+      kind: "legacy-backfill",
+      userId: "user_x",
+      namespaceSlug: "ns",
+    } as never);
+    expect(result.acked).toBe(true);
+    expect(result.retried).toBe(false);
+  });
+
   it("known kind with missing required field -> ack, no retry", async () => {
     // `route-cache-sync` requires repositoryId/namespaceSlug/repoSlug/enqueuedAt.
     const result = await runQueueMessage({

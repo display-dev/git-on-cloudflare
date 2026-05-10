@@ -63,7 +63,7 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 
 - Complete Git pack protocol v2 with `ls-refs` and `fetch` commands
 - Streaming receive writes packs directly to R2 with atomic metadata commit
-- PBKDF2-SHA256 (100k iterations) for auth tokens
+- Tessera OIDC browser sessions and personal access tokens for Git pushes
 - Modern web UI with Tailwind CSS v4, React page components, and worker-side SSR
 - SQLite-backed metadata inside Durable Objects using `drizzle-orm/durable-sqlite`
 - Structured JSON logging with `LOG_LEVEL` (debug/info/warn/error)
@@ -74,59 +74,59 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 # Configure Cloudflare account
 wrangler login
 
-# Set admin token for auth UI
-wrangler secret put AUTH_ADMIN_TOKEN
+# Set session and tessera OIDC secrets
+wrangler secret put SESSION_SECRET
+wrangler secret put TESSERA_OIDC_CLIENT_SECRET
 
 # Deploy to Workers
 npm run deploy
 ```
 
-Your Git server will deploy to your configured route or to `*.workers.dev`, depending on your Wrangler configuration. Push repos, browse code, manage auth — all from the edge.
+Your Git server will deploy to your configured route or to `*.workers.dev`, depending on your Wrangler configuration. Push repos, browse code, and manage account tokens from the edge.
 
 > **Upgrading from a pre-streaming deployment?** Read `MIGRATION-STREAMING-PUSH.md` for the required deployment sequence.
 
 ## Authentication
 
-By default, repos are **completely open** — anyone can push and pull without authentication.
-
-To enable push protection, set `AUTH_ADMIN_TOKEN`:
+Authentication uses tessera OIDC for browser sessions and goc personal access tokens for Git over HTTP Basic.
 
 ```bash
 # Development
 cp .dev.vars.example .dev.vars
-# Then set AUTH_ADMIN_TOKEN in .dev.vars
 
 # Production
-wrangler secret put AUTH_ADMIN_TOKEN
+wrangler secret put SESSION_SECRET
+wrangler secret put TESSERA_OIDC_CLIENT_SECRET
 ```
 
-With auth enabled:
-
-- **Reads remain public** (clone/pull/browse)
-- **Pushes require authentication** (per-owner tokens)
-- Manage tokens at `/auth` or via API
-- Tokens use PBKDF2-SHA256 with 100k iterations
+- Public repos can be cloned and browsed anonymously when present in the route cache.
+- Private repos require a signed-in namespace member for web UI access.
+- Git pushes require a PAT with push access; HTTP Basic username must match the namespace slug.
+- Manage repositories and PATs at `/auth/account`.
 
 > [!TIP]
 > For local `vite dev` testing, you may want to configure Git credentials up front instead of waiting for an interactive prompt. Miniflare currently has a bug where some backend `401 Unauthorized` responses can surface as a `500`, which prevents Git from prompting as it normally would against a deployed Worker.
 >
-> For example, if your owner is `rachel` and your token is `testtoken`, you can send the `Authorization` header explicitly:
+> For example, if your namespace is `rachel` and your PAT is `goc_abcd1234_secret`, you can send the `Authorization` header explicitly:
 >
 > ```bash
-> git -c http.extraHeader='Authorization: Basic <base64(rachel:testtoken)>' \
+> git -c http.extraHeader='Authorization: Basic <base64(rachel:goc_abcd1234_secret)>' \
 >   push http://127.0.0.1:5173/rachel/my-repo HEAD:refs/heads/main
 > ```
 
-Admin endpoints for compaction and repository management are protected via owner Basic auth and the admin bearer token for `/auth/api/*`. An admin dashboard is available at `/:owner/:repo/admin`.
+Admin endpoints for compaction and repository management require a signed-in tessera session with namespace membership. An admin dashboard is available at `/:owner/:repo/admin`.
 
 ## Configuration
 
 Environment variables:
 
 ```bash
-AUTH_ADMIN_TOKEN=           # Optional; leave empty to disable local auth
 REPO_DO_IDLE_MINUTES=30      # Cleanup idle repos after 30 min
 LOG_LEVEL=info               # debug|info|warn|error
+SESSION_SECRET=...           # Browser session sealing secret
+TESSERA_OIDC_ISSUER=...      # tessera issuer URL
+TESSERA_OIDC_CLIENT_ID=...   # tessera client id
+TESSERA_OIDC_CLIENT_SECRET=... # tessera client secret
 ```
 
 See `.dev.vars.example` and `wrangler.jsonc` for the complete configuration.

@@ -12,9 +12,8 @@ The codebase is organized into focused modules with `index.ts` export files:
   - `pack/` - Pack assembly, indexing
 - **`/do`** - Durable Objects
   - `repo/repoDO.ts` - Repository Durable Object (per-repo authority)
-  - `auth/authDO.ts` - Authentication Durable Object
 - **`/auth`** - Authentication module
-  - `verify.ts` - Token verification
+  - Tessera OIDC, sealed browser sessions, and Git PAT verification
 - **`/cache`** - Two-tier caching system
   - UI layer caching (JSON responses)
   - Git object caching (immutable objects)
@@ -30,12 +29,11 @@ The codebase is organized into focused modules with `index.ts` export files:
   - `client/entry.tsx` - Browser entry for CSS and islands
 - **`/common`** - Shared utilities
   - `compression.ts`, `hex.ts`, `logger.ts`, `response.ts`, `stub.ts`, `progress.ts`
-- **`/registry`** - Owner/repo registry management
 - **`/routes`** - HTTP route handlers
   - `git.ts` - Git protocol endpoints (upload-pack, receive-pack)
   - `ui.ts` - Web UI routes for browsing repos
   - `auth.ts` - Authentication UI and API endpoints
-  - `admin.ts` - Admin routes for registry management
+  - `admin.ts` - Repository admin routes
 
 ## Core Components
 
@@ -55,11 +53,11 @@ The codebase is organized into focused modules with `index.ts` export files:
 - Push: the Worker writes `.pack` and `.idx` to R2, then commits refs and pack-catalog metadata atomically through typed DO RPCs. One active receive lease at a time; concurrent pushes receive `503 Retry-After: 10`.
 - Pack metadata lives in `pack_catalog` (SQLite). Exact pack membership lives in `.idx` files in R2.
 
-### Auth DO (`src/auth/authDO.ts`)
+### Ownership And Auth
 
-- Stores owners → token hashes
-- `/verify` for Worker auth checks; `/users` for admin UI/API
-- PBKDF2-SHA256 with 100k iterations for password hashing
+- D1 stores users, namespaces, memberships, repositories, PATs, and grants.
+- Tessera OIDC signs users into sealed local browser sessions.
+- Git push uses HTTP Basic where the username matches the namespace slug and the password is a PAT with push access.
 
 ### Caching Layer (`src/cache/`)
 
@@ -75,7 +73,7 @@ The codebase is organized into focused modules with `index.ts` export files:
 - Tables:
   - `pack_catalog(pack_key, ...)` — authoritative pack metadata: key, state, tier, sequence range, object count, byte sizes, creation/supersession timestamps. Drives both read-path discovery and compaction planning.
 - Access policy: all SQLite operations must go through the DAL (`src/do/repo/db/dal.ts`). Avoid raw drizzle queries outside the DAL.
-- Registry note: owner→repo registry still uses Workers KV (`OWNER_REGISTRY`) for the web UI owner listing. Pack discovery and membership no longer use KV.
+- Repository listing and authorization come from D1. `ROUTES` KV is only a non-sensitive route candidate cache.
 
 ### Static assets and UI rendering (env.ASSETS + React SSR)
 

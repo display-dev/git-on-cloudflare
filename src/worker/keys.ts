@@ -1,11 +1,6 @@
 // Centralized helpers for building repo IDs and R2/DO key paths
 // Keep all key/prefix formats here to avoid divergence between tests and runtime.
 
-// Build a repository ID from owner + repo. Tests and routing expect "owner/repo".
-export function repoKey(owner: string, repo: string): string {
-  return `${owner}/${repo}`;
-}
-
 // Compute the Durable Object R2 prefix for a given DO instance ID.
 // DO-backed data in R2 is stored under: "do/<durable-object-id>/..."
 export function doPrefix(doId: string): string {

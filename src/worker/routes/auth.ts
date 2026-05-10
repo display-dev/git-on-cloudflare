@@ -1,12 +1,4 @@
-import {
-  createLogger,
-  getAuthStub,
-  getBearerToken,
-  json,
-  newPrefixedId,
-  tooManyAttempts,
-  unauthorizedBearer,
-} from "@/worker/common";
+import { createLogger, json, newPrefixedId, type Logger } from "@/worker/common";
 import { isJsonObject, safeParseJsonRequest } from "@/shared/web";
 import { validateSlugForRoute } from "@/shared/slugs";
 import { createDb, type Db } from "@/worker/db/d1/client";
@@ -65,7 +57,7 @@ import {
 } from "@/worker/auth/pat";
 import type { AppContext, AppRouter } from "./hono";
 import { renderUiDocumentResponse } from "./uiResponse";
-import type { LegacyBackfillMessage, RouteCacheSyncMessage } from "@/worker/tasks/queue";
+import type { RouteCacheSyncMessage } from "@/worker/tasks/queue";
 import type { TokensIslandSummary } from "@/client/islands/tokens";
 
 // Best-effort enqueue of a `route-cache-sync` task after a D1 mutation that
@@ -74,7 +66,7 @@ import type { TokensIslandSummary } from "@/client/islands/tokens";
 // queue drains, so a send failure is logged but does not fail the request.
 function enqueueRouteCacheSync(
   c: AppContext,
-  log: ReturnType<typeof createLogger>,
+  log: Logger,
   payload: { repositoryId: string; namespaceSlug: string; repoSlug: string }
 ): void {
   const message: RouteCacheSyncMessage = {
@@ -289,7 +281,6 @@ export function registerAuthRoutes(router: AppRouter) {
     //   2. If new + valid pref-name, attempt namespace claim; can lose race.
     //   3. If claim won, create membership.
     //   4. Always create a sealed local session cookie.
-    //   5. If claim won, enqueue legacy backfill (best effort via waitUntil).
     //
     // We deliberately run these as three sequential D1 writes instead of one
     // `db.batch()`. The branches are mutually dependent on prior results:
@@ -356,25 +347,6 @@ export function registerAuthRoutes(router: AppRouter) {
       return errorRedirect(c, "session_create_failed");
     }
     clearOidcTransactionCookie(c);
-
-    if (claimedNamespaceSlug) {
-      const message: LegacyBackfillMessage = {
-        kind: "legacy-backfill",
-        userId,
-        namespaceSlug: claimedNamespaceSlug,
-      };
-      // Best-effort: queue failure must not fail login. Replay via the
-      // dashboard if the operator notices missing imports.
-      c.executionCtx.waitUntil(
-        c.env.REPO_TASKS_QUEUE.send(message).catch((error) =>
-          log.warn("oidc:callback-backfill-enqueue-failed", {
-            userId,
-            namespaceSlug: claimedNamespaceSlug,
-            error: String(error),
-          })
-        )
-      );
-    }
 
     log.info("oidc:callback-success", { userId, claimedNamespaceSlug });
     return safeRedirect(c, "/auth/account");
@@ -613,10 +585,9 @@ export function registerAuthRoutes(router: AppRouter) {
     }
     const now = Date.now();
     const repositoryId = newPrefixedId("repo");
-    // `doName` for fresh repos uses `repo:<id-suffix>`; legacy backfilled
-    // rows keep the historical `<owner>/<repo>` form. The colon namespace
-    // prevents future collisions if a namespace ever uses dashes that look
-    // like `<owner>/<repo>`.
+    // Fresh repositories use an opaque RepoDO storage identity. Existing D1
+    // rows may store a slash-shaped `doName`, so the `repo:` prefix keeps new
+    // identities unambiguous without inspecting URL slugs.
     const doName = `repo:${repositoryId.slice("repo_".length)}`;
     const inserted = await insertRepositoryIfNew(db, {
       id: repositoryId,
@@ -759,125 +730,6 @@ export function registerAuthRoutes(router: AppRouter) {
     }
     // Re-revoke is idempotent; surface as a 200 but record it for visibility.
     log.debug("pat:revoke-already-revoked", { userId: viewer.userId, patId });
-    return json({ ok: true });
-  });
-
-  // Render the legacy AuthDO admin island under its new path so /auth can
-  // host the tessera sign-in page. The JSON management API at
-  // /auth/api/users keeps its current path for operator scripts/tests.
-  router.get(`/auth/legacy`, async (c) => {
-    try {
-      return await renderUiDocumentResponse(
-        c.env,
-        "auth-legacy",
-        {},
-        {
-          failureBody: "Failed to render page\n",
-          viewer: await loadViewer(c),
-        }
-      );
-    } catch {
-      return new Response("Failed to render page\n", { status: 500 });
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // Legacy AuthDO admin JSON. Tests still exercise these endpoints; do not
-  // change their paths or behavior here; the legacy admin UI lives at
-  // /auth/legacy.
-
-  // List users
-  router.get(`/auth/api/users`, async (c) => {
-    const request = c.req.raw;
-    const stub = getAuthStub(c.env);
-    if (!stub) return new Response("Not configured\n", { status: 501 });
-    const provided = getBearerToken(request);
-    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
-    const auth = await stub.adminAuthorizeOrRateLimit(provided, clientIp);
-    if (!auth.ok) {
-      if (auth.status === 401) return unauthorizedBearer();
-      if (auth.status === 429) return tooManyAttempts(auth.retryAfter);
-      return unauthorizedBearer();
-    }
-    try {
-      const users = await stub.getUsers();
-      return json({ users });
-    } catch {
-      return json({ users: [] });
-    }
-  });
-
-  // Create user
-  router.post(`/auth/api/users`, async (c) => {
-    const request = c.req.raw;
-    const stub = getAuthStub(c.env);
-    if (!stub) return new Response("Not configured\n", { status: 501 });
-    const provided = getBearerToken(request);
-    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
-    const auth = await stub.adminAuthorizeOrRateLimit(provided, clientIp);
-    if (!auth.ok) {
-      if (auth.status === 401) return unauthorizedBearer();
-      if (auth.status === 429) return tooManyAttempts(auth.retryAfter);
-      return unauthorizedBearer();
-    }
-    const input = await safeParseJsonRequest(request);
-    const owner = isJsonObject(input) && typeof input.owner === "string" ? input.owner.trim() : "";
-    const token =
-      isJsonObject(input) && typeof input.token === "string" && input.token
-        ? input.token
-        : undefined;
-    const tokens =
-      isJsonObject(input) && Array.isArray(input.tokens)
-        ? input.tokens.filter((value): value is string => typeof value === "string")
-        : undefined;
-    if (!owner || (!token && !tokens)) {
-      return json({ error: "owner and token(s) required" }, 400);
-    }
-    const toAdd: string[] = [];
-    if (token) toAdd.push(token);
-    if (tokens) toAdd.push(...tokens);
-    const res = await stub.addTokens(owner, toAdd);
-    return json(res);
-  });
-
-  // Delete user
-  router.delete(`/auth/api/users`, async (c) => {
-    const request = c.req.raw;
-    const stub = getAuthStub(c.env);
-    if (!stub) return new Response("Not configured\n", { status: 501 });
-    const provided = getBearerToken(request);
-    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
-    const auth = await stub.adminAuthorizeOrRateLimit(provided, clientIp);
-    if (!auth.ok) {
-      if (auth.status === 401) return unauthorizedBearer();
-      if (auth.status === 429) return tooManyAttempts(auth.retryAfter);
-      return unauthorizedBearer();
-    }
-    const input = await safeParseJsonRequest(request);
-    const owner = isJsonObject(input) && typeof input.owner === "string" ? input.owner.trim() : "";
-    const token =
-      isJsonObject(input) && typeof input.token === "string" && input.token
-        ? input.token
-        : undefined;
-    const tokenHash =
-      isJsonObject(input) && typeof input.tokenHash === "string" && input.tokenHash
-        ? input.tokenHash
-        : undefined;
-    if (!owner) {
-      return json({ error: "owner required" }, 400);
-    }
-    if (!token && !tokenHash) {
-      await stub.deleteOwner(owner);
-      return json({ ok: true });
-    }
-    if (tokenHash) {
-      await stub.deleteTokenByHash(owner, tokenHash);
-      return json({ ok: true });
-    }
-    if (token) {
-      await stub.deleteToken(owner, token);
-      return json({ ok: true });
-    }
     return json({ ok: true });
   });
 }

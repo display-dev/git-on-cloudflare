@@ -156,6 +156,26 @@ describe("resolveRepositoryRoute", () => {
     expect(route?.repositoryId).toBe(REPO_ID);
   });
 
+  it("returns null in cache-only mode when KV misses even if D1 has the row", async () => {
+    const route = await resolveRepositoryRoute(env, NAMESPACE_SLUG, REPO_SLUG, {
+      mode: "route-cache-only",
+    });
+    expect(route).toBeNull();
+  });
+
+  it("returns null in cache-only mode when the cached record is stale", async () => {
+    await putRouteCacheRecord(env, NAMESPACE_SLUG, REPO_SLUG, {
+      repositoryId: "ghost-id",
+      namespaceId: NAMESPACE_ID,
+      doName: DO_NAME,
+      updatedAt: Date.now(),
+    });
+    const route = await resolveRepositoryRoute(env, NAMESPACE_SLUG, REPO_SLUG, {
+      mode: "route-cache-only",
+    });
+    expect(route).toBeNull();
+  });
+
   it("returns null when the namespace slug does not exist", async () => {
     expect(await resolveRepositoryRoute(env, "nope", REPO_SLUG)).toBeNull();
   });

@@ -1,10 +1,6 @@
 # Local development values used by `wrangler types`.
 # Copy this file to `.dev.vars` and replace placeholders as needed.
 
-# Leave empty to keep optional auth disabled locally. Set a secret value to
-# enable push/admin auth while developing.
-AUTH_ADMIN_TOKEN=
-
 # Repo Durable Object idle cleanup threshold in minutes.
 REPO_DO_IDLE_MINUTES=30
 

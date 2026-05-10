@@ -1,6 +1,7 @@
 import type { HeadInfo, Ref } from "@/worker/git";
 import { getRepoActivity, getRepoStub } from "@/worker/common";
 import { isValidOwnerRepo } from "@/shared/web";
+import { loadViewer } from "@/worker/auth/session";
 import { loadSessionMembership } from "@/worker/auth/sessionMembership";
 import { resolveRepositoryRoute } from "@/worker/repositories/route";
 import { getLimiter } from "@/worker/git/operations/limits";
@@ -38,11 +39,14 @@ export async function handleAdminPage(c: AppContext<"/:owner/:repo/admin">) {
     return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
   }
 
-  const route = await resolveRepositoryRoute(env, owner, repo);
+  const viewerForResolution = await loadViewer(c);
+  const route = await resolveRepositoryRoute(env, owner, repo, {
+    mode: viewerForResolution ? "allow-d1-fallback" : "route-cache-only",
+  });
   if (!route) return await notFound(c);
 
-  // Browser admin requires a tessera session + namespace membership. PATs
-  // and AuthDO Basic credentials are deliberately never accepted here.
+  // Browser admin requires a tessera session + namespace membership. Git
+  // credentials are deliberately never accepted here.
   const membership = await loadSessionMembership(c, route.namespaceId);
   if (membership.kind === "anonymous") {
     // Don't disclose the existence of a private repo to anonymous browsers.

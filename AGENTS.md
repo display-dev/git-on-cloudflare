@@ -121,7 +121,7 @@ Write changes against the current source tree, not the docs alone. Some document
 - `RepoDurableObject.fetch()` intentionally exposes only a small HTTP surface. Keep typed RPC methods as the default internal interface.
 - Receive uses a lease model: one active receive lease at a time, acquired via `beginReceive()` and committed via `finalizeReceive()`. Concurrent pushes receive `503 Retry-After: 10`.
 - Git fetch paths are streaming-sensitive. Avoid unnecessary buffering on upload-pack and pack assembly paths.
-- Push auth is optional by configuration. Do not accidentally require auth when `AUTH_ADMIN_TOKEN` is unset.
+- Git pushes require a D1-backed PAT with `level = "push"`; HTTP Basic username must match the route namespace slug.
 - UI rendering goes through `renderUiView()` and the view registry in `src/client/server/registry.tsx`. New pages should plug into that system rather than inventing a parallel renderer.
 
 ## Normal Workflow For Agents
@@ -163,7 +163,7 @@ npm run format
 
 `npm run test:workers` runs Vitest against Cloudflare worker integration tests.
 
-`npm run test:auth` runs only `test/auth.worker.test.ts` with `AUTH_ADMIN_TOKEN` enabled in the Vitest pool bindings.
+`npm run test:auth` runs only `test/auth.worker.test.ts`.
 
 The 42 MiB pack-indexer fixture test is opt-in. Use `PACK_INDEXER_FIXTURE=1 npx vitest run --config vitest.config.ts test/pack-indexer-fixture.worker.test.ts` when you intentionally want to run it.
 

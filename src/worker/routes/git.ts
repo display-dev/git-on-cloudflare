@@ -17,7 +17,12 @@ import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
 import { isRequestPrivate, markRequestPrivate, responseCacheControl } from "@/worker/cache/policy";
 import { isValidOwnerRepo } from "@/shared/web";
 import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
-import { authenticateGitRequest, scheduleTouchPatLastUsedAt } from "@/worker/auth/gitAuth";
+import {
+  authenticateGitRequest,
+  getBasicCredentials,
+  scheduleTouchPatLastUsedAt,
+  type GitAuthResult,
+} from "@/worker/auth/gitAuth";
 import { createDb } from "@/worker/db/d1/client";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
 import { requestCacheContext } from "./ui/helpers";
@@ -225,14 +230,41 @@ function validateRouteSlugs(owner: string, repo: string): boolean {
   return isValidOwnerRepo(owner) && isValidOwnerRepo(repo);
 }
 
+function gitRequestAllowsD1Fallback(request: Request): boolean {
+  const credentials = getBasicCredentials(request);
+  return credentials !== null && credentials.password.length > 0;
+}
+
+async function resolveGitRoute(
+  c: AppContext,
+  owner: string,
+  repo: string
+): Promise<RepositoryRoute | null> {
+  return await resolveRepositoryRoute(c.env, owner, repo, {
+    mode: gitRequestAllowsD1Fallback(c.req.raw) ? "allow-d1-fallback" : "route-cache-only",
+  });
+}
+
+function gateD1FallbackGitAuth(
+  c: AppContext,
+  route: RepositoryRoute,
+  auth: GitAuthResult
+): Response | null {
+  if (route.source !== "d1") return null;
+  if (auth.kind === "pat") return null;
+  const log = createLogger(c.env.LOG_LEVEL, { service: "GitAcl", repoId: route.doName });
+  if (auth.kind === "pat-rejected" && auth.reason === "grant-missing") {
+    log.info("git-acl:d1-fallback-grant-missing", { reason: auth.reason });
+    return forbidden();
+  }
+  log.info("git-acl:d1-fallback-unauthorized", { reason: auth.kind });
+  return basicChallenge();
+}
+
 // Decide whether a Git read (info-refs upload-pack, git-upload-pack) is
 // allowed for the resolved route given the authenticated principal. Returns
 // `null` when allowed, otherwise the response to send.
-function gateGitRead(
-  c: AppContext,
-  route: RepositoryRoute,
-  auth: Awaited<ReturnType<typeof authenticateGitRequest>>
-): Response | null {
+function gateGitRead(c: AppContext, route: RepositoryRoute, auth: GitAuthResult): Response | null {
   if (route.visibility === "public") return null;
   const log = createLogger(c.env.LOG_LEVEL, { service: "GitAcl", repoId: route.doName });
   switch (auth.kind) {
@@ -266,7 +298,7 @@ function gateGitRead(
 async function gateGitPush(
   c: AppContext,
   route: RepositoryRoute,
-  auth: Awaited<ReturnType<typeof authenticateGitRequest>>,
+  auth: GitAuthResult,
   isDiscovery: boolean
 ): Promise<Response | null> {
   const log = createLogger(c.env.LOG_LEVEL, { service: "GitAcl", repoId: route.doName });
@@ -308,11 +340,13 @@ export function registerGitRoutes(router: AppRouter) {
     if (service !== "git-upload-pack" && service !== "git-receive-pack") {
       return new Response("Missing or unsupported service\n", { status: 400 });
     }
-    const route = await resolveRepositoryRoute(c.env, owner, repo);
+    const route = await resolveGitRoute(c, owner, repo);
     if (!route) return gitNotFound();
     const cacheCtx = requestCacheContext(c);
     if (route.visibility === "private") markRequestPrivate(cacheCtx);
     const auth = await authenticateGitRequest(c.env, c.req.raw, route);
+    const fallbackBlocked = gateD1FallbackGitAuth(c, route, auth);
+    if (fallbackBlocked) return fallbackBlocked;
     const blocked =
       service === "git-receive-pack"
         ? await gateGitPush(c, route, auth, true)
@@ -329,11 +363,13 @@ export function registerGitRoutes(router: AppRouter) {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
     if (!validateRouteSlugs(owner, repo)) return gitNotFound();
-    const route = await resolveRepositoryRoute(c.env, owner, repo);
+    const route = await resolveGitRoute(c, owner, repo);
     if (!route) return gitNotFound();
     const cacheCtx = requestCacheContext(c);
     if (route.visibility === "private") markRequestPrivate(cacheCtx);
     const auth = await authenticateGitRequest(c.env, c.req.raw, route);
+    const fallbackBlocked = gateD1FallbackGitAuth(c, route, auth);
+    if (fallbackBlocked) return fallbackBlocked;
     const blocked = gateGitRead(c, route, auth);
     if (blocked) return blocked;
     if (auth.kind === "pat") {
@@ -346,11 +382,13 @@ export function registerGitRoutes(router: AppRouter) {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
     if (!validateRouteSlugs(owner, repo)) return gitNotFound();
-    const route = await resolveRepositoryRoute(c.env, owner, repo);
+    const route = await resolveGitRoute(c, owner, repo);
     if (!route) return gitNotFound();
     const cacheCtx = requestCacheContext(c);
     markRequestPrivate(cacheCtx);
     const auth = await authenticateGitRequest(c.env, c.req.raw, route);
+    const fallbackBlocked = gateD1FallbackGitAuth(c, route, auth);
+    if (fallbackBlocked) return fallbackBlocked;
     const blocked = await gateGitPush(c, route, auth, false);
     if (blocked) return blocked;
     if (auth.kind === "pat") {

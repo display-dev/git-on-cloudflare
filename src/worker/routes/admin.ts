@@ -1,10 +1,11 @@
 import type { Viewer } from "@/client/server/viewer";
 
 import { createLogger, getRepoStub, isValidOid, json } from "@/worker/common";
+import { loadViewer } from "@/worker/auth/session";
 import { sameOriginViolation } from "@/worker/auth/origin";
 import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
 import { loadSessionMembership } from "@/worker/auth/sessionMembership";
-import { getLimiter } from "@/worker/git/operations/limits";
+import { getLimiter, type Limiter } from "@/worker/git/operations/limits";
 import { isJsonObject, safeParseJsonRequest, type JsonValue } from "@/shared/web";
 import type { RepositoryDeleteMessage } from "@/worker/tasks/queue";
 import { requestCacheContext } from "./ui/helpers";
@@ -39,13 +40,13 @@ type RepoAdminGate =
       kind: "ok";
       route: RepositoryRoute;
       viewer: Viewer;
-      limiter: ReturnType<typeof getLimiter>;
+      limiter: Limiter;
     }
   | { kind: "response"; response: Response };
 
 // Centralizes the auth + non-disclosure + CSRF policy for repo-scoped admin
-// endpoints. PATs and AuthDO Basic credentials are deliberately ignored:
-// admin is browser-session-only.
+// endpoints. Git credentials are deliberately ignored: admin is
+// browser-session-only.
 async function requireRepoAdmin(c: AppContext): Promise<RepoAdminGate> {
   // CSRF check first so a missing/cross-origin mutating request fails before
   // we read D1. `sameOriginViolation` short-circuits safe methods (GET, HEAD,
@@ -59,7 +60,10 @@ async function requireRepoAdmin(c: AppContext): Promise<RepoAdminGate> {
   if (!owner || !repo) {
     return { kind: "response", response: json({ error: "Not found" }, 404) };
   }
-  const route = await resolveRepositoryRoute(c.env, owner, repo);
+  const viewerForResolution = await loadViewer(c);
+  const route = await resolveRepositoryRoute(c.env, owner, repo, {
+    mode: viewerForResolution ? "allow-d1-fallback" : "route-cache-only",
+  });
   if (!route) {
     return { kind: "response", response: json({ error: "Not found" }, 404) };
   }
@@ -150,8 +154,8 @@ export function registerAdminRoutes(router: AppRouter) {
   // -------------------------------------------------------------------------
   // Repo-scoped admin endpoints. Auth model: tessera session + namespace
   // membership, plus same-origin for mutating verbs (`requireRepoAdmin`
-  // calls `sameOriginViolation` itself). PATs and AuthDO Basic must NOT
-  // authorize these routes.
+  // calls `sameOriginViolation` itself). Git credentials must NOT authorize
+  // these routes.
 
   router.get(`/:owner/:repo/admin/refs`, async (c) => {
     const gate = await requireRepoAdmin(c);

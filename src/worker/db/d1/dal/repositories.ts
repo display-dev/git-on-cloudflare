@@ -42,9 +42,8 @@ export async function findRepositoryByNamespaceAndSlug(
   return rows[0];
 }
 
-// Used by the legacy-backfill queue handler and (later) the repo-create
-// route. The conflict path keeps existing rows untouched, so queue replays
-// and re-runs are idempotent.
+// Used by repository creation and operator/test seeding. The conflict path
+// keeps existing rows untouched, so safe replays and re-runs are idempotent.
 export async function insertRepositoryIfNew(
   db: Db,
   row: NewRepositoryRow

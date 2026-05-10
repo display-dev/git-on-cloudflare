@@ -1,24 +1,18 @@
 import { createLogger } from "@/worker/common";
 
 import { handleCompactionDeleteMessage, handleCompactionMessage } from "./compaction";
-import { handleLegacyBackfillMessage } from "./legacyBackfill";
 import { handlePackRefBackfillMessage } from "./refBackfill";
 import { handleRouteCacheSyncMessage } from "./routeCacheSync";
 import { handleRepositoryDeleteMessage } from "./repositoryDelete";
 import { RepoTaskQueueMessageSchema, type RepoTaskQueueMessage } from "./types";
 
-export type {
-  LegacyBackfillMessage,
-  RepoTaskQueueMessage,
-  RepositoryDeleteMessage,
-  RouteCacheSyncMessage,
-} from "./types";
+export type { RepoTaskQueueMessage, RepositoryDeleteMessage, RouteCacheSyncMessage } from "./types";
 
 // The queue carries repo lifecycle work as well as maintenance: compaction,
-// pack-ref backfill, legacy ownership backfill, route-cache repair, and
-// repository deletion. Producers use the `REPO_TASKS_QUEUE` binding; the
-// physical queue name remains `git-on-cloudflare-repo-maint` for
-// continuity. Schemas live in `./types.ts`; this file dispatches.
+// pack-ref backfill, route-cache repair, and repository deletion. Producers
+// use the `REPO_TASKS_QUEUE` binding; the physical queue name remains
+// `git-on-cloudflare-repo-maint` for continuity. Schemas live in
+// `./types.ts`; this file dispatches.
 export async function handleRepoTaskQueue(
   batch: MessageBatch<RepoTaskQueueMessage>,
   env: Env,
@@ -46,9 +40,6 @@ export async function handleRepoTaskQueue(
         break;
       case "pack-ref-backfill":
         await handlePackRefBackfillMessage(message, body, env, ctx);
-        break;
-      case "legacy-backfill":
-        await handleLegacyBackfillMessage(message, body, env, ctx);
         break;
       case "route-cache-sync":
         await handleRouteCacheSyncMessage(message, body, env, ctx);

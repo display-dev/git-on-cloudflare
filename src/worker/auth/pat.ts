@@ -5,7 +5,6 @@ import {
   findPatGrantForRepo,
   type PatGrantLevel,
 } from "@/worker/db/d1/dal/tokens";
-import { findRepositoryByDoName } from "@/worker/db/d1/dal/repositories";
 import { findMembership, findNamespaceBySlug } from "@/worker/db/d1/dal/namespaces";
 
 // Parse/generate/hash/validate helpers and `verifyPat` share a single file
@@ -160,13 +159,10 @@ async function constantTimeEquals(a: string, b: string): Promise<boolean> {
 export type VerifyPatArgs = {
   username: string;
   plaintext: string;
-  // Either a target repository (for `git-receive-pack`) or namespace (for
-  // PATs scoped at the namespace). Callers from the resolver pass these
-  // explicitly; legacy/compatibility callers pass `doName` and let the
-  // verifier resolve the repo row by storage identity.
+  // Resolved route context supplies these ids before verification. The
+  // verifier does not infer repository identity from storage names.
   namespaceId?: string;
   repositoryId?: string;
-  doName?: string;
   now?: number;
 };
 
@@ -204,13 +200,6 @@ export async function verifyPat(env: Env, args: VerifyPatArgs): Promise<PatVerif
     const namespace = await findNamespaceBySlug(db, args.username);
     if (!namespace || namespace.id !== resolvedNamespaceId) {
       return { ok: false, reason: "username-mismatch" };
-    }
-  }
-
-  if (!resolvedRepositoryId && args.doName) {
-    const repository = await findRepositoryByDoName(db, args.doName);
-    if (repository && repository.namespaceId === resolvedNamespaceId) {
-      resolvedRepositoryId = repository.id;
     }
   }
 

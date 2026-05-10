@@ -44,23 +44,20 @@ git pull https://your-domain.com/owner/repo
 ### Push Operations
 
 ```bash
-# Push without auth (if AUTH_ADMIN_TOKEN not set)
-git push https://your-domain.com/owner/repo main
-
-# Push with auth (if AUTH_ADMIN_TOKEN is set)
-git push https://owner:token@your-domain.com/owner/repo main
+# Push with a personal access token that has push access
+git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
 ```
 
 - **`GET /:owner/:repo/info/refs?service=git-receive-pack`**  
   Capability advertisement for push operations.
 
 - **`POST /:owner/:repo/git-receive-pack`**  
-  Push objects. The Worker writes `.pack` and `.idx` to R2 and commits metadata atomically via DO RPCs. One active receive lease at a time; concurrent pushes receive `503 Retry-After: 10`. Requires authentication if `AUTH_ADMIN_TOKEN` is configured.
+  Push objects. The Worker writes `.pack` and `.idx` to R2 and commits metadata atomically via DO RPCs. One active receive lease at a time; concurrent pushes receive `503 Retry-After: 10`. Requires HTTP Basic credentials where the username matches `:owner` and the password is a PAT with `level: "push"`.
 
 ## Web UI Routes
 
 - **`GET /`**  
-  Home page listing all owners (if registry configured)
+  Home page
 
 - **`GET /:owner`**  
   List repositories for an owner
@@ -108,32 +105,36 @@ git push https://owner:token@your-domain.com/owner/repo main
   Returns branch/tag refs for UI dropdowns (JSON).  
   Caching: `Cache-Control: public, max-age=60`.
 
-## Authentication Management
+## Authentication And Account Management
 
 ### Web UI
 
 - **`GET /auth`**  
-  Authentication management interface
+  Tessera sign-in/account entry surface
+
+- **`GET /auth/account`**  
+  Signed-in account page for namespaces, repositories, and personal access tokens
 
 ### API Endpoints
 
-- **`GET /auth/api/users`**  
-  List all owners and their token hashes  
-  Requires: `Authorization: Bearer <AUTH_ADMIN_TOKEN>`
+- **`GET /auth/api/tokens`**  
+  List PAT metadata for the signed-in user.
 
-- **`POST /auth/api/users`**  
-  Add owner/token  
-  Body: `{ "owner": "alice", "token": "raw-token" }`  
-  Requires: `Authorization: Bearer <AUTH_ADMIN_TOKEN>`
+- **`POST /auth/api/tokens`**  
+  Create a PAT and return the plaintext token once.
 
-- **`DELETE /auth/api/users`**  
-  Remove owner or specific token  
-  Body: `{ "owner": "alice", "tokenHash": "..." }`  
-  Requires: `Authorization: Bearer <AUTH_ADMIN_TOKEN>`
+- **`DELETE /auth/api/tokens/:patId`**  
+  Revoke a PAT owned by the signed-in user.
+
+- **`POST /auth/api/repositories`**  
+  Create a repository in a namespace where the signed-in user is a member.
+
+- **`PATCH /auth/api/repositories/:repositoryId`**  
+  Update repository visibility.
 
 ## Admin Endpoints
 
-All admin endpoints require authentication with owner tokens.
+Admin endpoints require a tessera-backed browser session and namespace membership.
 
 ### Admin UI
 
@@ -155,15 +156,6 @@ All admin endpoints require authentication with owner tokens.
 - **`PUT /:owner/:repo/admin/head`**  
   Update HEAD  
   Body: `{ "target": "refs/heads/main" }`
-
-### Registry Management
-
-- **`GET /:owner/admin/registry`**  
-  List repos for owner
-
-- **`POST /:owner/admin/registry/sync`**  
-  Sync/validate repo registry  
-  Body: `{ "repos": ["repo1", "repo2"] }` (optional)
 
 ### Debug Endpoints
 

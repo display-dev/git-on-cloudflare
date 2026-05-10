@@ -401,8 +401,8 @@ type PermissionLevelTilesProps = {
 };
 
 // Single-select control over the grant level. Push includes pull by
-// construction, so the UI cannot express the "push without pull" state
-// that previously needed three layers of guards to prevent.
+// construction, so the UI cannot express an inconsistent "push without
+// pull" state.
 function PermissionLevelTiles({ level, onChange }: PermissionLevelTilesProps) {
   const tile =
     "group relative flex cursor-pointer flex-col gap-1 rounded-xl border border-zinc-300 p-4 transition-colors hover:border-zinc-400 has-[:checked]:border-accent-500 has-[:checked]:bg-accent-500/5 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent-500/40 dark:border-zinc-800/60 dark:hover:border-zinc-700";

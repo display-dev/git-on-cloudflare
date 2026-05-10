@@ -23,10 +23,21 @@ export type RepositoryRoute = {
   source: "kv" | "d1";
 };
 
+export type RepositoryRouteResolutionMode = "route-cache-only" | "allow-d1-fallback";
+
+export type RepositoryRouteResolutionOptions = {
+  // Anonymous repository serving uses only the ROUTES candidate cache so a
+  // scanner cannot force namespace/repo D1 lookups by walking arbitrary URLs.
+  // Authenticated browser and PAT paths can fall back to D1 because they
+  // already carry a principal that can be checked before data is served.
+  mode: RepositoryRouteResolutionMode;
+};
+
 export async function resolveRepositoryRoute(
   env: Env,
   namespaceSlug: string,
-  repoSlug: string
+  repoSlug: string,
+  options: RepositoryRouteResolutionOptions = { mode: "allow-d1-fallback" }
 ): Promise<RepositoryRoute | null> {
   const log = createLogger(env.LOG_LEVEL, { service: "RepoRoute" });
   const db = createDb(env.DB);
@@ -75,6 +86,11 @@ export async function resolveRepositoryRoute(
       });
     }
   }
+  if (options.mode === "route-cache-only") {
+    log.debug("route:resolve-cache-only-miss", { namespaceSlug, repoSlug });
+    return null;
+  }
+
   const namespace = await findNamespaceBySlug(db, namespaceSlug);
   if (!namespace) {
     log.debug("route:resolve-namespace-not-found", { namespaceSlug, repoSlug });

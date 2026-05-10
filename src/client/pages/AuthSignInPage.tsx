@@ -15,8 +15,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   token_exchange_failed:
     "tessera could not be reached during the token exchange. Try again, then check your network if it persists.",
   invalid_id_token: "tessera returned an ID token that did not validate. Contact your operator.",
-  oidc_unavailable:
-    "tessera sign-in is not configured for this deployment. Use the legacy admin link below if you have an admin token.",
+  oidc_unavailable: "tessera sign-in is not configured for this deployment. Contact your operator.",
   session_create_failed:
     "Could not create your session after sign-in. Try again, then check the worker logs if it persists.",
 };
@@ -53,16 +52,6 @@ export function AuthSignInPage({ errorCode }: AuthSignInPageProps) {
           </Button>
         </div>
       </Card>
-      <p className="m-0 mt-4 text-center text-xs text-zinc-500">
-        Already have a legacy admin token?{" "}
-        <a
-          href="/auth/legacy"
-          className="text-accent-600 underline decoration-zinc-300 underline-offset-2 hover:text-accent-500 dark:text-accent-400 dark:decoration-zinc-700"
-        >
-          Open the legacy admin
-        </a>
-        .
-      </p>
     </div>
   );
 }

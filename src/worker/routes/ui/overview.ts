@@ -27,8 +27,7 @@ export async function handleOwnerOverview(c: AppContext<"/:owner">) {
   const db = createDb(env.DB);
   const namespace = await findNamespaceBySlug(db, owner);
   if (!namespace) {
-    // No D1 row -> 404. Backfill is complete; legacy OWNER_REGISTRY listing
-    // is no longer the authoritative listing for owners.
+    // Namespace rows are the owner-listing authority.
     return await notFound(c);
   }
   const viewer = await loadViewer(c);

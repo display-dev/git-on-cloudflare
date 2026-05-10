@@ -34,7 +34,6 @@ Note: All SQLite access goes through the data access layer (DAL) in `src/do/repo
 
 ## Key conventions (src/keys.ts)
 
-- `repoKey(owner, repo)` → `owner/repo`
 - `doPrefix(doId)` → `do/<do-id>`
 - `r2PackKey(prefix, name)` → `do/<id>/objects/pack/<name>.pack`
 - `packIndexKey(packKey)` maps `.pack` → `.idx`

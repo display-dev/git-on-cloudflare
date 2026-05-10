@@ -43,7 +43,6 @@ export default defineConfig({
         compatibilityFlags: VITEST_POOL_COMPATIBILITY_FLAGS,
         bindings: {
           ...BASE_TEST_BINDINGS,
-          AUTH_ADMIN_TOKEN: isAuthSuite ? "admin" : "",
           PACK_INDEXER_FIXTURE: process.env.PACK_INDEXER_FIXTURE === "1" ? "1" : "",
         },
         serviceBindings: {

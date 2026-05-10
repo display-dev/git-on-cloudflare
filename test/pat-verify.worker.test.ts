@@ -89,7 +89,8 @@ describe("verifyPat", () => {
     const result = await verifyPat(env, {
       username: NAMESPACE_SLUG,
       plaintext,
-      doName: DO_NAME,
+      namespaceId: NAMESPACE_ID,
+      repositoryId: REPO_ID,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -105,7 +106,8 @@ describe("verifyPat", () => {
     const result = await verifyPat(env, {
       username: NAMESPACE_SLUG,
       plaintext,
-      doName: DO_NAME,
+      namespaceId: NAMESPACE_ID,
+      repositoryId: REPO_ID,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -160,7 +162,8 @@ describe("verifyPat", () => {
       await verifyPat(env, {
         username: "someone-else",
         plaintext,
-        doName: DO_NAME,
+        namespaceId: NAMESPACE_ID,
+        repositoryId: REPO_ID,
       })
     ).toEqual({ ok: false, reason: "username-mismatch" });
   });
@@ -171,7 +174,8 @@ describe("verifyPat", () => {
       await verifyPat(env, {
         username: NAMESPACE_SLUG,
         plaintext,
-        doName: DO_NAME,
+        namespaceId: NAMESPACE_ID,
+        repositoryId: REPO_ID,
       })
     ).toEqual({ ok: false, reason: "grant-missing" });
   });

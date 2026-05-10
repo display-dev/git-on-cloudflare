@@ -30,15 +30,6 @@ export const PackRefBackfillQueueMessageSchema = z.object({
 
 export type PackRefBackfillQueueMessage = z.infer<typeof PackRefBackfillQueueMessageSchema>;
 
-export const LegacyBackfillMessageSchema = z.object({
-  kind: z.literal("legacy-backfill"),
-  userId: z.string(),
-  namespaceSlug: z.string(),
-  cursor: z.string().optional(),
-});
-
-export type LegacyBackfillMessage = z.infer<typeof LegacyBackfillMessageSchema>;
-
 export const RouteCacheSyncMessageSchema = z.object({
   kind: z.literal("route-cache-sync"),
   repositoryId: z.string(),
@@ -66,7 +57,6 @@ export const RepoTaskQueueMessageSchema = z.discriminatedUnion("kind", [
   CompactionQueueMessageSchema,
   CompactionDeleteQueueMessageSchema,
   PackRefBackfillQueueMessageSchema,
-  LegacyBackfillMessageSchema,
   RouteCacheSyncMessageSchema,
   RepositoryDeleteMessageSchema,
 ]);

@@ -30,6 +30,21 @@ async function makeOutsider(): Promise<string> {
   return await mintSessionCookie(env, userId);
 }
 
+describe("repo page route-cache disclosure", () => {
+  it("anonymous + public repo + missing route cache -> 404", async () => {
+    const owner = `dis-route-${Math.random().toString(36).slice(2, 8)}`;
+    const repo = "site";
+    await setupRepoForTests(env, owner, repo, {
+      visibility: "public",
+      skipRouteCache: true,
+    });
+    const res = await workerExports.default.fetch(`https://example.com/${owner}/${repo}`, {
+      redirect: "manual",
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("admin UI page disclosure", () => {
   it("anonymous + private repo -> 404 (does not redirect to /auth)", async () => {
     const owner = `dis-${Math.random().toString(36).slice(2, 8)}`;
@@ -80,6 +95,20 @@ describe("admin UI page disclosure", () => {
     const owner = `dis-${Math.random().toString(36).slice(2, 8)}`;
     const repo = "site";
     const seeded = await setupRepoForTests(env, owner, repo, { visibility: "private" });
+    const res = await workerExports.default.fetch(`https://example.com/${owner}/${repo}/admin`, {
+      headers: { Cookie: seeded.cookieHeader },
+      redirect: "manual",
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("member + private repo + missing route cache -> 200", async () => {
+    const owner = `dis-${Math.random().toString(36).slice(2, 8)}`;
+    const repo = "site";
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      visibility: "private",
+      skipRouteCache: true,
+    });
     const res = await workerExports.default.fetch(`https://example.com/${owner}/${repo}/admin`, {
       headers: { Cookie: seeded.cookieHeader },
       redirect: "manual",

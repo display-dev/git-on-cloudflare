@@ -25,10 +25,6 @@
       {
         "name": "REPO_DO",
         "class_name": "RepoDurableObject"
-      },
-      {
-        "name": "AUTH_DO",
-        "class_name": "AuthDurableObject"
       }
     ]
   },
@@ -44,13 +40,15 @@
       "new_sqlite_classes": [
         "AuthDurableObject"
       ]
+    },
+    {
+      "tag": "v3",
+      "deleted_classes": [
+        "AuthDurableObject"
+      ]
     }
   ],
   "kv_namespaces": [
-    {
-      "binding": "OWNER_REGISTRY",
-      "id": "2e6769b1e1cf488d8055a7fb4ecbd0f3"
-    },
     {
       "binding": "ROUTES",
       "id": "4e471bad6c5e44ceb91c4adf5559cb44"

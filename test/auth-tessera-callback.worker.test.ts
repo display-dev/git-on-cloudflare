@@ -1,6 +1,6 @@
 import { applyD1Migrations } from "cloudflare:test";
 import { env, exports as workerExports } from "cloudflare:workers";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createDb } from "@/worker/db/d1/client";
 import {
@@ -272,100 +272,16 @@ describe("/auth/callback", () => {
     ]);
   });
 
-  // Integration coverage: the callback enqueues the legacy-backfill message
-  // via `c.executionCtx.waitUntil(env.REPO_TASKS_QUEUE.send(...))`. The
-  // Miniflare runtime delivers that message to the same worker's queue
-  // consumer (`handleRepoTaskQueue`), which writes to ROUTES KV.
-  // Polling ROUTES exercises the full producer→runtime→consumer chain
-  // without mocking — see Cloudflare's `queue-producer-integration-self`
-  // example. Negative cases bound the wait at the same ceiling as
-  // positive cases and assert ROUTES never receives a record.
-
-  it("enqueues backfill on a fresh user's namespace claim (visible via ROUTES)", async () => {
-    const slug = "queue-fresh";
-    const repo = "repo-queue-fresh";
-    await env.OWNER_REGISTRY.put(`owner:${slug}:${repo}`, "1");
-    try {
-      stubGrantWithClaims({ sub: "sub-queue-fresh", preferred_username: slug });
-      const cookie = await buildSealedCookie("state-queue-fresh", "n", "v");
-      const res = await callCallback({ state: "state-queue-fresh", cookie });
-      expect(res.status).toBe(302);
-      // `vi.waitUntil` polls until the consumer has written the route
-      // record. A 5s ceiling is well above any realistic queue-runtime
-      // delay; if it fires, treat it as a real regression.
-      const routeKey = `repo-route:v1:${slug}/${repo}`;
-      await vi.waitUntil(async () => (await env.ROUTES.get(routeKey)) !== null, {
-        timeout: 5000,
-        interval: 50,
-      });
-      const record = JSON.parse((await env.ROUTES.get(routeKey)) as string) as Record<
-        string,
-        unknown
-      >;
-      expect(record).toMatchObject({ doName: `${slug}/${repo}` });
-      // ROUTES KV must NEVER carry visibility — it stays in D1 only so KV
-      // staleness can never be an authorization source.
-      expect("visibility" in record).toBe(false);
-    } finally {
-      await env.OWNER_REGISTRY.delete(`owner:${slug}:${repo}`);
-      await env.ROUTES.delete(`repo-route:v1:${slug}/${repo}`);
-    }
-  });
-
-  it("does NOT enqueue backfill when pref-name is invalid (ROUTES stays empty)", async () => {
-    const targetSlug = "invalid-pref"; // hypothetical legacy namespace
-    const repo = "should-not-land";
-    await env.OWNER_REGISTRY.put(`owner:${targetSlug}:${repo}`, "1");
-    try {
-      stubGrantWithClaims({
-        sub: "sub-no-enqueue-invalid",
-        // Mixed case + underscore + bang fails the slug policy.
-        preferred_username: "Invalid_Slug!",
-      });
-      const cookie = await buildSealedCookie("state-no-enqueue-invalid", "n", "v");
-      expect((await callCallback({ state: "state-no-enqueue-invalid", cookie })).status).toBe(302);
-      // No positive signal to wait for; bound the wait at a small fraction
-      // of the positive-case ceiling and assert ROUTES never sees the key.
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      expect(await env.ROUTES.get(`repo-route:v1:${targetSlug}/${repo}`)).toBeNull();
-    } finally {
-      await env.OWNER_REGISTRY.delete(`owner:${targetSlug}:${repo}`);
-    }
-  });
-
-  it("does NOT enqueue backfill when pref-name is taken (ROUTES stays empty)", async () => {
-    // Seed an existing namespace owned by an unrelated user (mirrors the
-    // earlier 'creates only user+session when pref-name is taken' setup).
-    const occupantId = "user-no-enqueue-taken";
-    const takenSlug = "taken-bf";
-    const repo = "should-not-land-2";
-    const db = createDb(env.DB);
-    const schema = await import("@/worker/db/d1/schema");
-    await db.batch([
-      db.insert(schema.users).values({
-        id: occupantId,
-        tesseraSub: "sub-occupant-bf",
-        createdAt: Date.now(),
-      }),
-      db.insert(schema.namespaces).values({
-        id: "ns-taken-bf",
-        slug: takenSlug,
-        createdBy: occupantId,
-        createdAt: Date.now(),
-      }),
-    ]);
-    await env.OWNER_REGISTRY.put(`owner:${takenSlug}:${repo}`, "1");
-    try {
-      stubGrantWithClaims({
-        sub: "sub-no-enqueue-taken",
-        preferred_username: takenSlug,
-      });
-      const cookie = await buildSealedCookie("state-no-enqueue-taken", "n", "v");
-      expect((await callCallback({ state: "state-no-enqueue-taken", cookie })).status).toBe(302);
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      expect(await env.ROUTES.get(`repo-route:v1:${takenSlug}/${repo}`)).toBeNull();
-    } finally {
-      await env.OWNER_REGISTRY.delete(`owner:${takenSlug}:${repo}`);
-    }
+  it("creates a fresh namespace claim without creating route-cache entries", async () => {
+    const slug = "callback-direct";
+    const repo = "not-created-by-callback";
+    const routeKey = `repo-route:v1:${slug}/${repo}`;
+    await env.ROUTES.delete(routeKey);
+    stubGrantWithClaims({ sub: "sub-callback-direct", preferred_username: slug });
+    const cookie = await buildSealedCookie("state-callback-direct", "n", "v");
+    const res = await callCallback({ state: "state-callback-direct", cookie });
+    expect(res.status).toBe(302);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(await env.ROUTES.get(routeKey)).toBeNull();
   });
 });

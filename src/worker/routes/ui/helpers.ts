@@ -152,7 +152,10 @@ export async function resolveUiRepoAccess(
         options.responseShape === "json" ? notFoundJson() : await notFound(c, "Invalid owner/repo"),
     };
   }
-  const route = await resolveRepositoryRoute(c.env, owner, repo);
+  const viewer = await loadViewer(c);
+  const route = await resolveRepositoryRoute(c.env, owner, repo, {
+    mode: viewer ? "allow-d1-fallback" : "route-cache-only",
+  });
   if (!route) {
     return {
       kind: "response",
@@ -160,8 +163,15 @@ export async function resolveUiRepoAccess(
     };
   }
   if (route.visibility === "public") {
-    const viewer = await loadViewer(c);
     return { kind: "ok", route, cacheCtx, viewer };
+  }
+  if (!viewer) {
+    const log = createLogger(c.env.LOG_LEVEL, { service: "UiAcl", repoId: route.doName });
+    log.debug("ui-acl:private-non-member-404", { kind: "anonymous" });
+    return {
+      kind: "response",
+      response: options.responseShape === "json" ? notFoundJson() : await notFound(c),
+    };
   }
   // Private: gate on session membership. PAT credentials are never honored
   // for UI/data routes (PATs are git-only).

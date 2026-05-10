@@ -24,10 +24,7 @@ function AnonymousNav({ currentView }: { currentView?: string }) {
   // Single primary call-to-action: the impeccable.md "confident restraint"
   // principle says avoid extra nav noise on the anonymous header.
   return (
-    <a
-      href="/auth"
-      className={navLinkClass(currentView === "auth-signin" || currentView === "auth-legacy")}
-    >
+    <a href="/auth" className={navLinkClass(currentView === "auth-signin")}>
       <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
       Sign in
     </a>

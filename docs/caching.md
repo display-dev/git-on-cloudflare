@@ -10,16 +10,16 @@ Caches JSON responses for web UI operations. Keys are synthetic same-origin GET 
 
 - **HEAD/refs**: 60 seconds
   - Repository refs and HEAD state
-  - Key path: `/_cache/refs?repo=<owner/repo>`
+  - Key path: `/_cache/refs?repo=<doName>`
 - **Tree listings / blob metadata**: 60s for trees, 300s for blob metadata (TTL depends on result type)
   - Directory contents (trees) and small blob previews
-  - Key path: `/_cache/tree?repo=<owner/repo>&ref=<ref>&path=<path>`
+  - Key path: `/_cache/tree?repo=<doName>&ref=<ref>&path=<path>`
 - **README content**: 5 minutes
   - Rendered README markdown (raw markdown is rendered client-side)
-  - Key path: `/_cache/readme?repo=<owner/repo>&ref=<ref>`
+  - Key path: `/_cache/readme?repo=<doName>&ref=<ref>`
 - **Commits**: Variable TTL
   - Branch commits: 60 seconds; Tag/OID commits: 1 hour (immutable)
-  - Key path: `/_cache/commits?repo=<owner/repo>&ref=<ref>&page=<n>`
+  - Key path: `/_cache/commits?repo=<doName>&ref=<ref>&page=<n>`
 
 ### 2. Git Object Cache (`git-on-cf:objects`)
 
