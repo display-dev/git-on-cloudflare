@@ -2,19 +2,12 @@ import type { HeadInfo, Ref } from "@/worker/git";
 import { readPath } from "@/worker/git";
 import { classifyRef, formatRefOption, shortRefName } from "@/shared/git/ref-display";
 import { isValidOwnerRepo, bytesToText } from "@/shared/web";
-import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
+import { buildCacheKeyFrom, cacheOrLoadJSONForRequest } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
-import { createDb } from "@/worker/db/d1/client";
 import { findNamespaceBySlug } from "@/worker/db/d1/dal/namespaces";
 import { listRepositoriesForNamespace } from "@/worker/db/d1/dal/repositories";
 import { loadViewer } from "@/worker/auth/session";
-import {
-  badRequest,
-  isRequestPrivate,
-  loadHeadAndRefsCached,
-  notFound,
-  resolveUiRepoAccess,
-} from "./helpers";
+import { badRequest, loadHeadAndRefsCached, notFound, resolveUiRepoAccess } from "./helpers";
 import type { AppContext } from "../hono";
 import { renderUiDocumentResponse } from "../uiResponse";
 
@@ -24,7 +17,7 @@ export async function handleOwnerOverview(c: AppContext<"/:owner">) {
   if (!isValidOwnerRepo(owner)) {
     return badRequest(env, "Invalid owner", "Owner contains invalid characters or length");
   }
-  const db = createDb(env.DB);
+  const db = c.var.db;
   const namespace = await findNamespaceBySlug(db, owner);
   if (!namespace) {
     // Namespace rows are the owner-listing authority.
@@ -41,7 +34,7 @@ export async function handleOwnerOverview(c: AppContext<"/:owner">) {
       owner,
       repos: repos.map((row) => ({
         slug: row.slug,
-        visibility: row.visibility as "public" | "private",
+        visibility: row.visibility,
       })),
     },
     {
@@ -101,21 +94,16 @@ export async function handleRepoOverview(c: AppContext<"/:owner/:repo">) {
     }
   };
 
-  let readmeData: { md: string } | null;
-  if (isRequestPrivate(cacheCtx)) {
-    readmeData = await readReadme();
-  } else {
-    const cacheKeyReadme = buildCacheKeyFrom(c.req.raw, "/_cache/readme", {
-      repo: repoId,
-      ref: refShort,
-    });
-    readmeData = await cacheOrLoadJSON<{ md: string }>(
-      cacheKeyReadme,
-      readReadme,
-      300,
-      c.executionCtx
-    );
-  }
+  const cacheKeyReadme = buildCacheKeyFrom(c.req.raw, "/_cache/readme", {
+    repo: repoId,
+    ref: refShort,
+  });
+  const readmeData = await cacheOrLoadJSONForRequest<{ md: string }>(
+    cacheCtx,
+    cacheKeyReadme,
+    readReadme,
+    300
+  );
   const readmeMd = readmeData?.md || "";
   const progress = await getRepoActivity(env, repoId, cacheCtx);
 

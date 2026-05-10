@@ -10,7 +10,7 @@ import { readTree, isTreeMode, joinTreePath } from "./tree";
 import { readCommitInfo } from "./commits";
 import { readBlob } from "./objects";
 import { bytesToText, detectBinary } from "@/shared/web";
-import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
+import { buildCacheKeyFrom, cacheOrLoadJSONForRequestWithTTL } from "@/worker/cache";
 
 export async function listCommitChangedFiles(
   env: Env,
@@ -416,25 +416,16 @@ async function loadCommitDiffResultCached(
   if (!cacheCtx) {
     return await listCommitChangedFiles(env, repoId, oid);
   }
-  // Honor the visibility-aware bypass flags: private routes set both
-  // `no-cache-read` and `no-cache-write` so a public-then-private repo
-  // cannot serve a stale `/_cache/commit-diff` entry.
-  const bypass =
-    cacheCtx.memo?.flags?.has("no-cache-read") === true ||
-    cacheCtx.memo?.flags?.has("no-cache-write") === true;
-  if (bypass) {
-    return await listCommitChangedFiles(env, repoId, oid, cacheCtx);
-  }
   const diffCacheKey = buildCacheKeyFrom(cacheCtx.req, "/_cache/commit-diff", {
     repo: repoId,
     oid,
     v: "1",
   });
-  const diff = await cacheOrLoadJSONWithTTL<CommitDiffResult>(
+  const diff = await cacheOrLoadJSONForRequestWithTTL<CommitDiffResult>(
+    cacheCtx,
     diffCacheKey,
     async () => await listCommitChangedFiles(env, repoId, oid, cacheCtx),
-    () => 86400,
-    cacheCtx.ctx
+    () => 86400
   );
   if (!diff) {
     throw new Error("Commit diff not found");

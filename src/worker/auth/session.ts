@@ -1,6 +1,5 @@
 import type { Viewer } from "@/client/server/viewer";
 import { newPrefixedId } from "@/worker/common";
-import { createDb } from "@/worker/db/d1/client";
 import { findUserById, listNamespacesForUser } from "@/worker/db/d1/dal";
 import type { UserRow } from "@/worker/db/d1/schema";
 import type { AppContext } from "@/worker/routes/hono";
@@ -169,10 +168,7 @@ export async function createSessionForUser(
   return { token };
 }
 
-// Resolve the active session from the cookie. The sealed payload supplies
-// only the user id and expiry; D1 is consulted for the current user row so
-// deleted or missing users fail closed.
-export async function readActiveSession(c: AppContext): Promise<ActiveSession | null> {
+async function readActiveSessionUncached(c: AppContext): Promise<ActiveSession | null> {
   const token = getSessionCookie(c);
   if (!token) return null;
   const config = loadSessionConfig(c.env);
@@ -180,7 +176,7 @@ export async function readActiveSession(c: AppContext): Promise<ActiveSession | 
   try {
     const unsealed = await unsealSession(config.secret, token, Date.now());
     if (!unsealed.ok) return null;
-    const user = await findUserById(createDb(c.env.DB), unsealed.payload.userId);
+    const user = await findUserById(c.var.db, unsealed.payload.userId);
     if (!user) return null;
     return { user, payload: unsealed.payload };
   } catch {
@@ -188,16 +184,35 @@ export async function readActiveSession(c: AppContext): Promise<ActiveSession | 
   }
 }
 
+// Resolve the active session from the cookie. The sealed payload supplies
+// only the user id and expiry; D1 is consulted for the current user row so
+// deleted or missing users fail closed. The in-flight promise is stored on
+// the request context so multiple access checks share one decrypt + D1 read.
+export async function readActiveSession(c: AppContext): Promise<ActiveSession | null> {
+  const cached = c.var.activeSessionPromise;
+  if (cached) return await cached;
+  const promise = readActiveSessionUncached(c);
+  c.set("activeSessionPromise", promise);
+  return await promise;
+}
+
 // Lift an active session into a Viewer, resolving the user's primary
 // namespace (if any). Used by route handlers that need to render the
 // signed-in shell or gate access to /auth/account.
 export async function loadViewer(c: AppContext): Promise<Viewer | null> {
+  const cached = c.var.viewerPromise;
+  if (cached) return await cached;
+  const promise = loadViewerUncached(c);
+  c.set("viewerPromise", promise);
+  return await promise;
+}
+
+async function loadViewerUncached(c: AppContext): Promise<Viewer | null> {
   const active = await readActiveSession(c);
   if (!active) return null;
   let primaryNamespaceSlug: string | undefined;
   try {
-    const db = createDb(c.env.DB);
-    const namespaces = await listNamespacesForUser(db, active.user.id);
+    const namespaces = await listNamespacesForUser(c.var.db, active.user.id);
     primaryNamespaceSlug = namespaces[0]?.slug;
   } catch {
     primaryNamespaceSlug = undefined;
@@ -210,6 +225,9 @@ export async function loadViewer(c: AppContext): Promise<Viewer | null> {
 // revocation store; rotating SESSION_SECRET is the coarse invalidation tool.
 export async function endSession(c: AppContext): Promise<void> {
   clearSessionCookie(c);
+  const signedOut = Promise.resolve(null);
+  c.set("activeSessionPromise", signedOut);
+  c.set("viewerPromise", signedOut);
 }
 
 export function generateUserId(): string {

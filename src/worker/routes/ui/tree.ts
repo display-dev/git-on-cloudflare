@@ -10,7 +10,7 @@ import {
 } from "@/shared/web";
 import { renderUiView } from "@/client/server/render";
 import { handleError } from "@/client/server/error";
-import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
+import { buildCacheKeyFrom, cacheOrLoadJSONForRequestWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { badRequest, isRequestPrivate, resolveUiRepoAccess } from "./helpers";
 import type { AppContext } from "../hono";
@@ -53,22 +53,17 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
       return null;
     }
   };
-  let result: ReadPathResult | null;
-  if (isPrivate) {
-    result = await loadTree();
-  } else {
-    const cacheKeyTree = buildCacheKeyFrom(c.req.raw, "/_cache/tree", {
-      repo: repoId,
-      ref,
-      path,
-    });
-    result = await cacheOrLoadJSONWithTTL<ReadPathResult | null>(
-      cacheKeyTree,
-      loadTree,
-      (value) => (value && value.type === "tree" ? 60 : 300),
-      c.executionCtx
-    );
-  }
+  const cacheKeyTree = buildCacheKeyFrom(c.req.raw, "/_cache/tree", {
+    repo: repoId,
+    ref,
+    path,
+  });
+  const result = await cacheOrLoadJSONForRequestWithTTL<ReadPathResult | null>(
+    cacheCtx,
+    cacheKeyTree,
+    loadTree,
+    (value) => (value && value.type === "tree" ? 60 : 300)
+  );
 
   // Handle missing tree/blob result gracefully (path not found inside an
   // existing repo). Repo-not-found is already handled by `resolveUiRepoAccess`

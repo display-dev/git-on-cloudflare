@@ -51,7 +51,7 @@ export async function buildSelection(
 
   const resolveStart = Date.now();
 
-  // --- Phase A: resolve all needed OIDs to (packSlot, entryIndex) ----------
+  // Resolve all needed OIDs to their selected pack slot and entry index.
   for (const oid of neededOids) {
     if (options?.signal?.aborted) return undefined;
 
@@ -149,14 +149,14 @@ export async function buildSelection(
     return true;
   }
 
-  // --- Phase B: sort once, read headers in offset order
+  // Sort once, then read object headers in offset order.
   // Sorting by (packSlot, offset) maximizes SequentialReader locality.
   const sortedSels = buildSortedIndex(table.count);
   let secondaryQueue: number[] = [];
 
   if (!(await processHeaderBatch(sortedSels))) return undefined;
 
-  // --- Phase C: chase delta bases until no new bases are discovered
+  // Chase delta bases until no new bases are discovered.
   let baseChaseIterations = 0;
   if (!(await drainSecondaryQueue())) return undefined;
 

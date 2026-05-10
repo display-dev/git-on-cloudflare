@@ -10,6 +10,7 @@
 import { asBodyInit } from "@/worker/common/webtypes";
 import type { IdxView, PackCatalogRow, PackedObjectResult } from "@/worker/git/object-store/types";
 import type { PackRefView, PackRefViewLoadResult } from "@/worker/git/pack/refIndex";
+import { isRequestPrivate } from "./policy";
 
 const CACHE_NAME_JSON = "git-on-cf:json";
 const CACHE_NAME_OBJECTS = "git-on-cf:objects";
@@ -297,6 +298,23 @@ export async function cacheOrLoadJSON<T>(
 }
 
 /**
+ * Request-aware JSON cache helper. Private request contexts bypass the
+ * shared Workers Cache entirely; public contexts delegate to the existing
+ * cache helper so cache keys and TTL semantics stay unchanged.
+ */
+export async function cacheOrLoadJSONForRequest<T>(
+  cacheCtx: CacheContext,
+  cacheKey: Request,
+  loader: () => Promise<T | null>,
+  ttl: number
+): Promise<T | null> {
+  if (isRequestPrivate(cacheCtx)) {
+    return await loader();
+  }
+  return await cacheOrLoadJSON(cacheKey, loader, ttl, cacheCtx.ctx);
+}
+
+/**
  * Variant of cacheOrLoadJSON where the TTL depends on the loaded value.
  * Useful when the response type determines TTL (e.g., tree listings vs blob metadata).
  */
@@ -320,4 +338,21 @@ export async function cacheOrLoadJSONWithTTL<T>(
   if (ctx) ctx.waitUntil(savePromise);
   else savePromise.catch(() => {});
   return result;
+}
+
+/**
+ * Request-aware TTL variant. The loader still runs for private requests,
+ * but no shared-cache read or write is attempted for membership-derived or
+ * otherwise sensitive data.
+ */
+export async function cacheOrLoadJSONForRequestWithTTL<T>(
+  cacheCtx: CacheContext,
+  cacheKey: Request,
+  loader: () => Promise<T | null>,
+  ttlResolver: (value: T) => number
+): Promise<T | null> {
+  if (isRequestPrivate(cacheCtx)) {
+    return await loader();
+  }
+  return await cacheOrLoadJSONWithTTL(cacheKey, loader, ttlResolver, cacheCtx.ctx);
 }

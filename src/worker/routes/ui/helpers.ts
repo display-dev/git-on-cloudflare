@@ -7,12 +7,12 @@ import { getHeadAndRefs } from "@/worker/git";
 import { shortRefName } from "@/shared/git/ref-display";
 import { formatSize, HttpError, isValidOwnerRepo } from "@/shared/web";
 import { handleError } from "@/client/server/error";
-import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
+import { buildCacheKeyFrom, cacheOrLoadJSONForRequest } from "@/worker/cache";
 import { isRequestPrivate, markRequestPrivate } from "@/worker/cache/policy";
 import { loadSessionMembership } from "@/worker/auth/sessionMembership";
 import { loadViewer } from "@/worker/auth/session";
 import { createLogger } from "@/worker/common/logger";
-import { countSubrequest, getLimiter } from "@/worker/git/operations/limits";
+import { countSubrequest, getLimiter, type Limiter } from "@/worker/git/operations/limits";
 import { packRefsKey } from "@/worker/keys";
 import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
 import type { AppContext } from "@/worker/routes/hono";
@@ -58,10 +58,6 @@ export function formatFromNowShort(deltaMs: number): string {
   return `in ${s}s`;
 }
 
-export function requestCacheContext(c: AppContext): CacheContext {
-  return { req: c.req.raw, ctx: c.executionCtx };
-}
-
 // Re-export the cache-policy predicates so existing UI handlers don't need
 // to know they live in the cache layer. The lower Git/protocol modules
 // import directly from `@/worker/cache/policy`.
@@ -80,15 +76,12 @@ export async function loadHeadAndRefsCached(
       return null;
     }
   };
-  if (isRequestPrivate(cacheCtx)) {
-    return await loader();
-  }
   const cacheKeyRefs = buildCacheKeyFrom(cacheCtx.req, "/_cache/refs", { repo: repoId });
-  return cacheOrLoadJSON<{ head: HeadInfo | undefined; refs: Ref[] }>(
+  return cacheOrLoadJSONForRequest<{ head: HeadInfo | undefined; refs: Ref[] }>(
+    cacheCtx,
     cacheKeyRefs,
     loader,
-    60,
-    cacheCtx.ctx
+    60
   );
 }
 
@@ -133,6 +126,10 @@ export type UiRepoAccess =
   | { kind: "ok"; route: RepositoryRoute; cacheCtx: CacheContext; viewer: Viewer | null }
   | { kind: "response"; response: Response };
 
+export type AdminRepoAccess =
+  | { kind: "ok"; route: RepositoryRoute; cacheCtx: CacheContext; viewer: Viewer; limiter: Limiter }
+  | { kind: "response"; response: Response };
+
 export type UiRepoAccessOptions = {
   // For data-API endpoints that return JSON (not HTML) on failure.
   responseShape?: "html" | "json";
@@ -144,7 +141,7 @@ export async function resolveUiRepoAccess(
   repo: string,
   options: UiRepoAccessOptions = {}
 ): Promise<UiRepoAccess> {
-  const cacheCtx = requestCacheContext(c);
+  const cacheCtx = c.var.cacheCtx;
   if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
     return {
       kind: "response",
@@ -155,6 +152,8 @@ export async function resolveUiRepoAccess(
   const viewer = await loadViewer(c);
   const route = await resolveRepositoryRoute(c.env, owner, repo, {
     mode: viewer ? "allow-d1-fallback" : "route-cache-only",
+    db: c.var.db,
+    log: c.var.logFor({ service: "RepoRoute" }),
   });
   if (!route) {
     return {
@@ -166,7 +165,7 @@ export async function resolveUiRepoAccess(
     return { kind: "ok", route, cacheCtx, viewer };
   }
   if (!viewer) {
-    const log = createLogger(c.env.LOG_LEVEL, { service: "UiAcl", repoId: route.doName });
+    const log = c.var.logFor({ service: "UiAcl", repoId: route.doName });
     log.debug("ui-acl:private-non-member-404", { kind: "anonymous" });
     return {
       kind: "response",
@@ -176,7 +175,7 @@ export async function resolveUiRepoAccess(
   // Private: gate on session membership. PAT credentials are never honored
   // for UI/data routes (PATs are git-only).
   const membership = await loadSessionMembership(c, route.namespaceId);
-  const log = createLogger(c.env.LOG_LEVEL, { service: "UiAcl", repoId: route.doName });
+  const log = c.var.logFor({ service: "UiAcl", repoId: route.doName });
   if (membership.kind !== "member") {
     log.debug("ui-acl:private-non-member-404", { kind: membership.kind });
     // `loadSessionMembership` returns the viewer for signed-in-non-member
@@ -193,6 +192,112 @@ export async function resolveUiRepoAccess(
   }
   markRequestPrivate(cacheCtx);
   return { kind: "ok", route, cacheCtx, viewer: membership.viewer };
+}
+
+function adminForbidden(): Response {
+  return new Response("Forbidden\n", {
+    status: 403,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+// Browser admin access is session-only. Public repositories may disclose
+// their existence, but private repositories return 404 to anonymous users
+// and signed-in non-members so the admin surface does not become a
+// membership oracle.
+export async function resolveAdminPageRepoAccess(
+  c: AppContext,
+  owner: string,
+  repo: string
+): Promise<AdminRepoAccess> {
+  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+    return {
+      kind: "response",
+      response: await badRequest(c.env, "Invalid owner/repo", "Owner or repo invalid", {
+        owner,
+        repo,
+      }),
+    };
+  }
+
+  const viewerForResolution = await loadViewer(c);
+  const route = await resolveRepositoryRoute(c.env, owner, repo, {
+    mode: viewerForResolution ? "allow-d1-fallback" : "route-cache-only",
+    db: c.var.db,
+    log: c.var.logFor({ service: "RepoRoute" }),
+  });
+  if (!route) return { kind: "response", response: await notFound(c) };
+
+  const membership = await loadSessionMembership(c, route.namespaceId);
+  if (membership.kind === "anonymous") {
+    if (route.visibility === "private") {
+      return { kind: "response", response: await notFound(c) };
+    }
+    return {
+      kind: "response",
+      response: c.redirect(`/auth?next=${encodeURIComponent(`/${owner}/${repo}/admin`)}`, 302),
+    };
+  }
+  if (membership.kind === "signed-in-non-member") {
+    if (route.visibility === "private") {
+      return { kind: "response", response: await notFound(c) };
+    }
+    return { kind: "response", response: adminForbidden() };
+  }
+
+  const cacheCtx = c.var.cacheCtx;
+  markRequestPrivate(cacheCtx);
+  return { kind: "ok", route, cacheCtx, viewer: membership.viewer, limiter: c.var.limiter };
+}
+
+function adminJsonError(message: string, status: number): Response {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+// JSON admin endpoints keep the same disclosure model as the admin page,
+// but public anonymous callers receive 401 instead of the sign-in redirect
+// and public signed-in non-members receive 403.
+export async function resolveAdminApiRepoAccess(c: AppContext): Promise<AdminRepoAccess> {
+  const owner = c.req.param("owner");
+  const repo = c.req.param("repo");
+  if (!owner || !repo || !isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+    return { kind: "response", response: adminJsonError("Not found", 404) };
+  }
+
+  const viewerForResolution = await loadViewer(c);
+  const route = await resolveRepositoryRoute(c.env, owner, repo, {
+    mode: viewerForResolution ? "allow-d1-fallback" : "route-cache-only",
+    db: c.var.db,
+    log: c.var.logFor({ service: "RepoRoute" }),
+  });
+  if (!route) return { kind: "response", response: adminJsonError("Not found", 404) };
+
+  const membership = await loadSessionMembership(c, route.namespaceId);
+  if (membership.kind === "anonymous") {
+    if (route.visibility === "private") {
+      return { kind: "response", response: adminJsonError("Not found", 404) };
+    }
+    return { kind: "response", response: adminJsonError("Unauthorized", 401) };
+  }
+  if (membership.kind === "signed-in-non-member") {
+    if (route.visibility === "private") {
+      return { kind: "response", response: adminJsonError("Not found", 404) };
+    }
+    return { kind: "response", response: adminJsonError("Forbidden", 403) };
+  }
+
+  const cacheCtx = c.var.cacheCtx;
+  markRequestPrivate(cacheCtx);
+  return { kind: "ok", route, cacheCtx, viewer: membership.viewer, limiter: c.var.limiter };
 }
 
 export function getDefaultBranchFromHead(head: HeadInfo | undefined): string {

@@ -5,7 +5,7 @@
  * including resolution and updates with consistency guarantees.
  */
 
-import type { RepoStateSchema, Head } from "./repoState";
+import type { RepoStateSchema, Head, TypedStorage } from "./repoState";
 
 import { asTypedStorage } from "./repoState";
 
@@ -85,7 +85,7 @@ export async function getHeadAndRefs(
  * @param resolved - The newly resolved HEAD value
  */
 async function updateHeadIfChanged(
-  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
+  store: TypedStorage<RepoStateSchema>,
   stored: Head | undefined,
   resolved: Head
 ): Promise<void> {

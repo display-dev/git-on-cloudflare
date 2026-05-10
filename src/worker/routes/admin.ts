@@ -1,14 +1,8 @@
-import type { Viewer } from "@/client/server/viewer";
-
-import { createLogger, getRepoStub, isValidOid, json } from "@/worker/common";
-import { loadViewer } from "@/worker/auth/session";
+import { getRepoStub, isValidOid, json } from "@/worker/common";
 import { sameOriginViolation } from "@/worker/auth/origin";
-import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
-import { loadSessionMembership } from "@/worker/auth/sessionMembership";
-import { getLimiter, type Limiter } from "@/worker/git/operations/limits";
 import { isJsonObject, safeParseJsonRequest, type JsonValue } from "@/shared/web";
 import type { RepositoryDeleteMessage } from "@/worker/tasks/queue";
-import { requestCacheContext } from "./ui/helpers";
+import { resolveAdminApiRepoAccess, type AdminRepoAccess } from "./ui/helpers";
 import type { AppContext, AppRouter } from "./hono";
 
 type RefPayload = {
@@ -35,19 +29,10 @@ function isHeadPayload(value: JsonValue | null): value is HeadPayload {
   );
 }
 
-type RepoAdminGate =
-  | {
-      kind: "ok";
-      route: RepositoryRoute;
-      viewer: Viewer;
-      limiter: Limiter;
-    }
-  | { kind: "response"; response: Response };
-
 // Centralizes the auth + non-disclosure + CSRF policy for repo-scoped admin
 // endpoints. Git credentials are deliberately ignored: admin is
 // browser-session-only.
-async function requireRepoAdmin(c: AppContext): Promise<RepoAdminGate> {
+async function requireRepoAdmin(c: AppContext): Promise<AdminRepoAccess> {
   // CSRF check first so a missing/cross-origin mutating request fails before
   // we read D1. `sameOriginViolation` short-circuits safe methods (GET, HEAD,
   // OPTIONS), so debug/list endpoints stay reachable from background tabs.
@@ -55,38 +40,7 @@ async function requireRepoAdmin(c: AppContext): Promise<RepoAdminGate> {
   if (violation) {
     return { kind: "response", response: violation };
   }
-  const owner = c.req.param("owner");
-  const repo = c.req.param("repo");
-  if (!owner || !repo) {
-    return { kind: "response", response: json({ error: "Not found" }, 404) };
-  }
-  const viewerForResolution = await loadViewer(c);
-  const route = await resolveRepositoryRoute(c.env, owner, repo, {
-    mode: viewerForResolution ? "allow-d1-fallback" : "route-cache-only",
-  });
-  if (!route) {
-    return { kind: "response", response: json({ error: "Not found" }, 404) };
-  }
-  const membership = await loadSessionMembership(c, route.namespaceId);
-  if (membership.kind === "anonymous") {
-    // Don't disclose existence of private repos to anonymous callers.
-    if (route.visibility === "private") {
-      return { kind: "response", response: json({ error: "Not found" }, 404) };
-    }
-    return { kind: "response", response: json({ error: "Unauthorized" }, 401) };
-  }
-  if (membership.kind === "signed-in-non-member") {
-    if (route.visibility === "private") {
-      return { kind: "response", response: json({ error: "Not found" }, 404) };
-    }
-    return { kind: "response", response: json({ error: "Forbidden" }, 403) };
-  }
-  return {
-    kind: "ok",
-    route,
-    viewer: membership.viewer,
-    limiter: getLimiter(requestCacheContext(c)),
-  };
+  return await resolveAdminApiRepoAccess(c);
 }
 
 export function registerAdminRoutes(router: AppRouter) {
@@ -98,7 +52,7 @@ export function registerAdminRoutes(router: AppRouter) {
     const body = await safeParseJsonRequest(c.req.raw);
     const dryRun = !isJsonObject(body) || body.dryRun !== false;
     const stub = getRepoStub(env, route.doName);
-    const log = createLogger(env.LOG_LEVEL, {
+    const log = c.var.logFor({
       service: "AdminRoutes",
       repoId: route.doName,
     });
@@ -305,7 +259,7 @@ export function registerAdminRoutes(router: AppRouter) {
     const { route, viewer } = gate;
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
-    const log = createLogger(c.env.LOG_LEVEL, {
+    const log = c.var.logFor({
       service: "AdminPurge",
       repoId: route.doName,
     });

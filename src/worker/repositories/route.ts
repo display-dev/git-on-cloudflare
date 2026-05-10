@@ -1,12 +1,13 @@
-import { createLogger } from "@/worker/common";
-import { createDb } from "@/worker/db/d1/client";
+import { createLogger, type Logger } from "@/worker/common";
+import { createDb, type Db } from "@/worker/db/d1/client";
+import type { RepositoryVisibility } from "@/worker/db/d1/schema";
 import {
   findNamespaceById,
   findNamespaceBySlug,
   findRepositoryById,
   findRepositoryByNamespaceAndSlug,
-  getRouteCacheRecord,
 } from "@/worker/db/d1/dal";
+import { getRouteCacheRecord } from "./routeCache";
 
 // A route resolves only when D1 confirms the namespace slug, repo slug,
 // namespace id, repository id, and `doName` all describe the same row. KV
@@ -19,7 +20,7 @@ export type RepositoryRoute = {
   namespaceId: string;
   repositoryId: string;
   doName: string;
-  visibility: "public" | "private";
+  visibility: RepositoryVisibility;
   source: "kv" | "d1";
 };
 
@@ -31,6 +32,8 @@ export type RepositoryRouteResolutionOptions = {
   // Authenticated browser and PAT paths can fall back to D1 because they
   // already carry a principal that can be checked before data is served.
   mode: RepositoryRouteResolutionMode;
+  db?: Db;
+  log?: Logger;
 };
 
 export async function resolveRepositoryRoute(
@@ -39,8 +42,8 @@ export async function resolveRepositoryRoute(
   repoSlug: string,
   options: RepositoryRouteResolutionOptions = { mode: "allow-d1-fallback" }
 ): Promise<RepositoryRoute | null> {
-  const log = createLogger(env.LOG_LEVEL, { service: "RepoRoute" });
-  const db = createDb(env.DB);
+  const log = options.log ?? createLogger(env.LOG_LEVEL, { service: "RepoRoute" });
+  const db = options.db ?? createDb(env.DB);
   const cached = await getRouteCacheRecord(env, namespaceSlug, repoSlug);
   if (cached) {
     const repository = await findRepositoryById(db, cached.repositoryId);
@@ -67,7 +70,7 @@ export async function resolveRepositoryRoute(
           namespaceId: repository.namespaceId,
           repositoryId: repository.id,
           doName: repository.doName,
-          visibility: repository.visibility as RepositoryRoute["visibility"],
+          visibility: repository.visibility,
           source: "kv",
         };
       }
@@ -116,7 +119,7 @@ export async function resolveRepositoryRoute(
     namespaceId: namespace.id,
     repositoryId: repository.id,
     doName: repository.doName,
-    visibility: repository.visibility as RepositoryRoute["visibility"],
+    visibility: repository.visibility,
     source: "d1",
   };
 }

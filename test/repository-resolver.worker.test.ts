@@ -7,9 +7,8 @@ import {
   insertMembershipIfMissing,
   insertRepositoryIfNew,
   insertUserIfNew,
-  putRouteCacheRecord,
-  routeCacheKey,
 } from "@/worker/db/d1/dal";
+import { putRouteCacheRecord, routeCacheKey } from "@/worker/repositories/routeCache";
 import { claimNamespace } from "@/worker/db/d1/dal/namespaces";
 import { repositories } from "@/worker/db/d1/schema";
 import { resolveRepositoryRoute } from "@/worker/repositories/route";

@@ -1,17 +1,11 @@
-import type { CacheContext } from "@/worker/cache";
-
 import { type RepoQueueMessageHandle, type RepositoryDeleteMessage } from "./types";
 
-import { createLogger, getRepoStub } from "@/worker/common";
-import { createDb } from "@/worker/db/d1/client";
-import { deleteRepositoryById, deleteRouteCacheRecord } from "@/worker/db/d1/dal";
-import {
-  MAX_SIMULTANEOUS_CONNECTIONS,
-  SubrequestLimiter,
-  countSubrequest,
-  getLimiter,
-} from "@/worker/git/operations/limits";
+import { getRepoStub } from "@/worker/common";
+import { deleteRepositoryById } from "@/worker/db/d1/dal";
+import { deleteRouteCacheRecord } from "@/worker/repositories/routeCache";
+import { countSubrequest } from "@/worker/git/operations/limits";
 import { doPrefix } from "@/worker/keys";
+import { createQueueTaskContext, retryQueueMessage } from "./context";
 
 // Repository delete owns D1 row removal, ROUTES KV cleanup, R2 enumeration,
 // and DO storage clearing. The request handler only authorizes and
@@ -25,32 +19,20 @@ const DELETE_RETRY_DELAY_SECONDS = 30;
 // run out and the next pass picks up where R2 left off.
 const DELETE_SUBREQUEST_BUDGET = 800;
 
-function buildDeleteCacheContext(args: { repositoryId: string; ctx: ExecutionContext }): {
-  cacheCtx: CacheContext;
-  limiter: SubrequestLimiter;
-} {
-  const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
-  return {
-    cacheCtx: {
-      req: new Request(`https://queue.internal/${encodeURIComponent(args.repositoryId)}/delete`),
-      ctx: args.ctx,
-      memo: {
-        repoId: args.repositoryId,
-        limiter,
-        subreqBudget: DELETE_SUBREQUEST_BUDGET,
-      },
-    },
-    limiter,
-  };
-}
-
 export async function handleRepositoryDeleteMessage(
   message: Omit<RepoQueueMessageHandle<RepositoryDeleteMessage>, "body">,
   body: RepositoryDeleteMessage,
   env: Env,
   ctx: ExecutionContext
 ): Promise<void> {
-  const log = createLogger(env.LOG_LEVEL, {
+  const task = createQueueTaskContext({
+    env,
+    ctx,
+    repoLabel: body.repositoryId,
+    operation: "delete",
+    subrequestBudget: DELETE_SUBREQUEST_BUDGET,
+  });
+  const log = task.logFor({
     service: "RepositoryDelete",
     repoId: body.doName,
   });
@@ -62,14 +44,12 @@ export async function handleRepositoryDeleteMessage(
     requestedAt: body.requestedAt,
   });
 
-  const { cacheCtx } = buildDeleteCacheContext({ repositoryId: body.repositoryId, ctx });
-  const limiter = getLimiter(cacheCtx);
+  const { cacheCtx, limiter } = task;
 
   // Step 1: D1 row delete. Cascade removes repo-scoped PAT grants;
   // namespace-scoped grants are intentionally preserved.
   try {
-    const db = createDb(env.DB);
-    const deleted = await deleteRepositoryById(db, body.repositoryId);
+    const deleted = await deleteRepositoryById(task.db, body.repositoryId);
     if (deleted) {
       log.info("repo-delete:d1-deleted");
     } else {
@@ -77,7 +57,7 @@ export async function handleRepositoryDeleteMessage(
     }
   } catch (error) {
     log.warn("repo-delete:retry", { step: "d1", error: String(error) });
-    message.retry({ delaySeconds: DELETE_RETRY_DELAY_SECONDS });
+    retryQueueMessage(message, DELETE_RETRY_DELAY_SECONDS);
     return;
   }
 
@@ -90,7 +70,7 @@ export async function handleRepositoryDeleteMessage(
     log.info("repo-delete:routes-deleted");
   } catch (error) {
     log.warn("repo-delete:retry", { step: "routes", error: String(error) });
-    message.retry({ delaySeconds: DELETE_RETRY_DELAY_SECONDS });
+    retryQueueMessage(message, DELETE_RETRY_DELAY_SECONDS);
     return;
   }
 
@@ -104,7 +84,7 @@ export async function handleRepositoryDeleteMessage(
     do {
       if (!countSubrequest(cacheCtx, 1)) {
         log.warn("repo-delete:budget-exhausted", { step: "r2-list" });
-        message.retry({ delaySeconds: DELETE_RETRY_DELAY_SECONDS });
+        retryQueueMessage(message, DELETE_RETRY_DELAY_SECONDS);
         return;
       }
       const listing = await limiter.run("r2:repo-delete-list", () =>
@@ -114,7 +94,7 @@ export async function handleRepositoryDeleteMessage(
       if (objects.length > 0) {
         if (!countSubrequest(cacheCtx, 1)) {
           log.warn("repo-delete:budget-exhausted", { step: "r2-delete" });
-          message.retry({ delaySeconds: DELETE_RETRY_DELAY_SECONDS });
+          retryQueueMessage(message, DELETE_RETRY_DELAY_SECONDS);
           return;
         }
         const keys = objects.map((object) => object.key);
@@ -129,7 +109,7 @@ export async function handleRepositoryDeleteMessage(
     } while (cursor);
   } catch (error) {
     log.warn("repo-delete:retry", { step: "r2", error: String(error) });
-    message.retry({ delaySeconds: DELETE_RETRY_DELAY_SECONDS });
+    retryQueueMessage(message, DELETE_RETRY_DELAY_SECONDS);
     return;
   }
 
@@ -137,7 +117,7 @@ export async function handleRepositoryDeleteMessage(
   try {
     if (!countSubrequest(cacheCtx, 1)) {
       log.warn("repo-delete:budget-exhausted", { step: "do-clear" });
-      message.retry({ delaySeconds: DELETE_RETRY_DELAY_SECONDS });
+      retryQueueMessage(message, DELETE_RETRY_DELAY_SECONDS);
       return;
     }
     const stub = getRepoStub(env, body.doName);
@@ -145,7 +125,7 @@ export async function handleRepositoryDeleteMessage(
     log.info("repo-delete:do-cleared");
   } catch (error) {
     log.warn("repo-delete:retry", { step: "do", error: String(error) });
-    message.retry({ delaySeconds: DELETE_RETRY_DELAY_SECONDS });
+    retryQueueMessage(message, DELETE_RETRY_DELAY_SECONDS);
     return;
   }
 

@@ -11,9 +11,8 @@ import {
   insertPatWithGrants,
   insertRepositoryIfNew,
   insertUserIfNew,
-  putRouteCacheRecord,
-  routeCacheKey,
 } from "@/worker/db/d1/dal";
+import { putRouteCacheRecord, routeCacheKey } from "@/worker/repositories/routeCache";
 
 import { ensureD1Migrations } from "./d1Setup";
 

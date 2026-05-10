@@ -1,5 +1,4 @@
 import type { Viewer } from "@/client/server/viewer";
-import { createDb } from "@/worker/db/d1/client";
 import { findMembership } from "@/worker/db/d1/dal/namespaces";
 import type { AppContext } from "@/worker/routes/hono";
 
@@ -19,7 +18,7 @@ export async function loadSessionMembership(
 ): Promise<SessionMembershipResult> {
   const viewer = await loadViewer(c);
   if (!viewer) return { kind: "anonymous" };
-  const membership = await findMembership(createDb(c.env.DB), namespaceId, viewer.userId);
+  const membership = await findMembership(c.var.db, namespaceId, viewer.userId);
   if (!membership) return { kind: "signed-in-non-member", viewer };
   return { kind: "member", viewer };
 }

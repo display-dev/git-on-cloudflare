@@ -2,12 +2,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 
 import { createDb } from "@/worker/db/d1/client";
-import {
-  deleteRepositoryById,
-  putRouteCacheRecord,
-  routeCacheKey,
-  updateRepositoryVisibility,
-} from "@/worker/db/d1/dal";
+import { deleteRepositoryById, updateRepositoryVisibility } from "@/worker/db/d1/dal";
+import { putRouteCacheRecord, routeCacheKey } from "@/worker/repositories/routeCache";
 
 import { ensureD1Migrations } from "./util/d1Setup";
 import { seedRepo, type SeededRepo } from "./util/repoSeed";

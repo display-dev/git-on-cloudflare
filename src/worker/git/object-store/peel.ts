@@ -1,4 +1,5 @@
 import type { CacheContext } from "@/worker/cache";
+import type { Logger } from "@/worker/common/logger";
 import type { GitObjectType } from "@/worker/git/core";
 import type { IdxView, PackCatalogRow } from "./types";
 
@@ -37,7 +38,7 @@ const LS_REFS_PEELED_CHUNK_SIZE = 1_048_576;
 
 function countPeelSubrequest(
   cacheCtx: CacheContext | undefined,
-  log: ReturnType<typeof getPackedObjectStoreLogger>,
+  log: Logger,
   packKey: string
 ): boolean {
   const allowed = countSubrequest(cacheCtx);

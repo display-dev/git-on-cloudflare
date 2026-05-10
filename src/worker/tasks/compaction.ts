@@ -9,13 +9,9 @@ import {
   type RepoQueueMessageHandle,
 } from "./types";
 
-import { createLogger, getRepoStubByDoId } from "@/worker/common";
+import { getRepoStubByDoId } from "@/worker/common";
 import { buildCompactionNeededOids } from "@/worker/git/compaction/plan";
-import {
-  MAX_SIMULTANEOUS_CONNECTIONS,
-  SubrequestLimiter,
-  countSubrequest,
-} from "@/worker/git/operations/limits";
+import { type SubrequestLimiter } from "@/worker/git/operations/limits";
 import { scanPack, resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer";
 import { rewritePackResult } from "@/worker/git/pack/rewrite";
 import { loadOrderedPackSnapshot } from "@/worker/git/pack/snapshot";
@@ -25,44 +21,26 @@ import {
   type StagedPackUpload,
 } from "@/worker/git/receive/r2Upload";
 import { doPrefix, packIndexKey, packRefsKey, r2PackKey } from "@/worker/keys";
+import { createQueueTaskContext, logSoftBudgetExhausted, retryQueueMessage } from "./context";
 
 const COMPACTION_SUBREQUEST_BUDGET = 7_500;
 const COMPACTION_RETRY_DELAY_SECONDS = 30;
 const COMPACTION_CONFLICT_RETRY_DELAY_SECONDS = 10;
 const COMPACTION_DELETE_DELAY_SECONDS = 60;
 
-function buildQueueCacheContext(args: { repoLabel: string; ctx: ExecutionContext }): {
-  cacheCtx: CacheContext;
-  limiter: SubrequestLimiter;
-} {
-  const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
-  return {
-    cacheCtx: {
-      req: new Request(`https://queue.internal/${encodeURIComponent(args.repoLabel)}/compaction`),
-      ctx: args.ctx,
-      memo: {
-        repoId: args.repoLabel,
-        limiter,
-        subreqBudget: COMPACTION_SUBREQUEST_BUDGET,
-      },
-    },
-    limiter,
-  };
-}
-
 function countCompactionSubrequest(cacheCtx: CacheContext, log: Logger, op: string, n = 1): void {
-  if (countSubrequest(cacheCtx, n)) return;
-  cacheCtx.memo = cacheCtx.memo || {};
-  cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
-  const flag = `compaction-soft-budget:${op}`;
-  if (cacheCtx.memo.flags.has(flag)) return;
-  cacheCtx.memo.flags.add(flag);
-  log.warn("soft-budget-exhausted", { op });
+  logSoftBudgetExhausted({
+    cacheCtx,
+    log,
+    flagPrefix: "compaction-soft-budget",
+    op,
+    count: n,
+  });
 }
 
 async function cleanupStagedCompaction(args: {
   stagedUpload: StagedPackUpload | undefined;
-  log: ReturnType<typeof createLogger>;
+  log: Logger;
   reason: string;
 }) {
   if (!args.stagedUpload) return;
@@ -82,7 +60,7 @@ async function abortCompactionLease(args: {
   leaseToken: string | undefined;
   limiter: SubrequestLimiter;
   cacheCtx: CacheContext;
-  log: ReturnType<typeof createLogger>;
+  log: Logger;
   reason: string;
 }) {
   const leaseToken = args.leaseToken;
@@ -116,7 +94,7 @@ async function clearCompactionRequestAfterBlocked(args: {
   stub: DurableObjectStub<RepoDurableObject>;
   limiter: SubrequestLimiter;
   cacheCtx: CacheContext;
-  log: ReturnType<typeof createLogger>;
+  log: Logger;
   reason: string;
 }): Promise<void> {
   try {
@@ -133,13 +111,6 @@ async function clearCompactionRequestAfterBlocked(args: {
   }
 }
 
-function queueRetry(
-  message: { retry: (options?: { delaySeconds?: number }) => void },
-  seconds: number
-) {
-  message.retry({ delaySeconds: seconds });
-}
-
 export async function handleCompactionMessage(
   message: Omit<RepoQueueMessageHandle<CompactionQueueMessage>, "body">,
   body: CompactionQueueMessage,
@@ -147,13 +118,20 @@ export async function handleCompactionMessage(
   ctx: ExecutionContext
 ): Promise<void> {
   const repoLabel = body.repoId || `do:${body.doId}`;
-  const log = createLogger(env.LOG_LEVEL, {
+  const task = createQueueTaskContext({
+    env,
+    ctx,
+    repoLabel,
+    operation: "compaction",
+    subrequestBudget: COMPACTION_SUBREQUEST_BUDGET,
+  });
+  const log = task.logFor({
     service: "CompactionQueue",
     repoId: repoLabel,
     doId: body.doId,
   });
   const stub = getRepoStubByDoId(env, body.doId) as DurableObjectStub<RepoDurableObject>;
-  const { cacheCtx, limiter } = buildQueueCacheContext({ repoLabel, ctx });
+  const { cacheCtx, limiter } = task;
 
   let stagedUpload: StagedPackUpload | undefined;
   let leaseToken: string | undefined;
@@ -166,7 +144,7 @@ export async function handleCompactionMessage(
     if (!begin.ok) {
       if (begin.status === "busy" && begin.reason === "receive-active") {
         log.info("compaction:busy-retry", { reason: begin.reason });
-        queueRetry(message, COMPACTION_CONFLICT_RETRY_DELAY_SECONDS);
+        retryQueueMessage(message, COMPACTION_CONFLICT_RETRY_DELAY_SECONDS);
         return;
       }
 
@@ -193,7 +171,7 @@ export async function handleCompactionMessage(
         log,
         reason: snapshotLoad.reason,
       });
-      queueRetry(message, COMPACTION_RETRY_DELAY_SECONDS);
+      retryQueueMessage(message, COMPACTION_RETRY_DELAY_SECONDS);
       return;
     }
 
@@ -215,7 +193,7 @@ export async function handleCompactionMessage(
         log,
         reason: "source-pack-missing",
       });
-      queueRetry(message, COMPACTION_CONFLICT_RETRY_DELAY_SECONDS);
+      retryQueueMessage(message, COMPACTION_CONFLICT_RETRY_DELAY_SECONDS);
       return;
     }
 
@@ -259,7 +237,7 @@ export async function handleCompactionMessage(
       });
 
       if (rewriteResult.failure.retryable) {
-        queueRetry(message, COMPACTION_RETRY_DELAY_SECONDS);
+        retryQueueMessage(message, COMPACTION_RETRY_DELAY_SECONDS);
         return;
       }
 
@@ -338,7 +316,7 @@ export async function handleCompactionMessage(
       });
       leaseToken = undefined;
       log.info("compaction:retry", { reason: commit.reason });
-      queueRetry(message, COMPACTION_CONFLICT_RETRY_DELAY_SECONDS);
+      retryQueueMessage(message, COMPACTION_CONFLICT_RETRY_DELAY_SECONDS);
       return;
     }
 
@@ -392,7 +370,7 @@ export async function handleCompactionMessage(
       log,
       reason: "error",
     });
-    queueRetry(message, COMPACTION_RETRY_DELAY_SECONDS);
+    retryQueueMessage(message, COMPACTION_RETRY_DELAY_SECONDS);
   }
 }
 
@@ -400,15 +378,22 @@ export async function handleCompactionDeleteMessage(
   message: Omit<RepoQueueMessageHandle<CompactionDeleteQueueMessage>, "body">,
   body: CompactionDeleteQueueMessage,
   env: Env,
-  _ctx: ExecutionContext
+  ctx: ExecutionContext
 ): Promise<void> {
   const repoLabel = body.repoId || `do:${body.doId}`;
-  const log = createLogger(env.LOG_LEVEL, {
+  const task = createQueueTaskContext({
+    env,
+    ctx,
+    repoLabel,
+    operation: "compaction-delete",
+    subrequestBudget: 25,
+  });
+  const log = task.logFor({
     service: "CompactionDeleteQueue",
     repoId: repoLabel,
     doId: body.doId,
   });
-  const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
+  const { limiter } = task;
 
   try {
     const keysToDelete: string[] = [];
@@ -428,6 +413,6 @@ export async function handleCompactionDeleteMessage(
     message.ack();
   } catch (error) {
     log.warn("compaction:delete-failed", { error: String(error) });
-    queueRetry(message, COMPACTION_RETRY_DELAY_SECONDS);
+    retryQueueMessage(message, COMPACTION_RETRY_DELAY_SECONDS);
   }
 }

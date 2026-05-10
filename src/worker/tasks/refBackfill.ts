@@ -4,53 +4,23 @@ import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
 
 import { type PackRefBackfillQueueMessage, type RepoQueueMessageHandle } from "./types";
 
-import { createLogger, getRepoStubByDoId } from "@/worker/common";
-import {
-  MAX_SIMULTANEOUS_CONNECTIONS,
-  SubrequestLimiter,
-  countSubrequest,
-} from "@/worker/git/operations/limits";
+import { getRepoStubByDoId } from "@/worker/common";
 import { loadIdxView } from "@/worker/git/object-store";
 import { resolveDeltasAndWriteIdx, scanPack } from "@/worker/git/pack/indexer";
 import { loadPackRefView } from "@/worker/git/pack/refIndex";
+import { createQueueTaskContext, logSoftBudgetExhausted, retryQueueMessage } from "./context";
 
 const REF_BACKFILL_SUBREQUEST_BUDGET = 7_500;
 const REF_BACKFILL_RETRY_DELAY_SECONDS = 30;
 
-function buildBackfillCacheContext(args: { repoLabel: string; ctx: ExecutionContext }): {
-  cacheCtx: CacheContext;
-  limiter: SubrequestLimiter;
-} {
-  const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
-  return {
-    cacheCtx: {
-      req: new Request(`https://queue.internal/${encodeURIComponent(args.repoLabel)}/pack-refs`),
-      ctx: args.ctx,
-      memo: {
-        repoId: args.repoLabel,
-        limiter,
-        subreqBudget: REF_BACKFILL_SUBREQUEST_BUDGET,
-      },
-    },
-    limiter,
-  };
-}
-
 function countBackfillSubrequest(cacheCtx: CacheContext, log: Logger, op: string, n = 1): void {
-  if (countSubrequest(cacheCtx, n)) return;
-  cacheCtx.memo = cacheCtx.memo || {};
-  cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
-  const flag = `ref-backfill-soft-budget:${op}`;
-  if (cacheCtx.memo.flags.has(flag)) return;
-  cacheCtx.memo.flags.add(flag);
-  log.warn("soft-budget-exhausted", { op });
-}
-
-function queueRetry(
-  message: { retry: (options?: { delaySeconds?: number }) => void },
-  seconds: number
-): void {
-  message.retry({ delaySeconds: seconds });
+  logSoftBudgetExhausted({
+    cacheCtx,
+    log,
+    flagPrefix: "ref-backfill-soft-budget",
+    op,
+    count: n,
+  });
 }
 
 function isDeterministicPackFailure(error: unknown): boolean {
@@ -71,13 +41,20 @@ export async function handlePackRefBackfillMessage(
   ctx: ExecutionContext
 ): Promise<void> {
   const repoLabel = body.repoId || `do:${body.doId}`;
-  const log = createLogger(env.LOG_LEVEL, {
+  const task = createQueueTaskContext({
+    env,
+    ctx,
+    repoLabel,
+    operation: "pack-refs",
+    subrequestBudget: REF_BACKFILL_SUBREQUEST_BUDGET,
+  });
+  const log = task.logFor({
     service: "PackRefBackfillQueue",
     repoId: repoLabel,
     doId: body.doId,
   });
   const stub = getRepoStubByDoId(env, body.doId) as DurableObjectStub<RepoDurableObject>;
-  const { cacheCtx, limiter } = buildBackfillCacheContext({ repoLabel, ctx });
+  const { cacheCtx, limiter } = task;
 
   try {
     log.info("ref-index:backfill-start", { packKey: body.packKey });
@@ -167,6 +144,6 @@ export async function handlePackRefBackfillMessage(
       packKey: body.packKey,
       error: String(error),
     });
-    queueRetry(message, REF_BACKFILL_RETRY_DELAY_SECONDS);
+    retryQueueMessage(message, REF_BACKFILL_RETRY_DELAY_SECONDS);
   }
 }

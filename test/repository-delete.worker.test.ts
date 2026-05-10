@@ -3,7 +3,8 @@ import { env } from "cloudflare:workers";
 
 import { newPrefixedId, getRepoStub } from "@/worker/common";
 import { createDb } from "@/worker/db/d1/client";
-import { findPatGrantForRepo, insertPatWithGrants, routeCacheKey } from "@/worker/db/d1/dal";
+import { findPatGrantForRepo, insertPatWithGrants } from "@/worker/db/d1/dal";
+import { routeCacheKey } from "@/worker/repositories/routeCache";
 import { findRepositoryById } from "@/worker/db/d1/dal/repositories";
 import { generatePatPlaintext, hashPatPlaintext } from "@/worker/auth/pat";
 import { doPrefix } from "@/worker/keys";

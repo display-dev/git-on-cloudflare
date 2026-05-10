@@ -1,15 +1,13 @@
 import { type RepoQueueMessageHandle, type RouteCacheSyncMessage } from "./types";
 
-import { createLogger } from "@/worker/common";
-import { createDb } from "@/worker/db/d1/client";
+import { findNamespaceById, findRepositoryById } from "@/worker/db/d1/dal";
 import {
   deleteRouteCacheRecord,
-  findNamespaceById,
-  findRepositoryById,
   putRouteCacheRecord,
   routeCacheKey,
   type RouteCacheRecord,
-} from "@/worker/db/d1/dal";
+} from "@/worker/repositories/routeCache";
+import { createQueueTaskContext, retryQueueMessage } from "./context";
 
 // State-converging route-cache repair.
 //
@@ -29,11 +27,16 @@ export async function handleRouteCacheSyncMessage(
   message: Omit<RepoQueueMessageHandle<RouteCacheSyncMessage>, "body">,
   body: RouteCacheSyncMessage,
   env: Env,
-  _ctx: ExecutionContext
+  ctx: ExecutionContext
 ): Promise<void> {
-  const log = createLogger(env.LOG_LEVEL, {
-    service: "RouteCacheSync",
+  const task = createQueueTaskContext({
+    env,
+    ctx,
+    repoLabel: body.repositoryId,
+    operation: "route-cache-sync",
+    subrequestBudget: 25,
   });
+  const log = task.logFor({ service: "RouteCacheSync" });
   log.debug("route-sync:start", {
     repositoryId: body.repositoryId,
     namespaceSlug: body.namespaceSlug,
@@ -42,8 +45,7 @@ export async function handleRouteCacheSyncMessage(
   });
 
   try {
-    const db = createDb(env.DB);
-    const repository = await findRepositoryById(db, body.repositoryId);
+    const repository = await findRepositoryById(task.db, body.repositoryId);
 
     // D1 row missing: the repo was deleted (or never existed). Drop the
     // captured key. We have no canonical (namespace, slug) to address, but
@@ -56,7 +58,7 @@ export async function handleRouteCacheSyncMessage(
       return;
     }
 
-    const namespace = await findNamespaceById(db, repository.namespaceId);
+    const namespace = await findNamespaceById(task.db, repository.namespaceId);
     if (!namespace) {
       // Defensive: a repository row pointing to a missing namespace is
       // structurally inconsistent. Drop the captured key and ack so we
@@ -112,6 +114,6 @@ export async function handleRouteCacheSyncMessage(
     message.ack();
   } catch (error) {
     log.warn("route-sync:retry", { error: String(error) });
-    message.retry({ delaySeconds: SYNC_RETRY_DELAY_SECONDS });
+    retryQueueMessage(message, SYNC_RETRY_DELAY_SECONDS);
   }
 }

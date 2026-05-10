@@ -3,13 +3,14 @@ import { registerGitRoutes } from "./routes/git";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerUiRoutes } from "./routes/ui";
 import { registerAuthRoutes } from "./routes/auth";
-import type { AppBindings, AppContext } from "./routes/hono";
+import { requestServicesMiddleware, type AppBindings, type AppContext } from "./routes/hono";
 import { renderUiDocumentResponse } from "./routes/uiResponse";
 import { loadViewer } from "./auth/session";
 import { json } from "./common";
 import { handleRepoTaskQueue } from "./tasks/queue";
 
 const app = new Hono<AppBindings>({ strict: false });
+app.use("*", requestServicesMiddleware);
 // Register Git protocol routes (info/refs, upload-pack, receive-pack)
 registerGitRoutes(app);
 // Register Admin routes

@@ -1,6 +1,7 @@
 import { createLogger } from "@/worker/common";
-import { createDb } from "@/worker/db/d1/client";
+import { createDb, type Db } from "@/worker/db/d1/client";
 import { updatePatLastUsedAt } from "@/worker/db/d1/dal/tokens";
+import type { Logger } from "@/worker/common/logger";
 import type { RepositoryRoute } from "@/worker/repositories/route";
 
 import {
@@ -45,7 +46,8 @@ export type GitAuthResult =
 export async function authenticateGitRequest(
   env: Env,
   request: Request,
-  route: RepositoryRoute
+  route: RepositoryRoute,
+  options: { db?: Db } = {}
 ): Promise<GitAuthResult> {
   const basic = getBasicCredentials(request);
   if (!basic) return { kind: "anonymous" };
@@ -55,6 +57,7 @@ export async function authenticateGitRequest(
     plaintext: basic.password,
     namespaceId: route.namespaceId,
     repositoryId: route.repositoryId,
+    db: options.db,
   });
   if (verified.ok) return { kind: "pat", verified };
   return { kind: "pat-rejected", reason: verified.reason };
@@ -67,14 +70,16 @@ export function scheduleTouchPatLastUsedAt(
   ctx: ExecutionContext,
   verified: PatVerifyOk,
   op: PatLastUsedOp,
-  now: number = Date.now()
+  now: number = Date.now(),
+  options: { db?: Db; log?: Logger } = {}
 ): boolean {
   if (!shouldTouchPatLastUsedAt(verified.lastUsedAt, op, now)) return false;
-  const log = createLogger(env.LOG_LEVEL, { service: "GitAuth" });
+  const log = options.log ?? createLogger(env.LOG_LEVEL, { service: "GitAuth" });
+  const db = options.db ?? createDb(env.DB);
   ctx.waitUntil(
     (async () => {
       try {
-        await updatePatLastUsedAt(createDb(env.DB), verified.patId, now);
+        await updatePatLastUsedAt(db, verified.patId, now);
         log.debug("pat:last-used-update-ok", { patId: verified.patId, op });
       } catch (error) {
         log.warn("pat:last-used-update-failed", {

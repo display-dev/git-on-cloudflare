@@ -3,7 +3,6 @@ import type { RepoActivity } from "@/worker/common";
 import type { PackCatalogRow } from "./db/schema";
 
 import { DurableObject } from "cloudflare:workers";
-import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 
 import { doPrefix } from "@/worker/keys";
 import { text, createLogger } from "@/worker/common";
@@ -72,14 +71,13 @@ import { seedMinimalRepoState } from "./repoDO/seeding";
 export class RepoDurableObject extends DurableObject {
   declare env: Env;
   private lastAccessMemMs: number | undefined;
-  private db: DrizzleSqliteDODatabase<any> | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       this.lastAccessMemMs = await ctx.storage.get("lastAccessMs");
-      this.db = getDb(ctx.storage);
-      await migrate(this.db, migrations);
+      const db = getDb(ctx.storage);
+      await migrate(db, migrations);
       await this.ensureAccessAndAlarm();
     });
   }

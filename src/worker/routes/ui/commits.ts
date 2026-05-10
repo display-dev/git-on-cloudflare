@@ -8,7 +8,7 @@ import {
 } from "@/worker/git";
 import { isValidPath, formatWhen, OID_RE } from "@/shared/web";
 import { handleError } from "@/client/server/error";
-import { buildCacheKeyFrom, cacheOrLoadJSONWithTTL } from "@/worker/cache";
+import { buildCacheKeyFrom, cacheOrLoadJSONForRequestWithTTL } from "@/worker/cache";
 import { getRepoActivity } from "@/worker/common";
 import { badRequest, isRequestPrivate, resolveUiRepoAccess } from "./helpers";
 import { isValidRef } from "@/shared/web";
@@ -59,37 +59,27 @@ export async function handleCommits(c: AppContext<"/:owner/:repo/commits">) {
         isMerge: Array.isArray(c.parents) && c.parents.length > 1,
       }));
     };
-    let commitsView;
-    if (isPrivate) {
-      commitsView = await loader();
-    } else {
-      const cacheKey = buildCacheKeyFrom(c.req.raw, "/_cache/commits", {
-        repo: repoId,
-        ref,
-        per_page: String(perPage),
-        page: String(page),
-        offset: String(offset),
-      });
-      commitsView = await cacheOrLoadJSONWithTTL<
-        Array<{
-          oid: string;
-          shortOid: string;
-          firstLine: string;
-          authorName: string;
-          when: string;
-        }>
-      >(
-        cacheKey,
-        loader,
-        () => {
-          const isOid = OID_RE.test(ref);
-          const isTag = ref.startsWith("refs/tags/");
-          // Branch commits: 300s; Tags/OIDs (immutable): 3600s
-          return isOid || isTag ? 3600 : 300;
-        },
-        c.executionCtx
-      );
-    }
+    const cacheKey = buildCacheKeyFrom(c.req.raw, "/_cache/commits", {
+      repo: repoId,
+      ref,
+      per_page: String(perPage),
+      page: String(page),
+      offset: String(offset),
+    });
+    const commitsView = await cacheOrLoadJSONForRequestWithTTL<
+      Array<{
+        oid: string;
+        shortOid: string;
+        firstLine: string;
+        authorName: string;
+        when: string;
+      }>
+    >(cacheCtx, cacheKey, loader, () => {
+      const isOid = OID_RE.test(ref);
+      const isTag = ref.startsWith("refs/tags/");
+      // Branch commits: 300s; Tags/OIDs (immutable): 3600s
+      return isOid || isTag ? 3600 : 300;
+    });
     const list = commitsView || [];
     const last = list[list.length - 1]?.oid || "";
     const refEnc = encodeURIComponent(ref);
@@ -199,7 +189,6 @@ export async function handleCommitDiff(c: AppContext<"/:owner/:repo/commit/:oid/
   const access = await resolveUiRepoAccess(c, owner, repo, { responseShape: "json" });
   if (access.kind === "response") return access.response;
   const { route, cacheCtx } = access;
-  const isPrivate = isRequestPrivate(cacheCtx);
   if (!OID_RE.test(oid)) {
     return badRequest(env, "Invalid commit OID", "Commit id must be 40-hex", {
       owner,
@@ -220,23 +209,18 @@ export async function handleCommitDiff(c: AppContext<"/:owner/:repo/commit/:oid/
   const repoId = route.doName;
   try {
     const loader = async () => await readCommitFilePatch(env, repoId, oid, path, cacheCtx);
-    let patch: CommitFilePatchResult | null;
-    if (isPrivate) {
-      patch = await loader();
-    } else {
-      const patchCacheKey = buildCacheKeyFrom(c.req.raw, "/_cache/commit-patch", {
-        repo: repoId,
-        oid,
-        path,
-        v: "1",
-      });
-      patch = await cacheOrLoadJSONWithTTL<CommitFilePatchResult>(
-        patchCacheKey,
-        loader,
-        () => 86400,
-        c.executionCtx
-      );
-    }
+    const patchCacheKey = buildCacheKeyFrom(c.req.raw, "/_cache/commit-patch", {
+      repo: repoId,
+      oid,
+      path,
+      v: "1",
+    });
+    const patch = await cacheOrLoadJSONForRequestWithTTL<CommitFilePatchResult>(
+      cacheCtx,
+      patchCacheKey,
+      loader,
+      () => 86400
+    );
     return new Response(JSON.stringify(patch), {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -277,22 +261,17 @@ export async function handleCommit(c: AppContext<"/:owner/:repo/commit/:oid">) {
       await listCommitChangedFiles(env, repoId, oid, cacheCtx, {
         timeBudgetMs: 5000,
       });
-    let diff: CommitDiffResult | null;
-    if (isPrivate) {
-      diff = await diffLoader();
-    } else {
-      const diffCacheKey = buildCacheKeyFrom(c.req.raw, "/_cache/commit-diff", {
-        repo: repoId,
-        oid,
-        v: "1",
-      });
-      diff = await cacheOrLoadJSONWithTTL<CommitDiffResult>(
-        diffCacheKey,
-        diffLoader,
-        () => 86400,
-        c.executionCtx
-      );
-    }
+    const diffCacheKey = buildCacheKeyFrom(c.req.raw, "/_cache/commit-diff", {
+      repo: repoId,
+      oid,
+      v: "1",
+    });
+    const diff = await cacheOrLoadJSONForRequestWithTTL<CommitDiffResult>(
+      cacheCtx,
+      diffCacheKey,
+      diffLoader,
+      () => 86400
+    );
     const when = commit.author ? formatWhen(commit.author.when, commit.author.tz) : "";
     const parents = (commit.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
     const progress = await getRepoActivity(env, repoId, cacheCtx);

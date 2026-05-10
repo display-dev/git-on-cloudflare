@@ -12,9 +12,9 @@ import {
 import { loadPeeledTagTargets } from "@/worker/git/object-store";
 import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream";
 import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
-import { asBodyInit, createLogger, gunzip } from "@/worker/common";
-import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/worker/cache";
-import { isRequestPrivate, markRequestPrivate, responseCacheControl } from "@/worker/cache/policy";
+import { asBodyInit, gunzip } from "@/worker/common";
+import { buildCacheKeyFrom, cacheOrLoadJSONForRequest } from "@/worker/cache";
+import { markRequestPrivate, responseCacheControl } from "@/worker/cache/policy";
 import { isValidOwnerRepo } from "@/shared/web";
 import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
 import {
@@ -23,10 +23,13 @@ import {
   scheduleTouchPatLastUsedAt,
   type GitAuthResult,
 } from "@/worker/auth/gitAuth";
-import { createDb } from "@/worker/db/d1/client";
+import type { Db } from "@/worker/db/d1/client";
+import type { Logger } from "@/worker/common/logger";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
-import { requestCacheContext } from "./ui/helpers";
 import type { AppContext, AppRouter } from "./hono";
+
+type GitService = "git-upload-pack" | "git-receive-pack";
+type PatTouchOp = "read" | "write";
 
 // Realm string emitted on Basic auth challenges so git CLI prompts the user
 // with a recognisable label.
@@ -96,7 +99,6 @@ async function handleUploadPackPOST(
   env: Env,
   route: RepositoryRoute,
   request: Request,
-  ctx: ExecutionContext,
   cacheCtx: CacheContext
 ) {
   const decodedBody = await decodeUploadPackBody(request);
@@ -120,18 +122,13 @@ async function handleUploadPackPOST(
         return null;
       }
     };
-    let refsData: { head: HeadInfo | undefined; refs: Ref[] } | null;
-    if (isRequestPrivate(cacheCtx)) {
-      refsData = await loader();
-    } else {
-      const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", { repo: route.doName });
-      refsData = await cacheOrLoadJSON<{ head: HeadInfo | undefined; refs: Ref[] }>(
-        cacheKeyRefs,
-        loader,
-        60,
-        ctx
-      );
-    }
+    const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", { repo: route.doName });
+    const refsData = await cacheOrLoadJSONForRequest<{ head: HeadInfo | undefined; refs: Ref[] }>(
+      cacheCtx,
+      cacheKeyRefs,
+      loader,
+      60
+    );
     const { head, refs } = refsData || { refs: [] };
 
     // Parse ls-refs arguments (reuse already-read body to avoid double-read of the stream)
@@ -206,14 +203,15 @@ async function handleReceivePackPOST(
   env: Env,
   route: RepositoryRoute,
   request: Request,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  db: Db,
+  log: Logger
 ) {
-  const log = createLogger(env.LOG_LEVEL, { service: "ReceiveAcl", repoId: route.doName });
   return await handleStreamingReceivePackPOST(env, route.doName, request, ctx, {
     onRepoStateChanged: async ({ changed }) => {
       if (!changed) return;
       try {
-        await touchRepositoryUpdatedAt(createDb(env.DB), route.repositoryId, Date.now());
+        await touchRepositoryUpdatedAt(db, route.repositoryId, Date.now());
         log.debug("receive:repo-updated-at-touched", { repositoryId: route.repositoryId });
       } catch (error) {
         log.warn("receive:repo-updated-at-failed", {
@@ -242,7 +240,37 @@ async function resolveGitRoute(
 ): Promise<RepositoryRoute | null> {
   return await resolveRepositoryRoute(c.env, owner, repo, {
     mode: gitRequestAllowsD1Fallback(c.req.raw) ? "allow-d1-fallback" : "route-cache-only",
+    db: c.var.db,
+    log: c.var.logFor({ service: "RepoRoute" }),
   });
+}
+
+type ResolveGitRouteResult =
+  | { kind: "ok"; route: RepositoryRoute }
+  | { kind: "response"; response: Response };
+
+async function resolveGitRouteForRequest(
+  c: AppContext,
+  owner: string,
+  repo: string,
+  service: GitService,
+  isDiscovery: boolean
+): Promise<ResolveGitRouteResult> {
+  const route = await resolveGitRoute(c, owner, repo);
+  if (route) return { kind: "ok", route };
+
+  // Git sends the first receive-pack discovery request before it has
+  // credentials. If the route cache has no candidate yet (or the repo is
+  // private and intentionally absent from ROUTES), challenge so the client
+  // can retry with Basic/PAT. A request that already carried a Basic
+  // password has used D1 fallback and remains a real 404 when unresolved.
+  if (service === "git-receive-pack" && !gitRequestAllowsD1Fallback(c.req.raw)) {
+    return {
+      kind: "response",
+      response: challengeUnresolvedPushRoute(c, owner, repo, isDiscovery),
+    };
+  }
+  return { kind: "response", response: gitNotFound() };
 }
 
 function challengeUnresolvedPushRoute(
@@ -251,7 +279,7 @@ function challengeUnresolvedPushRoute(
   repo: string,
   isDiscovery: boolean
 ): Response {
-  const log = createLogger(c.env.LOG_LEVEL, { service: "GitAcl" });
+  const log = c.var.logFor({ service: "GitAcl" });
   log.info("git-acl:push-route-miss-401-challenge", {
     owner,
     repo,
@@ -267,7 +295,7 @@ function gateD1FallbackGitAuth(
 ): Response | null {
   if (route.source !== "d1") return null;
   if (auth.kind === "pat") return null;
-  const log = createLogger(c.env.LOG_LEVEL, { service: "GitAcl", repoId: route.doName });
+  const log = c.var.logFor({ service: "GitAcl", repoId: route.doName });
   if (auth.kind === "pat-rejected" && auth.reason === "grant-missing") {
     log.info("git-acl:d1-fallback-grant-missing", { reason: auth.reason });
     return forbidden();
@@ -281,7 +309,7 @@ function gateD1FallbackGitAuth(
 // `null` when allowed, otherwise the response to send.
 function gateGitRead(c: AppContext, route: RepositoryRoute, auth: GitAuthResult): Response | null {
   if (route.visibility === "public") return null;
-  const log = createLogger(c.env.LOG_LEVEL, { service: "GitAcl", repoId: route.doName });
+  const log = c.var.logFor({ service: "GitAcl", repoId: route.doName });
   switch (auth.kind) {
     case "anonymous":
       // Discovery hop on private upload-pack: 404 to avoid leaking existence.
@@ -316,7 +344,7 @@ async function gateGitPush(
   auth: GitAuthResult,
   isDiscovery: boolean
 ): Promise<Response | null> {
-  const log = createLogger(c.env.LOG_LEVEL, { service: "GitAcl", repoId: route.doName });
+  const log = c.var.logFor({ service: "GitAcl", repoId: route.doName });
   if (auth.kind === "pat") {
     if (auth.verified.level !== "push") {
       log.info("git-acl:push-pull-only", { patId: auth.verified.patId });
@@ -342,6 +370,44 @@ async function gateGitPush(
   return basicChallenge();
 }
 
+type GitAuthorizationResult =
+  | { kind: "ok"; cacheCtx: CacheContext }
+  | { kind: "response"; response: Response };
+
+async function authorizeGitRouteForRequest(
+  c: AppContext,
+  route: RepositoryRoute,
+  service: GitService,
+  isDiscovery: boolean,
+  patTouchOp: PatTouchOp
+): Promise<GitAuthorizationResult> {
+  const cacheCtx = c.var.cacheCtx;
+  if (route.visibility === "private" || service === "git-receive-pack") {
+    markRequestPrivate(cacheCtx);
+  }
+
+  const auth = await authenticateGitRequest(c.env, c.req.raw, route, { db: c.var.db });
+  const fallbackBlocked = gateD1FallbackGitAuth(c, route, auth);
+  if (fallbackBlocked) return { kind: "response", response: fallbackBlocked };
+
+  const blocked =
+    service === "git-receive-pack"
+      ? await gateGitPush(c, route, auth, isDiscovery)
+      : gateGitRead(c, route, auth);
+  if (blocked) return { kind: "response", response: blocked };
+
+  if (auth.kind === "pat") {
+    // PAT `last_used_at` is a visibility signal for token management only;
+    // it is throttled for reads and always attempted for writes.
+    scheduleTouchPatLastUsedAt(c.env, c.executionCtx, auth.verified, patTouchOp, Date.now(), {
+      db: c.var.db,
+      log: c.var.logFor({ service: "GitAuth" }),
+    });
+  }
+
+  return { kind: "ok", cacheCtx };
+}
+
 /**
  * Registers Git Smart HTTP v2 routes on the router.
  */
@@ -355,32 +421,12 @@ export function registerGitRoutes(router: AppRouter) {
     if (service !== "git-upload-pack" && service !== "git-receive-pack") {
       return new Response("Missing or unsupported service\n", { status: 400 });
     }
-    const route = await resolveGitRoute(c, owner, repo);
-    if (!route) {
-      // Git sends the first receive-pack discovery request before it has
-      // credentials. If the route cache has no candidate yet (or the repo is
-      // private and intentionally absent from ROUTES), challenge so the client
-      // can retry with Basic/PAT. A request that already carried a Basic
-      // password has used D1 fallback and remains a real 404 when unresolved.
-      if (service === "git-receive-pack" && !gitRequestAllowsD1Fallback(c.req.raw)) {
-        return challengeUnresolvedPushRoute(c, owner, repo, true);
-      }
-      return gitNotFound();
-    }
-    const cacheCtx = requestCacheContext(c);
-    if (route.visibility === "private") markRequestPrivate(cacheCtx);
-    const auth = await authenticateGitRequest(c.env, c.req.raw, route);
-    const fallbackBlocked = gateD1FallbackGitAuth(c, route, auth);
-    if (fallbackBlocked) return fallbackBlocked;
-    const blocked =
-      service === "git-receive-pack"
-        ? await gateGitPush(c, route, auth, true)
-        : gateGitRead(c, route, auth);
-    if (blocked) return blocked;
-    if (auth.kind === "pat") {
-      // Discovery hop counts as a read; throttle policy applies.
-      scheduleTouchPatLastUsedAt(c.env, c.executionCtx, auth.verified, "read");
-    }
+    const resolved = await resolveGitRouteForRequest(c, owner, repo, service, true);
+    if (resolved.kind === "response") return resolved.response;
+    const route = resolved.route;
+    const authorized = await authorizeGitRouteForRequest(c, route, service, true, "read");
+    if (authorized.kind === "response") return authorized.response;
+    const { cacheCtx } = authorized;
     return await capabilityAdvertisement(c.env, service, route.doName, cacheCtx);
   });
 
@@ -388,42 +434,42 @@ export function registerGitRoutes(router: AppRouter) {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
     if (!validateRouteSlugs(owner, repo)) return gitNotFound();
-    const route = await resolveGitRoute(c, owner, repo);
-    if (!route) return gitNotFound();
-    const cacheCtx = requestCacheContext(c);
-    if (route.visibility === "private") markRequestPrivate(cacheCtx);
-    const auth = await authenticateGitRequest(c.env, c.req.raw, route);
-    const fallbackBlocked = gateD1FallbackGitAuth(c, route, auth);
-    if (fallbackBlocked) return fallbackBlocked;
-    const blocked = gateGitRead(c, route, auth);
-    if (blocked) return blocked;
-    if (auth.kind === "pat") {
-      scheduleTouchPatLastUsedAt(c.env, c.executionCtx, auth.verified, "read");
-    }
-    return handleUploadPackPOST(c.env, route, c.req.raw, c.executionCtx, cacheCtx);
+    const resolved = await resolveGitRouteForRequest(c, owner, repo, "git-upload-pack", false);
+    if (resolved.kind === "response") return resolved.response;
+    const route = resolved.route;
+    const authorized = await authorizeGitRouteForRequest(
+      c,
+      route,
+      "git-upload-pack",
+      false,
+      "read"
+    );
+    if (authorized.kind === "response") return authorized.response;
+    return handleUploadPackPOST(c.env, route, c.req.raw, authorized.cacheCtx);
   });
 
   router.post(`/:owner/:repo/git-receive-pack`, async (c) => {
     const owner = c.req.param("owner");
     const repo = c.req.param("repo");
     if (!validateRouteSlugs(owner, repo)) return gitNotFound();
-    const route = await resolveGitRoute(c, owner, repo);
-    if (!route) {
-      if (!gitRequestAllowsD1Fallback(c.req.raw)) {
-        return challengeUnresolvedPushRoute(c, owner, repo, false);
-      }
-      return gitNotFound();
-    }
-    const cacheCtx = requestCacheContext(c);
-    markRequestPrivate(cacheCtx);
-    const auth = await authenticateGitRequest(c.env, c.req.raw, route);
-    const fallbackBlocked = gateD1FallbackGitAuth(c, route, auth);
-    if (fallbackBlocked) return fallbackBlocked;
-    const blocked = await gateGitPush(c, route, auth, false);
-    if (blocked) return blocked;
-    if (auth.kind === "pat") {
-      scheduleTouchPatLastUsedAt(c.env, c.executionCtx, auth.verified, "write");
-    }
-    return await handleReceivePackPOST(c.env, route, c.req.raw, c.executionCtx);
+    const resolved = await resolveGitRouteForRequest(c, owner, repo, "git-receive-pack", false);
+    if (resolved.kind === "response") return resolved.response;
+    const route = resolved.route;
+    const authorized = await authorizeGitRouteForRequest(
+      c,
+      route,
+      "git-receive-pack",
+      false,
+      "write"
+    );
+    if (authorized.kind === "response") return authorized.response;
+    return await handleReceivePackPOST(
+      c.env,
+      route,
+      c.req.raw,
+      c.executionCtx,
+      c.var.db,
+      c.var.logFor({ service: "ReceiveAcl", repoId: route.doName })
+    );
   });
 }

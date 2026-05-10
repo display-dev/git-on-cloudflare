@@ -164,6 +164,7 @@ export type VerifyPatArgs = {
   namespaceId?: string;
   repositoryId?: string;
   now?: number;
+  db?: Db;
 };
 
 // Verify a PAT against the stored hash and grants. Returns the user/scope
@@ -175,7 +176,7 @@ export async function verifyPat(env: Env, args: VerifyPatArgs): Promise<PatVerif
   const parsed = parsePatPlaintext(args.plaintext);
   if (!parsed.ok) return { ok: false, reason: "malformed" };
 
-  const db = createDb(env.DB);
+  const db = args.db ?? createDb(env.DB);
 
   const pat = await findPatByPrefix(db, parsed.publicPrefix);
   if (!pat) return { ok: false, reason: "token-not-found" };

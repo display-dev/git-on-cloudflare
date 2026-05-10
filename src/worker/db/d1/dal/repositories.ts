@@ -6,6 +6,7 @@ import { namespaces } from "@/worker/db/d1/schema/namespaces";
 import {
   type NewRepositoryRow,
   type RepositoryRow,
+  type RepositoryVisibility,
   repositories,
 } from "@/worker/db/d1/schema/repositories";
 
@@ -140,7 +141,7 @@ export async function deleteRepositoryById(db: Db, repositoryId: string): Promis
 }
 
 export type UpdateRepositoryVisibilityResult =
-  | { ok: true; previous: "public" | "private"; current: "public" | "private" }
+  | { ok: true; previous: RepositoryVisibility; current: RepositoryVisibility }
   | { ok: false; reason: "not-found" };
 
 // Caller must verify membership before calling. Returns previous visibility
@@ -148,7 +149,7 @@ export type UpdateRepositoryVisibilityResult =
 export async function updateRepositoryVisibility(
   db: Db,
   repositoryId: string,
-  visibility: "public" | "private",
+  visibility: RepositoryVisibility,
   now: number
 ): Promise<UpdateRepositoryVisibilityResult> {
   const rows = await db
@@ -164,7 +165,7 @@ export async function updateRepositoryVisibility(
     .where(eq(repositories.id, repositoryId));
   return {
     ok: true,
-    previous: existing.visibility as "public" | "private",
+    previous: existing.visibility,
     current: visibility,
   };
 }

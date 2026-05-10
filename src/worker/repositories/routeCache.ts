@@ -18,7 +18,7 @@ export function routeCacheKey(namespaceSlug: string, repoSlug: string): string {
 
 // Writes/deletes log only on success. Failures throw to the caller so
 // surrounding handlers can attach their own context (legacyBackfill,
-// repo create/rename/delete) — duplicating a generic error log here
+// repo create/rename/delete) - duplicating a generic error log here
 // would just bury the operational signal.
 export async function putRouteCacheRecord(
   env: Env,
