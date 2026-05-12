@@ -8,6 +8,8 @@ Host unlimited private Git repositories at the edge with <50ms response times gl
 
 > **Upgrade Notice:** The streaming-push closure release removed all legacy receive paths and rollback machinery. If upgrading from a pre-streaming deployment, you **must** first deploy and validate the cutover release (commit `98ad7dd`) before deploying the current version. See `MIGRATION-STREAMING-PUSH.md` for the required deployment sequence.
 
+> **tessera Ownership Upgrade Notice:** Legacy owner-token authentication has also been replaced by tessera browser sessions, D1-backed repository ownership, and personal access tokens. If upgrading an existing fork or self-hosted deployment from before the tessera migration, follow `MIGRATION-TESSERA-OIDC.md` before deploying latest `main`.
+
 ## Key Features
 
 - **Complete Git Smart HTTP v2 implementation** with pack protocol support (`ls-refs`, `fetch`, side-band-64k, ofs-delta)
@@ -84,7 +86,7 @@ npm run deploy
 
 Your Git server will deploy to your configured route or to `*.workers.dev`, depending on your Wrangler configuration. Push repos, browse code, and manage account tokens from the edge.
 
-> **Upgrading from a pre-streaming deployment?** Read `MIGRATION-STREAMING-PUSH.md` for the required deployment sequence.
+> **Upgrading an existing deployment?** Read `MIGRATION-STREAMING-PUSH.md` first if you are pre-streaming, then `MIGRATION-TESSERA-OIDC.md` if you are crossing the tessera ownership migration.
 
 ## Authentication
 
@@ -138,6 +140,8 @@ See `.dev.vars.example` and `wrangler.jsonc` for the complete configuration.
 - [Storage Model](docs/storage.md) - Hybrid DO + R2 storage design
 - [Data Flows](docs/data-flows.md) - Push, fetch, and web UI flows
 - [Caching Strategy](docs/caching.md) - Two-tier caching implementation
+- [Streaming Push Migration Guide](MIGRATION-STREAMING-PUSH.md) - Required path for pre-streaming deployments
+- [tessera Ownership Migration Guide](MIGRATION-TESSERA-OIDC.md) - Required path for deployments crossing the legacy auth cutover
 
 ## Limitations
 
