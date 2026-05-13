@@ -13,14 +13,15 @@ import {
 import {
   buildAuthorizeUrl,
   buildCallbackUrl,
+  deriveTransactionCookieSecret,
   discoverOidcProvider,
+  decodeTransactionPayload,
+  encodeTransactionPayload,
   exchangeAuthorizationCode,
   generateNonce,
   generatePkcePair,
   generateState,
   loadOidcConfig,
-  sealTransaction,
-  unsealTransaction,
   verifyIdTokenClaims,
 } from "@/worker/auth/oidc";
 import { sameOriginViolation } from "@/worker/auth/origin";
@@ -71,20 +72,20 @@ export function registerAuthOidcRoutes(router: AppRouter) {
     const nonce = generateNonce();
     const pkce = await generatePkcePair();
     const redirectUri = buildCallbackUrl(c.req.url);
-    let sealed: string;
+    const encodedTransaction = encodeTransactionPayload({
+      state,
+      nonce,
+      codeVerifier: pkce.verifier,
+      redirectUri,
+      createdAt: Date.now(),
+    });
     try {
-      sealed = await sealTransaction(config.clientSecret, {
-        state,
-        nonce,
-        codeVerifier: pkce.verifier,
-        redirectUri,
-        createdAt: Date.now(),
-      });
+      const transactionCookieSecret = await deriveTransactionCookieSecret(config.clientSecret);
+      await setOidcTransactionCookie(c, encodedTransaction, transactionCookieSecret);
     } catch (error) {
-      log.error("oidc:start-seal-failed", { error: String(error) });
+      log.error("oidc:start-cookie-sign-failed", { error: String(error) });
       return errorRedirect(c, "oidc_unavailable");
     }
-    setOidcTransactionCookie(c, sealed);
     const authorizeUrl = buildAuthorizeUrl(providerResult.provider, {
       redirectUri,
       state,
@@ -98,8 +99,8 @@ export function registerAuthOidcRoutes(router: AppRouter) {
     const log = c.var.logFor({ service: "AuthOidc" });
     const configResult = loadOidcConfig(c.env);
     if (!configResult.ok) {
-      // Always clear the sealed transaction cookie when bailing out of the
-      // callback. A missing/changed config must not leave a stale sealed
+      // Always clear the signed transaction cookie when bailing out of the
+      // callback. A missing/changed config must not leave a stale transaction
       // payload in the browser that could be replayed if config recovers.
       clearOidcTransactionCookie(c);
       log.warn("oidc:callback-config-missing", { reason: configResult.reason });
@@ -114,23 +115,37 @@ export function registerAuthOidcRoutes(router: AppRouter) {
       return errorRedirect(c, "invalid_request");
     }
 
-    const sealed = getOidcTransactionCookie(c);
-    if (!sealed) {
+    let transactionCookieSecret: Uint8Array<ArrayBuffer>;
+    try {
+      transactionCookieSecret = await deriveTransactionCookieSecret(config.clientSecret);
+    } catch (error) {
+      log.error("oidc:callback-cookie-secret-derive-failed", { error: String(error) });
+      clearOidcTransactionCookie(c);
+      return errorRedirect(c, "oidc_unavailable");
+    }
+
+    const transactionCookie = await getOidcTransactionCookie(c, transactionCookieSecret);
+    if (transactionCookie.kind === "missing") {
       log.warn("oidc:callback-missing-cookie");
       return errorRedirect(c, "missing_state");
     }
-    const unsealed = await unsealTransaction(config.clientSecret, sealed);
-    if (!unsealed.ok) {
-      log.warn("oidc:callback-unseal-failed", { reason: unsealed.reason });
+    if (transactionCookie.kind === "invalid_signature") {
+      log.warn("oidc:callback-cookie-signature-failed");
       clearOidcTransactionCookie(c);
       return errorRedirect(c, "invalid_state");
     }
-    if (unsealed.payload.state !== state) {
+    const transaction = decodeTransactionPayload(transactionCookie.value);
+    if (!transaction.ok) {
+      log.warn("oidc:callback-transaction-invalid", { reason: transaction.reason });
+      clearOidcTransactionCookie(c);
+      return errorRedirect(c, "invalid_state");
+    }
+    if (transaction.payload.state !== state) {
       log.warn("oidc:callback-state-mismatch");
       clearOidcTransactionCookie(c);
       return errorRedirect(c, "invalid_state");
     }
-    if (unsealed.payload.redirectUri !== buildCallbackUrl(c.req.url)) {
+    if (transaction.payload.redirectUri !== buildCallbackUrl(c.req.url)) {
       log.warn("oidc:callback-redirect-mismatch");
       clearOidcTransactionCookie(c);
       return errorRedirect(c, "invalid_state");
@@ -143,8 +158,8 @@ export function registerAuthOidcRoutes(router: AppRouter) {
     }
     const tokenResult = await exchangeAuthorizationCode(providerResult.provider, {
       callbackUrl: c.req.url,
-      codeVerifier: unsealed.payload.codeVerifier,
-      nonce: unsealed.payload.nonce,
+      codeVerifier: transaction.payload.codeVerifier,
+      nonce: transaction.payload.nonce,
       state,
     });
     if (!tokenResult.ok) {

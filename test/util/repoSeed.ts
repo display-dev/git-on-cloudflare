@@ -1,5 +1,5 @@
 import { newPrefixedId } from "@/worker/common";
-import { SESSION_COOKIE_NAME } from "@/worker/auth/cookies";
+import { SESSION_COOKIE_HEADER_NAME } from "@/worker/auth/cookies";
 import { generatePatPlaintext, hashPatPlaintext } from "@/worker/auth/pat";
 import { __test as sessionTest } from "@/worker/auth/session";
 import { createDb } from "@/worker/db/d1/client";
@@ -209,5 +209,5 @@ export async function mintSessionCookie(env: Env, userId: string): Promise<strin
     createdAt: now,
     expiresAt: now + 60 * 60 * 1000,
   });
-  return `${SESSION_COOKIE_NAME}=${token}`;
+  return `${SESSION_COOKIE_HEADER_NAME}=${token}`;
 }

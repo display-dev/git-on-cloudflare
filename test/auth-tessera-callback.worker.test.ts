@@ -9,11 +9,12 @@ import {
   insertMembershipIfMissing,
   listNamespacesForUser,
 } from "@/worker/db/d1/dal";
-import { __test as oidcTest, sealTransaction } from "@/worker/auth/oidc";
-import { OIDC_TX_COOKIE_NAME, SESSION_COOKIE_NAME } from "@/worker/auth/cookies";
+import { __test as oidcTest } from "@/worker/auth/oidc";
+import { OIDC_TX_COOKIE_HEADER_NAME, SESSION_COOKIE_HEADER_NAME } from "@/worker/auth/cookies";
 
 import { fakeProvider } from "./util/oidcFake";
 import { readAppD1Migrations } from "./util/d1Migrations";
+import { oidcTransactionCookieHeader } from "./util/authCookies";
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, readAppD1Migrations());
@@ -36,15 +37,14 @@ function preloadProvider() {
   );
 }
 
-async function buildSealedCookie(state: string, nonce: string, codeVerifier: string) {
-  const sealed = await sealTransaction(env.TESSERA_OIDC_CLIENT_SECRET, {
+async function buildTransactionCookie(state: string, nonce: string, codeVerifier: string) {
+  return await oidcTransactionCookieHeader(env.TESSERA_OIDC_CLIENT_SECRET, {
     state,
     nonce,
     codeVerifier,
     redirectUri: REDIRECT_URI,
     createdAt: Date.now(),
   });
-  return `${OIDC_TX_COOKIE_NAME}=${sealed}`;
 }
 
 type FakeClaims = { sub: string; preferred_username?: string };
@@ -90,12 +90,12 @@ describe("/auth/callback", () => {
     const sub = "sub-fresh-1";
     const state = "state-fresh-1";
     stubGrantWithClaims({ sub, preferred_username: "fresh-rachel" });
-    const cookie = await buildSealedCookie(state, "nonce-1", "verifier-1");
+    const cookie = await buildTransactionCookie(state, "nonce-1", "verifier-1");
     const res = await callCallback({ state, cookie });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/auth/account");
     const cookies = res.headers.get("set-cookie") ?? "";
-    expect(cookies).toContain(`${SESSION_COOKIE_NAME}=goc_sess_`);
+    expect(cookies).toContain(`${SESSION_COOKIE_HEADER_NAME}=goc_sess_`);
     const db = createDb(env.DB);
     const user = await findUserByTesseraSub(db, sub);
     expect(user).toBeDefined();
@@ -126,7 +126,7 @@ describe("/auth/callback", () => {
     const sub = "sub-loser";
     const state = "state-taken";
     stubGrantWithClaims({ sub, preferred_username: "taken" });
-    const cookie = await buildSealedCookie(state, "nonce-2", "verifier-2");
+    const cookie = await buildTransactionCookie(state, "nonce-2", "verifier-2");
     const res = await callCallback({ state, cookie });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/auth/account");
@@ -143,7 +143,7 @@ describe("/auth/callback", () => {
     const sub = "sub-invalid-1";
     const state = "state-invalid";
     stubGrantWithClaims({ sub, preferred_username: "Invalid_Slug!" });
-    const cookie = await buildSealedCookie(state, "nonce-3", "verifier-3");
+    const cookie = await buildTransactionCookie(state, "nonce-3", "verifier-3");
     const res = await callCallback({ state, cookie });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/auth/account");
@@ -157,7 +157,7 @@ describe("/auth/callback", () => {
     const sub = "sub-returning";
     const state1 = "state-r1";
     stubGrantWithClaims({ sub });
-    const cookie1 = await buildSealedCookie(state1, "n1", "v1");
+    const cookie1 = await buildTransactionCookie(state1, "n1", "v1");
     expect((await callCallback({ state: state1, cookie: cookie1 })).status).toBe(302);
     const db = createDb(env.DB);
     const user = await findUserByTesseraSub(db, sub);
@@ -166,7 +166,7 @@ describe("/auth/callback", () => {
     // a namespace because the user already exists.
     stubGrantWithClaims({ sub, preferred_username: "newslug" });
     const state2 = "state-r2";
-    const cookie2 = await buildSealedCookie(state2, "n2", "v2");
+    const cookie2 = await buildTransactionCookie(state2, "n2", "v2");
     const res = await callCallback({ state: state2, cookie: cookie2 });
     expect(res.status).toBe(302);
     const namespace = await findNamespaceBySlug(db, "newslug");
@@ -175,7 +175,7 @@ describe("/auth/callback", () => {
   });
 
   it("clears the OIDC transaction cookie when runtime config is missing", async () => {
-    const cookie = await buildSealedCookie("state-cfg", "n", "v");
+    const cookie = await buildTransactionCookie("state-cfg", "n", "v");
     // Force loadOidcConfig() into the "missing_client_secret" branch by
     // blanking the binding for the duration of this test. Restoring at the
     // end so other tests still have a complete config.
@@ -192,7 +192,7 @@ describe("/auth/callback", () => {
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toBe("/auth?error=oidc_unavailable");
       const setCookie = res.headers.get("set-cookie") ?? "";
-      expect(setCookie).toContain(`${OIDC_TX_COOKIE_NAME}=`);
+      expect(setCookie).toContain(`${OIDC_TX_COOKIE_HEADER_NAME}=`);
       expect(setCookie.toLowerCase()).toContain("max-age=0");
     } finally {
       env.TESSERA_OIDC_CLIENT_SECRET = original;
@@ -203,7 +203,7 @@ describe("/auth/callback", () => {
     const sub = "sub-missing-session-secret";
     const state = "state-missing-session-secret";
     stubGrantWithClaims({ sub, preferred_username: "missing-session-secret" });
-    const cookie = await buildSealedCookie(state, "n", "v");
+    const cookie = await buildTransactionCookie(state, "n", "v");
     const original = env.SESSION_SECRET;
     env.SESSION_SECRET = "";
     try {
@@ -211,7 +211,7 @@ describe("/auth/callback", () => {
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toBe("/auth?error=session_create_failed");
       const setCookie = res.headers.get("set-cookie") ?? "";
-      expect(setCookie).toContain(`${OIDC_TX_COOKIE_NAME}=`);
+      expect(setCookie).toContain(`${OIDC_TX_COOKIE_HEADER_NAME}=`);
       expect(setCookie.toLowerCase()).toContain("max-age=0");
       const db = createDb(env.DB);
       expect(await findUserByTesseraSub(db, sub)).toBeUndefined();
@@ -226,8 +226,20 @@ describe("/auth/callback", () => {
     expect(res.headers.get("location")).toBe("/auth?error=missing_state");
   });
 
+  it("redirects to /auth?error=invalid_state when the OIDC cookie signature is invalid", async () => {
+    const res = await callCallback({
+      state: "anything",
+      cookie: `${OIDC_TX_COOKIE_HEADER_NAME}=not-signed`,
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/auth?error=invalid_state");
+    const setCookie = res.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain(`${OIDC_TX_COOKIE_HEADER_NAME}=`);
+    expect(setCookie.toLowerCase()).toContain("max-age=0");
+  });
+
   it("redirects to /auth?error=invalid_state when state does not match the cookie", async () => {
-    const cookie = await buildSealedCookie("state-A", "n", "v");
+    const cookie = await buildTransactionCookie("state-A", "n", "v");
     const res = await callCallback({ state: "state-B", cookie });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/auth?error=invalid_state");
@@ -236,7 +248,7 @@ describe("/auth/callback", () => {
   it("redirects to /auth?error=invalid_id_token when the grant raises ClientError", async () => {
     const sub = "sub-grant-err";
     stubGrantWithClaims({ sub }, { rejectAs: "client" });
-    const cookie = await buildSealedCookie("state-grant", "n", "v");
+    const cookie = await buildTransactionCookie("state-grant", "n", "v");
     const res = await callCallback({ state: "state-grant", cookie });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe("/auth?error=invalid_id_token");
@@ -264,7 +276,7 @@ describe("/auth/callback", () => {
     });
     stubGrantWithClaims({ sub, preferred_username: "preexisting" });
     const state = "state-pre";
-    const cookie = await buildSealedCookie(state, "n", "v");
+    const cookie = await buildTransactionCookie(state, "n", "v");
     const res = await callCallback({ state, cookie });
     expect(res.status).toBe(302);
     expect((await listNamespacesForUser(db, userId)).map((row) => row.slug)).toEqual([
@@ -278,7 +290,7 @@ describe("/auth/callback", () => {
     const routeKey = `repo-route:v1:${slug}/${repo}`;
     await env.ROUTES.delete(routeKey);
     stubGrantWithClaims({ sub: "sub-callback-direct", preferred_username: slug });
-    const cookie = await buildSealedCookie("state-callback-direct", "n", "v");
+    const cookie = await buildTransactionCookie("state-callback-direct", "n", "v");
     const res = await callCallback({ state: "state-callback-direct", cookie });
     expect(res.status).toBe(302);
     await new Promise((resolve) => setTimeout(resolve, 250));

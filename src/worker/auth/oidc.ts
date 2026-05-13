@@ -5,17 +5,20 @@ import { z } from "zod";
 //   - openid-client v6 owns discovery, PKCE, authorize URL, token exchange
 //   - Loopback HTTP issuer is allowed only for local dev (tessera-dev runs on
 //     http://localhost:5174). Production deployments use https://auth.limic.dev.
-//   - The OIDC transaction (state, nonce, PKCE verifier, redirect) is sealed
-//     in `__Host-goc_oidc` using a key derived from TESSERA_OIDC_CLIENT_SECRET
-//     so we do not need a separate cookie-sealing secret.
+//   - The OIDC transaction (state, nonce, PKCE verifier, redirect) is encoded
+//     into a Hono signed `__Host-goc_oidc` cookie using
+//     a purpose-derived key from TESSERA_OIDC_CLIENT_SECRET, so we do not
+//     need a separate cookie-signing secret. The payload is
+//     integrity-protected but not encrypted; it is short-lived, HttpOnly,
+//     Secure, and only used to complete the same browser's authorization-code
+//     callback.
 //   - A small `__test` namespace lets vitest swap the discovery cache and the
 //     token-exchange call without spinning a real OIDC provider.
 
-const STATE_PURPOSE = "goc-oidc-state-v1";
 const STATE_TTL_MS = 5 * 60 * 1000;
-const AES_GCM_IV_LENGTH = 12;
-const AES_KEY_BIT_LENGTH = 256;
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
+const TRANSACTION_COOKIE_PURPOSE = "goc-oidc-transaction-cookie-v1";
+const TRANSACTION_COOKIE_KEY_BITS = 256;
 
 const TransactionPayloadSchema = z.object({
   state: z.string(),
@@ -106,12 +109,6 @@ function base64UrlDecode(input: string): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 
-function randomBytes(length: number): Uint8Array<ArrayBuffer> {
-  const bytes = new Uint8Array(new ArrayBuffer(length));
-  crypto.getRandomValues(bytes);
-  return bytes;
-}
-
 export interface PkcePair {
   verifier: string;
   challenge: string;
@@ -123,72 +120,52 @@ export async function generatePkcePair(): Promise<PkcePair> {
   return { verifier, challenge };
 }
 
-async function deriveSealKey(clientSecret: string): Promise<CryptoKey> {
+export function encodeTransactionPayload(payload: TransactionPayload): string {
+  return base64UrlEncode(textEncoder.encode(JSON.stringify(payload)));
+}
+
+export async function deriveTransactionCookieSecret(
+  clientSecret: string
+): Promise<Uint8Array<ArrayBuffer>> {
   const baseKey = await crypto.subtle.importKey(
     "raw",
     textEncoder.encode(clientSecret),
     { name: "HKDF" },
     false,
-    ["deriveKey"]
+    ["deriveBits"]
   );
-  return crypto.subtle.deriveKey(
+  const derived = await crypto.subtle.deriveBits(
     {
       name: "HKDF",
       hash: "SHA-256",
       salt: new Uint8Array(0),
-      info: textEncoder.encode(STATE_PURPOSE),
+      info: textEncoder.encode(TRANSACTION_COOKIE_PURPOSE),
     },
     baseKey,
-    { name: "AES-GCM", length: AES_KEY_BIT_LENGTH },
-    false,
-    ["encrypt", "decrypt"]
+    TRANSACTION_COOKIE_KEY_BITS
   );
+  return new Uint8Array(derived);
 }
 
-export async function sealTransaction(
-  clientSecret: string,
-  payload: TransactionPayload
-): Promise<string> {
-  const key = await deriveSealKey(clientSecret);
-  const iv = randomBytes(AES_GCM_IV_LENGTH);
-  const plaintext = textEncoder.encode(JSON.stringify(payload));
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
-  const sealed = new Uint8Array(iv.length + ciphertext.byteLength);
-  sealed.set(iv, 0);
-  sealed.set(new Uint8Array(ciphertext), iv.length);
-  return base64UrlEncode(sealed);
-}
+export type DecodeTransactionPayloadError = "malformed" | "invalid_payload" | "expired";
 
-export type UnsealError = "malformed" | "decrypt_failed" | "invalid_payload" | "expired";
-
-export type UnsealResult =
+export type DecodeTransactionPayloadResult =
   | { ok: true; payload: TransactionPayload }
-  | { ok: false; reason: UnsealError };
+  | { ok: false; reason: DecodeTransactionPayloadError };
 
-export async function unsealTransaction(
-  clientSecret: string,
+export function decodeTransactionPayload(
   encoded: string,
   now: number = Date.now()
-): Promise<UnsealResult> {
+): DecodeTransactionPayloadResult {
   let raw: Uint8Array<ArrayBuffer>;
   try {
     raw = base64UrlDecode(encoded);
   } catch {
     return { ok: false, reason: "malformed" };
   }
-  if (raw.length <= AES_GCM_IV_LENGTH) return { ok: false, reason: "malformed" };
-  const iv = raw.subarray(0, AES_GCM_IV_LENGTH);
-  const ciphertext = raw.subarray(AES_GCM_IV_LENGTH);
-  let plaintextBuffer: ArrayBuffer;
-  try {
-    const key = await deriveSealKey(clientSecret);
-    plaintextBuffer = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
-  } catch {
-    return { ok: false, reason: "decrypt_failed" };
-  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(textDecoder.decode(plaintextBuffer));
+    parsed = JSON.parse(textDecoder.decode(raw));
   } catch {
     return { ok: false, reason: "invalid_payload" };
   }

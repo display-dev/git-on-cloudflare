@@ -3,7 +3,7 @@ import { env, exports as workerExports } from "cloudflare:workers";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { __test as oidcTest } from "@/worker/auth/oidc";
-import { OIDC_TX_COOKIE_NAME } from "@/worker/auth/cookies";
+import { OIDC_TX_COOKIE_HEADER_NAME } from "@/worker/auth/cookies";
 
 import { fakeProvider } from "./util/oidcFake";
 import { readAppD1Migrations } from "./util/d1Migrations";
@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 describe("/auth/start", () => {
-  it("returns 302 to the authorize URL with a sealed transaction cookie", async () => {
+  it("returns 302 to the authorize URL with a signed transaction cookie", async () => {
     const provider = fakeProvider({
       authorizationEndpoint: "https://auth.example.com/oauth2/authorize",
       tokenEndpoint: "https://auth.example.com/oauth2/token",
@@ -42,7 +42,7 @@ describe("/auth/start", () => {
     expect(location).toContain("code_challenge_method=S256");
     expect(location).toContain("scope=openid");
     const setCookie = res.headers.get("set-cookie") ?? "";
-    expect(setCookie).toContain(`${OIDC_TX_COOKIE_NAME}=`);
+    expect(setCookie).toContain(`${OIDC_TX_COOKIE_HEADER_NAME}=`);
     expect(setCookie).toContain("HttpOnly");
     expect(setCookie).toContain("Secure");
     expect(setCookie).toContain("SameSite=Lax");

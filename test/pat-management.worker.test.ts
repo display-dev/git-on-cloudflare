@@ -9,11 +9,15 @@ import {
   insertRepositoryIfNew,
   listPatsForUser,
 } from "@/worker/db/d1/dal";
-import { __test as oidcTest, sealTransaction } from "@/worker/auth/oidc";
-import { OIDC_TX_COOKIE_NAME, SESSION_COOKIE_NAME } from "@/worker/auth/cookies";
+import { __test as oidcTest } from "@/worker/auth/oidc";
 
 import { fakeProvider } from "./util/oidcFake";
 import { readAppD1Migrations } from "./util/d1Migrations";
+import {
+  extractSessionToken,
+  oidcTransactionCookieHeader,
+  sessionCookieHeader,
+} from "./util/authCookies";
 
 beforeAll(async () => {
   await applyD1Migrations(env.DB, readAppD1Migrations());
@@ -41,7 +45,7 @@ afterEach(() => {
 
 async function signInAndGetCookie(sub: string, preferredUsername: string): Promise<string> {
   const state = `state-${sub}`;
-  const sealed = await sealTransaction(env.TESSERA_OIDC_CLIENT_SECRET, {
+  const cookie = await oidcTransactionCookieHeader(env.TESSERA_OIDC_CLIENT_SECRET, {
     state,
     nonce: "n",
     codeVerifier: "v",
@@ -60,13 +64,12 @@ async function signInAndGetCookie(sub: string, preferredUsername: string): Promi
   url.searchParams.set("state", state);
   const res = await workerExports.default.fetch(url.toString(), {
     redirect: "manual",
-    headers: { Cookie: `${OIDC_TX_COOKIE_NAME}=${sealed}` },
+    headers: { Cookie: cookie },
   });
   expect(res.status).toBe(302);
-  const setCookie = res.headers.get("set-cookie") ?? "";
-  const match = /__Host-goc_session=(goc_sess_[^;]+)/.exec(setCookie);
-  expect(match).toBeTruthy();
-  return match![1]!;
+  const token = extractSessionToken(res.headers.get("set-cookie"));
+  expect(token).toBeTruthy();
+  return token!;
 }
 
 describe("PAT management endpoints", () => {
@@ -80,7 +83,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://example.com",
-        Cookie: `${SESSION_COOKIE_NAME}=${aliceCookie}`,
+        Cookie: sessionCookieHeader(aliceCookie),
       },
       body: JSON.stringify({
         scope: "namespace",
@@ -95,7 +98,7 @@ describe("PAT management endpoints", () => {
 
     // Plaintext is not retrievable on subsequent list.
     const list = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
-      headers: { Cookie: `${SESSION_COOKIE_NAME}=${aliceCookie}` },
+      headers: { Cookie: sessionCookieHeader(aliceCookie) },
     });
     expect(list.status).toBe(200);
     const listed = (await list.json()) as {
@@ -127,7 +130,7 @@ describe("PAT management endpoints", () => {
       `https://example.com/auth/api/tokens/${created.id}`,
       {
         method: "DELETE",
-        headers: { Cookie: `${SESSION_COOKIE_NAME}=${bobCookie}`, Origin: "https://example.com" },
+        headers: { Cookie: sessionCookieHeader(bobCookie), Origin: "https://example.com" },
       }
     );
     expect(cross.status).toBe(403);
@@ -137,7 +140,7 @@ describe("PAT management endpoints", () => {
       `https://example.com/auth/api/tokens/${created.id}`,
       {
         method: "DELETE",
-        headers: { Cookie: `${SESSION_COOKIE_NAME}=${aliceCookie}`, Origin: "https://example.com" },
+        headers: { Cookie: sessionCookieHeader(aliceCookie), Origin: "https://example.com" },
       }
     );
     expect(revoke.status).toBe(200);
@@ -147,7 +150,7 @@ describe("PAT management endpoints", () => {
       `https://example.com/auth/api/tokens/${created.id}`,
       {
         method: "DELETE",
-        headers: { Cookie: `${SESSION_COOKIE_NAME}=${aliceCookie}`, Origin: "https://example.com" },
+        headers: { Cookie: sessionCookieHeader(aliceCookie), Origin: "https://example.com" },
       }
     );
     expect(revoke2.status).toBe(200);
@@ -164,7 +167,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://attacker.example",
-        Cookie: `${SESSION_COOKIE_NAME}=${cookie}`,
+        Cookie: sessionCookieHeader(cookie),
       },
       body: JSON.stringify({
         scope: "namespace",
@@ -183,7 +186,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://example.com",
-        Cookie: `${SESSION_COOKIE_NAME}=${cookie}`,
+        Cookie: sessionCookieHeader(cookie),
       },
       body: JSON.stringify({
         scope: "namespace",
@@ -202,7 +205,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://example.com",
-        Cookie: `${SESSION_COOKIE_NAME}=${cookie}`,
+        Cookie: sessionCookieHeader(cookie),
       },
       // No `scope` field — must be a 400, not coerced to namespace.
       body: JSON.stringify({
@@ -223,7 +226,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://example.com",
-        Cookie: `${SESSION_COOKIE_NAME}=${cookie}`,
+        Cookie: sessionCookieHeader(cookie),
       },
       body: JSON.stringify({
         scope: "namespace",
@@ -243,7 +246,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://example.com",
-        Cookie: `${SESSION_COOKIE_NAME}=${cookie}`,
+        Cookie: sessionCookieHeader(cookie),
       },
       body: JSON.stringify({
         scope: "namespace",
@@ -280,7 +283,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://example.com",
-        Cookie: `${SESSION_COOKIE_NAME}=${cookie}`,
+        Cookie: sessionCookieHeader(cookie),
       },
       body: JSON.stringify({
         scope: "repo",
@@ -294,7 +297,7 @@ describe("PAT management endpoints", () => {
     const created = (await create.json()) as { id: string; plaintext: string; prefix: string };
 
     const list = await workerExports.default.fetch("https://example.com/auth/api/tokens", {
-      headers: { Cookie: `${SESSION_COOKIE_NAME}=${cookie}` },
+      headers: { Cookie: sessionCookieHeader(cookie) },
     });
     expect(list.status).toBe(200);
     const listed = (await list.json()) as {
@@ -324,7 +327,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://example.com",
-        Cookie: `${SESSION_COOKIE_NAME}=${cookie}`,
+        Cookie: sessionCookieHeader(cookie),
       },
       body: JSON.stringify({
         scope: "repo",
@@ -362,7 +365,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://example.com",
-        Cookie: `${SESSION_COOKIE_NAME}=${intruderCookie}`,
+        Cookie: sessionCookieHeader(intruderCookie),
       },
       body: JSON.stringify({
         scope: "repo",
@@ -382,7 +385,7 @@ describe("PAT management endpoints", () => {
       headers: {
         "Content-Type": "application/json",
         Origin: "https://example.com",
-        Cookie: `${SESSION_COOKIE_NAME}=${cookie}`,
+        Cookie: sessionCookieHeader(cookie),
       },
       body: JSON.stringify({
         scope: "repo",
