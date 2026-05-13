@@ -29,7 +29,12 @@ async function seedPackedOnlyRepo(repoId: string) {
 
   const blob2Payload = encoder.encode("hello from v2\n");
   const blob2 = await encodeGitObject("blob", blob2Payload);
-  const tree2Payload = buildTreePayload([{ mode: "100644", name: "hello.txt", oid: blob2.oid }]);
+  const symlinkPayload = encoder.encode("AGENTS.md");
+  const symlinkBlob = await encodeGitObject("blob", symlinkPayload);
+  const tree2Payload = buildTreePayload([
+    { mode: "100644", name: "hello.txt", oid: blob2.oid },
+    { mode: "120000", name: "CLAUDE.md", oid: symlinkBlob.oid },
+  ]);
   const tree2 = await encodeGitObject("tree", tree2Payload);
   const commit2Payload = encoder.encode(
     `tree ${tree2.oid}\n` +
@@ -40,12 +45,13 @@ async function seedPackedOnlyRepo(repoId: string) {
   );
   const commit2 = await encodeGitObject("commit", commit2Payload);
 
-  const looseObjects = [blob1, tree1, commit1, blob2, tree2, commit2];
+  const looseObjects = [blob1, tree1, commit1, blob2, symlinkBlob, tree2, commit2];
   const packs = [
     {
       name: "pack-receive-0002.pack",
       packBytes: await buildPack([
         { type: "blob", payload: blob2Payload },
+        { type: "blob", payload: symlinkPayload },
         { type: "tree", payload: tree2Payload },
         { type: "commit", payload: commit2Payload },
       ]),
@@ -135,7 +141,10 @@ describe("pack-first fetch and UI", () => {
       `https://example.com/${owner}/${repo}/tree?ref=main`
     );
     expect(treeRes.status).toBe(200);
-    expect(await treeRes.text()).toContain("hello.txt");
+    const treeHtml = await treeRes.text();
+    expect(treeHtml).toContain("hello.txt");
+    expect(treeHtml).toContain("CLAUDE.md");
+    expect(treeHtml).toContain("lucide-file-symlink");
 
     const blobRes = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/blob?ref=main&path=${encodeURIComponent("hello.txt")}`

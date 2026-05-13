@@ -6,11 +6,11 @@ export type {
 } from "@/shared/git/types";
 
 export interface TreeEntry {
-  /** File mode (e.g., "100644" for regular file, "40000" for directory) */
+  /** Git tree mode (e.g., "100644" for regular file, "120000" for symlink, "40000" for directory) */
   mode: string;
   /** Entry name (filename or directory name) */
   name: string;
-  /** Object ID of the blob (file) or tree (directory) */
+  /** Object ID of the blob (file/symlink) or tree (directory) */
   oid: string;
 }
 

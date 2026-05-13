@@ -9,6 +9,7 @@ type TreeEntry = {
   name: string;
   href: string;
   isDir: boolean;
+  isSymlink: boolean;
   iconName: FileIconName;
   shortOid: string;
 };
@@ -27,6 +28,16 @@ export type TreePageProps = {
   parentHref?: string | null;
   progress?: Progress;
 };
+
+function getTreeEntryIconClass(entry: TreeEntry): string {
+  if (entry.isDir) {
+    return "text-amber-600 dark:text-amber-400";
+  }
+  if (entry.isSymlink) {
+    return "text-accent-500 dark:text-accent-400";
+  }
+  return "text-zinc-500 dark:text-zinc-400";
+}
 
 export function TreePage({
   owner,
@@ -61,7 +72,7 @@ export function TreePage({
                   <td>
                     <FileIcon
                       name={entry.iconName}
-                      className={`mr-1.5 inline-block h-4 w-4 align-[-2px] ${entry.isDir ? "text-amber-600 dark:text-amber-400" : "text-zinc-500 dark:text-zinc-400"}`}
+                      className={`mr-1.5 inline-block h-4 w-4 align-[-2px] ${getTreeEntryIconClass(entry)}`}
                     />{" "}
                     <a href={entry.href}>{entry.name}</a>
                   </td>

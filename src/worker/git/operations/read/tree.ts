@@ -106,6 +106,10 @@ export function isTreeMode(mode: string): boolean {
   return mode.startsWith("40000");
 }
 
+export function isSymlinkMode(mode: string): boolean {
+  return mode === "120000";
+}
+
 export function joinTreePath(basePath: string, name: string): string {
   return basePath ? `${basePath}/${name}` : name;
 }

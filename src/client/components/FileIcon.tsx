@@ -6,6 +6,7 @@ import {
   FileDiff,
   FileImage,
   FileSpreadsheet,
+  FileSymlink,
   FileText,
   Folder,
   Terminal,
@@ -25,6 +26,7 @@ const iconByName: Record<FileIconName, LucideIcon> = {
   folder: Folder,
   image: FileImage,
   spreadsheet: FileSpreadsheet,
+  symlink: FileSymlink,
   terminal: Terminal,
   text: FileText,
 };

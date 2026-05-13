@@ -109,6 +109,7 @@ export type FileIconName =
   | "folder"
   | "image"
   | "spreadsheet"
+  | "symlink"
   | "terminal"
   | "text";
 
@@ -123,8 +124,9 @@ export function getFileIconName(filename: string): FileIconName {
   // Get file extension (lowercase, without dot)
   const ext = filename.split(".").pop()?.toLowerCase() || "";
 
-  // Map extensions to Bootstrap Icon classes
-  // Using specific filetype-* icons where available, file-earmark-* for others
+  // Map extensions to the small shared icon set used by tree and blob views.
+  // Keep this intentionally coarse so uncommon extensions still get stable,
+  // recognizable icons without expanding the client icon bundle.
   const iconMap: Record<string, FileIconName> = {
     // JavaScript/TypeScript - specific filetype icons
     js: "code",

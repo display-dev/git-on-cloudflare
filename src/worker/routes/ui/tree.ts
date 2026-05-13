@@ -1,5 +1,5 @@
 import type { TreeEntry } from "@/worker/git";
-import { readPath } from "@/worker/git";
+import { isSymlinkMode, isTreeMode, readPath } from "@/worker/git";
 import {
   isValidRef,
   isValidPath,
@@ -102,22 +102,23 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
         name: string;
         href: string;
         isDir: boolean;
+        isSymlink: boolean;
         iconName: FileIconName;
         shortOid: string;
         size: string;
       }> = [];
       if (result.type === "tree" && result.entries) {
-        // Helper to determine if entry is a directory based on git mode
-        const isDirectory = (mode: string) => mode.startsWith("40000");
-
         const sorted = result.entries.sort((a: TreeEntry, b: TreeEntry) => {
-          const aIsDir = isDirectory(a.mode);
-          const bIsDir = isDirectory(b.mode);
+          const aIsDir = isTreeMode(a.mode);
+          const bIsDir = isTreeMode(b.mode);
           if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
           return a.name.localeCompare(b.name);
         });
         entries = sorted.map((e: TreeEntry) => {
-          const isDir = isDirectory(e.mode);
+          const isDir = isTreeMode(e.mode);
+          // Git stores symlinks as blobs with mode 120000. Keep their file-like
+          // navigation behavior, but give browsers a distinct tree icon.
+          const isSymlink = isSymlinkMode(e.mode);
           return {
             name: e.name,
             href: isDir
@@ -128,7 +129,8 @@ export async function handleTree(c: AppContext<"/:owner/:repo/tree">) {
                   (path ? path + "/" : "") + e.name
                 )}`,
             isDir,
-            iconName: isDir ? "folder" : getFileIconName(e.name),
+            isSymlink,
+            iconName: isSymlink ? "symlink" : isDir ? "folder" : getFileIconName(e.name),
             shortOid: e.oid ? e.oid.slice(0, 7) : "",
             size: "", // Size not available in tree entries, would need separate lookup
           };
