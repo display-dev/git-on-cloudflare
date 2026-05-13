@@ -6,8 +6,7 @@ import { BASE_TEST_BINDINGS } from "./test/vitest.bindings";
 import { defineConfig } from "vitest/config";
 
 const AUTH_TEST_FILE = "test/auth.worker.test.ts";
-const OPTIMIZED_DEPS = ["sanitize-html", "postcss", "source-map-js"];
-const INLINE_DEPS = ["@noble/hashes", "pako", ...OPTIMIZED_DEPS];
+const INLINE_DEPS = ["@noble/hashes", "pako"];
 const isAuthSuite =
   process.env.npm_lifecycle_event === "test:auth" ||
   process.argv.some((arg) => arg.includes("auth.worker.test.ts"));
@@ -32,6 +31,7 @@ export default defineConfig({
         cachePersist: false,
         // Keep the Worker test runtime aligned with the deployed Worker.
         compatibilityDate: "2026-05-13",
+        compatibilityFlags: ["nodejs_als"],
         bindings: {
           ...BASE_TEST_BINDINGS,
           PACK_INDEXER_FIXTURE: process.env.PACK_INDEXER_FIXTURE === "1" ? "1" : "",
@@ -70,13 +70,5 @@ export default defineConfig({
   test: {
     include: isAuthSuite ? [AUTH_TEST_FILE] : ["test/**/*.worker.test.ts"],
     exclude: isAuthSuite ? [] : [AUTH_TEST_FILE],
-    deps: {
-      optimizer: {
-        ssr: {
-          enabled: true,
-          include: OPTIMIZED_DEPS,
-        },
-      },
-    },
   },
 });

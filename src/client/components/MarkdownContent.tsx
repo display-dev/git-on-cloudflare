@@ -1,7 +1,7 @@
 import { Marked } from "marked";
-import sanitize from "sanitize-html";
 
 import { highlightCode } from "@/client/components/highlight";
+import { sanitizeMarkdownHtml } from "@/client/components/markdownHtmlSanitizer";
 import { escapeHtml } from "@/shared/web/format";
 
 type MarkdownContext = {
@@ -73,7 +73,7 @@ function highlightBlock(code: string, language?: string | null): string {
   return `<pre class="markdown-code-block"><code class="hljs ${highlighted.languageClass}">${highlighted.html}</code></pre>`;
 }
 
-function renderMarkdown(markdown: string, context: MarkdownContext): string {
+export function renderMarkdownToHtml(markdown: string, context: MarkdownContext): string {
   const marked = new Marked({ gfm: true, async: false });
 
   marked.use({
@@ -96,40 +96,16 @@ function renderMarkdown(markdown: string, context: MarkdownContext): string {
     },
   });
 
-  // async: false is set in the constructor, so parse() returns string synchronously
-  const raw = marked.parse(markdown) as string;
+  // async: false is set in the constructor, so parse() returns string synchronously.
+  const raw = marked.parse(markdown);
+  if (typeof raw !== "string") {
+    throw new Error("marked returned an async render result despite async: false");
+  }
 
-  return sanitize(raw, {
-    allowedTags: sanitize.defaults.allowedTags.concat([
-      "img",
-      "details",
-      "summary",
-      "del",
-      "ins",
-      "sup",
-      "sub",
-      "kbd",
-      "abbr",
-    ]),
-    allowedAttributes: {
-      ...sanitize.defaults.allowedAttributes,
-      a: ["href", "title", "name", "target", "rel"],
-      img: ["src", "alt", "title", "loading"],
-      code: ["class"],
-      span: ["class"],
-      pre: ["class"],
-      td: ["align"],
-      th: ["align"],
-    },
-    allowedClasses: {
-      code: ["hljs", "language-*"],
-      span: ["hljs-*"],
-      pre: ["markdown-code-block"],
-    },
-  });
+  return sanitizeMarkdownHtml(raw);
 }
 
 export function MarkdownContent({ markdown, context }: MarkdownContentProps) {
-  const html = renderMarkdown(markdown, context);
+  const html = renderMarkdownToHtml(markdown, context);
   return <div className="markdown-content" dangerouslySetInnerHTML={{ __html: html }} />;
 }

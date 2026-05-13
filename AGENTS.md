@@ -76,7 +76,7 @@ Write changes against the current source tree, not the docs alone. Some document
 
 ## Stack At A Glance
 
-- Runtime: Cloudflare Workers with `nodejs_compat`
+- Runtime: Cloudflare Workers with `nodejs_als`
 - Language: TypeScript ESM, strict mode
 - UI: React 19 SSR via `react-dom/server`, client islands, Tailwind CSS v4, Vite
 - Storage: Durable Object storage, Durable Object SQLite via `drizzle-orm/durable-sqlite`, R2, KV

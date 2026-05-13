@@ -4,7 +4,7 @@
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-05-13",
   "compatibility_flags": [
-    "nodejs_compat"
+    "nodejs_als"
   ],
   "workers_dev": false,
   "routes": [
