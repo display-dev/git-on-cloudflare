@@ -23,17 +23,21 @@ type ButtonAsAnchor = ButtonBaseProps &
 export type ButtonProps = ButtonAsButton | ButtonAsAnchor;
 
 const shared =
-  "inline-flex items-center justify-center gap-2 rounded-xl font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas disabled:opacity-50 disabled:pointer-events-none";
+  "inline-flex items-center justify-center gap-2 rounded-xl font-medium no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas disabled:opacity-50 disabled:pointer-events-none";
 
+// Anchor-backed buttons still match the global link rules in app.css, so each
+// variant declares text colors for hover states instead of relying on cascade.
+// Hover color swaps are intentionally instant; animating them can create muddy
+// intermediate colors across browsers. Only the active press scale transitions.
 const variants: Record<ButtonVariant, string> = {
   primary:
-    "bg-accent-600 text-white hover:bg-accent-500 active:scale-[0.98] transition-[background-color,transform]",
+    "bg-accent-600 text-white hover:bg-accent-500 hover:text-white active:scale-[0.98] transition-transform",
   secondary:
-    "border border-zinc-300 dark:border-zinc-700/60 bg-zinc-100 dark:bg-zinc-800/60 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700/60 active:scale-[0.98] transition-transform",
+    "border border-zinc-300 bg-zinc-100 text-zinc-700 hover:bg-zinc-200 hover:text-zinc-900 dark:border-zinc-700/60 dark:bg-zinc-800/60 dark:text-zinc-300 dark:hover:bg-zinc-700/60 dark:hover:text-zinc-100 active:scale-[0.98] transition-transform",
   danger:
-    "border border-red-500/20 bg-red-500/10 text-red-700 dark:text-red-400 hover:bg-red-500/20 active:scale-[0.98] transition-transform",
+    "border border-red-500/20 bg-red-500/10 text-red-700 hover:bg-red-500/20 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 active:scale-[0.98] transition-transform",
   ghost:
-    "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/70 hover:text-zinc-900 dark:hover:text-zinc-100 active:scale-[0.97] transition-transform",
+    "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/70 dark:hover:text-zinc-100 active:scale-[0.97] transition-transform",
 };
 
 const sizes: Record<ButtonSize, string> = {
