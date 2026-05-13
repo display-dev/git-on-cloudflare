@@ -2,10 +2,22 @@ import { it, expect } from "vitest";
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
-import { runDOWithRetry } from "./util/test-helpers";
+import { runDOWithRetry, withEnvOverrides, type RepoDOStub } from "./util/test-helpers";
 
 function makeRepoId(suffix: string) {
   return `alarm/${suffix}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function runAlarmWithRetry(getStub: () => RepoDOStub): Promise<boolean> {
+  try {
+    return await runDurableObjectAlarm(getStub());
+  } catch (e) {
+    const msg = String(e || "");
+    if (msg.includes("invalidating this Durable Object")) {
+      return await runDurableObjectAlarm(getStub());
+    }
+    throw e;
+  }
 }
 
 it("alarm: deletes empty repo storage and R2 objects when idle", async () => {
@@ -33,17 +45,7 @@ it("alarm: deletes empty repo storage and R2 objects when idle", async () => {
   await env.REPO_BUCKET.put(`${prefix}/objects/pack/tmp.idx`, new Uint8Array([4, 5, 6]));
   await env.REPO_BUCKET.put(`${prefix}/note.txt`, "hello");
 
-  const ran1 = await (async () => {
-    try {
-      return await runDurableObjectAlarm(getStub());
-    } catch (e) {
-      const msg = String(e || "");
-      if (msg.includes("invalidating this Durable Object")) {
-        return await runDurableObjectAlarm(getStub());
-      }
-      throw e;
-    }
-  })();
+  const ran1 = await runAlarmWithRetry(getStub);
   expect(ran1).toBe(true);
 
   // Verify R2 namespace is empty
@@ -55,9 +57,11 @@ it("alarm: deletes empty repo storage and R2 objects when idle", async () => {
     const refs = await state.storage.get("refs");
     const head = await state.storage.get("head");
     const last = await state.storage.get("lastAccessMs");
+    const alarm = await state.storage.getAlarm();
     expect(refs).toBeUndefined();
     expect(head).toBeUndefined();
     expect(last).toBeUndefined();
+    expect(alarm).toBeNull();
   });
 });
 
@@ -84,27 +88,25 @@ it("alarm: does not delete a non-empty repo", async () => {
   await env.REPO_BUCKET.put(`${prefix}/objects/pack/keep.pack`, new Uint8Array([9, 9, 9]));
 
   // Make it look idle
+  const staleAccess = Date.now() - 60 * 60 * 1000;
   await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
-    await state.storage.put("lastAccessMs", Date.now() - 60 * 60 * 1000);
+    await state.storage.put("lastAccessMs", staleAccess);
+    await state.storage.setAlarm(Date.now() + 100);
   });
 
-  const ran2 = await (async () => {
-    try {
-      return await runDurableObjectAlarm(getStub());
-    } catch (e) {
-      const msg = String(e || "");
-      if (msg.includes("invalidating this Durable Object")) {
-        return await runDurableObjectAlarm(getStub());
-      }
-      throw e;
-    }
-  })();
+  const ran2 = await runAlarmWithRetry(getStub);
   expect(ran2).toBe(true);
 
   // The repo is non-empty; R2 object should remain
   const listed = await env.REPO_BUCKET.list({ prefix: `${prefix}/objects/pack/` });
   const keys = (listed.objects || []).map((o: any) => o.key);
   expect(keys.some((k: string) => k.endsWith("keep.pack"))).toBe(true);
+  await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
+    const last = await state.storage.get("lastAccessMs");
+    const alarm = await state.storage.getAlarm();
+    expect(last).toBe(staleAccess);
+    expect(alarm).toBeNull();
+  });
 });
 
 it("alarm: does not delete repo with no refs but active pack catalog rows", async () => {
@@ -131,24 +133,45 @@ it("alarm: does not delete repo with no refs but active pack catalog rows", asyn
     await state.storage.put("refs", []);
     await state.storage.put("head", { target: "refs/heads/main", unborn: true });
     await state.storage.put("lastAccessMs", Date.now() - 60 * 60 * 1000);
+    await state.storage.setAlarm(Date.now() + 100);
   });
 
-  const ran = await (async () => {
-    try {
-      return await runDurableObjectAlarm(getStub());
-    } catch (e) {
-      const msg = String(e || "");
-      if (msg.includes("invalidating this Durable Object")) {
-        return await runDurableObjectAlarm(getStub());
-      }
-      throw e;
-    }
-  })();
+  const ran = await runAlarmWithRetry(getStub);
   expect(ran).toBe(true);
 
   // R2 pack data must survive — active pack catalog rows protect against purge
   const listed = await env.REPO_BUCKET.list({ prefix: `${prefix}/objects/pack/` });
   expect((listed.objects || []).length).toBeGreaterThan(0);
+  await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
+    const alarm = await state.storage.getAlarm();
+    expect(alarm).toBeNull();
+  });
+});
+
+it("alarm: re-arms recently active repo for its idle deadline", async () => {
+  await withEnvOverrides(env, { REPO_DO_IDLE_MINUTES: "1" }, async () => {
+    const repoId = makeRepoId("recent");
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id);
+    const lastAccess = Date.now();
+
+    await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
+      await state.storage.put("refs", []);
+      await state.storage.put("head", { target: "refs/heads/main", unborn: true });
+      await state.storage.put("lastAccessMs", lastAccess);
+      await state.storage.setAlarm(Date.now() + 100);
+    });
+
+    const ran = await runAlarmWithRetry(getStub);
+    expect(ran).toBe(true);
+
+    await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
+      const alarm = await state.storage.getAlarm();
+      expect(typeof alarm).toBe("number");
+      expect(alarm).toBeGreaterThanOrEqual(lastAccess + 50_000);
+      expect(alarm).toBeLessThanOrEqual(lastAccess + 70_000);
+    });
+  });
 });
 
 it("alarm: re-arms compaction via queue when compactionWantedAt is set", async () => {
@@ -170,17 +193,7 @@ it("alarm: re-arms compaction via queue when compactionWantedAt is set", async (
 
   // Fire the alarm — compaction rearm path should dispatch a queue message
   // and return before reaching the idle cleanup path
-  const ran = await (async () => {
-    try {
-      return await runDurableObjectAlarm(getStub());
-    } catch (e) {
-      const msg = String(e || "");
-      if (msg.includes("invalidating this Durable Object")) {
-        return await runDurableObjectAlarm(getStub());
-      }
-      throw e;
-    }
-  })();
+  const ran = await runAlarmWithRetry(getStub);
   expect(ran).toBe(true);
 
   // compactionWantedAt should still be set (cleared by the queue consumer after

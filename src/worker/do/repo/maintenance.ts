@@ -15,10 +15,26 @@ import { doPrefix } from "@/worker/keys";
 import { ensureScheduled } from "./scheduler";
 import { getConfig } from "./repoConfig";
 
+type IdleCleanupDecision =
+  | {
+      kind: "active";
+      lastAccess: number;
+      nextIdleAt: number;
+    }
+  | {
+      kind: "empty-idle" | "nonempty-idle";
+      lastAccess: number | undefined;
+      refsCount: number;
+      hasHead: boolean;
+      headUnborn: boolean;
+      hasHeadTarget: boolean;
+      activePackCount: number;
+    };
+
 /**
  * Handles idle cleanup after alarm fires.
  * Checks if the repository should be cleaned up due to idleness
- * and reschedules the next alarm.
+ * and reschedules only when the repository has not reached its idle deadline.
  * @param ctx - Durable Object state context
  * @param env - Worker environment
  * @param logger - Logger instance
@@ -33,37 +49,54 @@ export async function handleIdleAndMaintenance(
     const now = Date.now();
     const store = asTypedStorage<RepoStateSchema>(ctx.storage);
     const lastAccess = await store.get("lastAccessMs");
+    const decision = await decideIdleCleanup(ctx, cfg.idleMs, lastAccess, now);
 
-    // Check if idle cleanup is needed
-    if (await shouldCleanupIdle(ctx, cfg.idleMs, lastAccess)) {
+    if (decision.kind === "active") {
+      logger?.debug("cleanup:active-rearm", {
+        lastAccess: decision.lastAccess,
+        nextIdleAt: decision.nextIdleAt,
+      });
+      await ensureScheduled(ctx, env, now);
+      return;
+    }
+
+    if (decision.kind === "empty-idle") {
+      logger?.info("cleanup:empty-idle", decision);
       await performIdleCleanup(ctx, env, logger);
       return;
     }
 
-    // Schedule next alarm via unified scheduler
-    await ensureScheduled(ctx, env, now);
+    logger?.info("cleanup:nonempty-idle-skip", decision);
+    await clearIdleAlarm(ctx, logger);
   } catch (e) {
     logger?.error("alarm:error", { error: String(e) });
   }
 }
 
 /**
- * Determines if the repository should be cleaned up due to idleness.
+ * Determines whether the idle alarm should clean up, re-arm, or stop.
  * A repo is considered for cleanup if it's been idle beyond the threshold
  * AND appears empty (no refs, unborn/missing HEAD, no active packs in catalog).
  * @param ctx - Durable Object state context
  * @param idleMs - Idle threshold in milliseconds
  * @param lastAccess - Last access timestamp
- * @returns true if cleanup should proceed
+ * @param now - Current timestamp
+ * @returns cleanup decision for the alarm handler
  */
-async function shouldCleanupIdle(
+async function decideIdleCleanup(
   ctx: DurableObjectState,
   idleMs: number,
-  lastAccess: number | undefined
-): Promise<boolean> {
-  const now = Date.now();
+  lastAccess: number | undefined,
+  now: number
+): Promise<IdleCleanupDecision> {
   const idleExceeded = !lastAccess || now - lastAccess >= idleMs;
-  if (!idleExceeded) return false;
+  if (!idleExceeded) {
+    return {
+      kind: "active",
+      lastAccess,
+      nextIdleAt: lastAccess + idleMs,
+    };
+  }
 
   // Check if repo looks empty
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
@@ -71,8 +104,25 @@ async function shouldCleanupIdle(
   const head = await store.get("head");
   const db = getDb(ctx.storage);
   const catalogCount = await getActivePackCatalogCount(db);
+  const empty = refs.length === 0 && (!head || head.unborn || !head.target) && catalogCount === 0;
 
-  return refs.length === 0 && (!head || head.unborn || !head.target) && catalogCount === 0;
+  return {
+    kind: empty ? "empty-idle" : "nonempty-idle",
+    lastAccess,
+    refsCount: refs.length,
+    hasHead: head !== undefined,
+    headUnborn: head?.unborn === true,
+    hasHeadTarget: typeof head?.target === "string" && head.target.length > 0,
+    activePackCount: catalogCount,
+  };
+}
+
+async function clearIdleAlarm(ctx: DurableObjectState, logger?: Logger): Promise<void> {
+  try {
+    await ctx.storage.deleteAlarm();
+  } catch (e) {
+    logger?.warn("cleanup:delete-alarm-failed", { error: String(e) });
+  }
 }
 
 /**

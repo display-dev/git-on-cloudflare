@@ -78,7 +78,9 @@ export class RepoDurableObject extends DurableObject {
       this.lastAccessMemMs = await ctx.storage.get("lastAccessMs");
       const db = getDb(ctx.storage);
       await migrate(db, migrations);
-      await this.ensureAccessAndAlarm();
+      // The constructor also runs before `alarm()`. Do not touch
+      // `lastAccessMs` here, or an alarm wakeup would make an idle object look
+      // freshly accessed and would keep cleanup from ever seeing it as idle.
     });
   }
 
