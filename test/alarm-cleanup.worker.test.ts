@@ -7,6 +7,14 @@ function makeRepoId(suffix: string) {
   return `alarm/${suffix}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function manualAlarmTime() {
+  // `runDurableObjectAlarm()` dispatches any scheduled alarm without checking
+  // whether the timestamp is due. Keep manually-fired test alarms far enough in
+  // the future that Miniflare's automatic alarm dispatch cannot consume them
+  // before the test helper asserts it ran one.
+  return Date.now() + 60 * 60 * 1000;
+}
+
 it("alarm: deletes empty repo storage and R2 objects when idle", async () => {
   const repoId = makeRepoId("empty");
   const id = env.REPO_DO.idFromName(repoId);
@@ -21,7 +29,7 @@ it("alarm: deletes empty repo storage and R2 objects when idle", async () => {
       await state.storage.put("head", { target: "refs/heads/main", unborn: true });
       // Simulate idle long ago
       await state.storage.put("lastAccessMs", Date.now() - 60 * 60 * 1000);
-      await state.storage.setAlarm(Date.now() + 60 * 60 * 1000);
+      await state.storage.setAlarm(manualAlarmTime());
       const pfx = `do/${state.id.toString()}`;
       return { prefix: pfx };
     }
@@ -78,7 +86,7 @@ it("alarm: does not delete a non-empty repo", async () => {
   const staleAccess = Date.now() - 60 * 60 * 1000;
   await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
     await state.storage.put("lastAccessMs", staleAccess);
-    await state.storage.setAlarm(Date.now() + 100);
+    await state.storage.setAlarm(manualAlarmTime());
   });
 
   const ran2 = await runAlarmWithRetry(getStub);
@@ -120,7 +128,7 @@ it("alarm: does not delete repo with no refs but active pack catalog rows", asyn
     await state.storage.put("refs", []);
     await state.storage.put("head", { target: "refs/heads/main", unborn: true });
     await state.storage.put("lastAccessMs", Date.now() - 60 * 60 * 1000);
-    await state.storage.setAlarm(Date.now() + 100);
+    await state.storage.setAlarm(manualAlarmTime());
   });
 
   const ran = await runAlarmWithRetry(getStub);
@@ -146,7 +154,7 @@ it("alarm: re-arms recently active repo for its idle deadline", async () => {
       await state.storage.put("refs", []);
       await state.storage.put("head", { target: "refs/heads/main", unborn: true });
       await state.storage.put("lastAccessMs", lastAccess);
-      await state.storage.setAlarm(Date.now() + 100);
+      await state.storage.setAlarm(manualAlarmTime());
     });
 
     const ran = await runAlarmWithRetry(getStub);
@@ -175,7 +183,7 @@ it("alarm: re-arms compaction via queue when compactionWantedAt is set", async (
   await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
     await store.put("compactionWantedAt", Date.now());
-    await state.storage.setAlarm(Date.now() + 100);
+    await state.storage.setAlarm(manualAlarmTime());
   });
 
   // Fire the alarm — compaction rearm path should dispatch a queue message

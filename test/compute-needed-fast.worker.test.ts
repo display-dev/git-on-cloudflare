@@ -1,5 +1,6 @@
 import { it, expect, describe } from "vitest";
 import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import type { CacheContext } from "@/worker/cache";
 import { computeNeededFast } from "@/worker/git/operations/fetch/neededFast";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers";
@@ -71,7 +72,7 @@ describe("computeNeededFast", () => {
 
     const cacheCtx: CacheContext = {
       req: new Request("http://test"),
-      ctx: { waitUntil: () => {}, passThroughOnException: () => {} } as any,
+      ctx: createExecutionContext(),
       memo: {
         flags: new Set<string>(),
       },
@@ -114,7 +115,7 @@ describe("computeNeededFast", () => {
 
     const cacheCtx: CacheContext = {
       req: new Request("http://test"),
-      ctx: { waitUntil: () => {}, passThroughOnException: () => {} } as any,
+      ctx: createExecutionContext(),
       memo: {
         refs: new Map<string, string[]>(),
         flags: new Set<string>(),

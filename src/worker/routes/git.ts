@@ -26,7 +26,7 @@ import {
 import type { Db } from "@/worker/db/d1/client";
 import type { Logger } from "@/worker/common/logger";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
-import type { AppContext, AppRouter } from "./hono";
+import { workerExecutionContext, type AppContext, type AppRouter } from "./hono";
 
 type GitService = "git-upload-pack" | "git-receive-pack";
 type PatTouchOp = "read" | "write";
@@ -406,10 +406,17 @@ async function authorizeGitRouteForRequest(
   if (auth.kind === "pat") {
     // PAT `last_used_at` is a visibility signal for token management only;
     // it is throttled for reads and always attempted for writes.
-    scheduleTouchPatLastUsedAt(c.env, c.executionCtx, auth.verified, patTouchOp, Date.now(), {
-      db: c.var.db,
-      log: c.var.logFor({ service: "GitAuth" }),
-    });
+    scheduleTouchPatLastUsedAt(
+      c.env,
+      workerExecutionContext(c),
+      auth.verified,
+      patTouchOp,
+      Date.now(),
+      {
+        db: c.var.db,
+        log: c.var.logFor({ service: "GitAuth" }),
+      }
+    );
   }
 
   return { kind: "ok", cacheCtx };
@@ -474,7 +481,7 @@ export function registerGitRoutes(router: AppRouter) {
       c.env,
       route,
       c.req.raw,
-      c.executionCtx,
+      workerExecutionContext(c),
       c.var.db,
       c.var.logFor({ service: "ReceiveAcl", repoId: route.doName })
     );

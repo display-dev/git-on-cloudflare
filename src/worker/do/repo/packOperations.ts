@@ -174,18 +174,10 @@ export async function clearRepositoryStorage(
     doId: ctx.id.toString(),
   });
 
+  // The 2026-05-13 compatibility date includes `delete_all_deletes_alarm`,
+  // so this also clears any pending alarm for the deleted repository.
   await ctx.storage.deleteAll();
   log.info("clear:storage-deleted-all");
-
-  // `deleteAll()` does not always cancel a pending alarm. Clearing it
-  // explicitly keeps the post-delete DO inert so a stray scheduled tick
-  // cannot reach into a now-empty storage and log noise.
-  try {
-    await ctx.storage.deleteAlarm();
-    log.debug("clear:alarm-deleted");
-  } catch (error) {
-    log.warn("clear:delete-alarm-failed", { error: String(error) });
-  }
 
   return { deletedDO: true };
 }

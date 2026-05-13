@@ -3,16 +3,12 @@ import type { CacheContext } from "@/worker/cache";
 import { buildPack } from "./git-pack";
 import { buildTreePayload, seedPackedRepoState } from "./packed-repo";
 import { encodeGitObject } from "@/worker/git/core";
-import { env } from "cloudflare:test";
+import { createExecutionContext, env } from "cloudflare:test";
 
 export function createTestCacheContext(url: string, subreqBudget?: number): CacheContext {
   return {
     req: new Request(url),
-    ctx: {
-      props: undefined,
-      waitUntil(_promise: Promise<unknown>) {},
-      passThroughOnException() {},
-    },
+    ctx: createExecutionContext(),
     memo: typeof subreqBudget === "number" ? { subreqBudget } : {},
   };
 }

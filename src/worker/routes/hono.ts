@@ -32,6 +32,14 @@ export type AppRouter = Hono<AppBindings>;
 // request state, middleware variables, response helpers, and executionCtx.
 export type AppContext<Path extends string = string> = Context<AppBindings, Path>;
 
+export function workerExecutionContext(c: AppContext): ExecutionContext {
+  // Hono 4.12.x still types `executionCtx.exports` as optional while Wrangler's
+  // generated Workers runtime types require it. At runtime Hono is carrying the
+  // real Cloudflare Workers context; keep the cast at this framework boundary.
+  // See https://github.com/honojs/hono/issues/4493.
+  return c.executionCtx as ExecutionContext;
+}
+
 function requestIdFrom(request: Request): string {
   return request.headers.get("Cf-Ray")?.trim() || crypto.randomUUID();
 }
@@ -40,7 +48,7 @@ export const requestServicesMiddleware = createMiddleware<AppBindings>(async (c,
   const requestId = requestIdFrom(c.req.raw);
   const cacheCtx: CacheContext = {
     req: c.req.raw,
-    ctx: c.executionCtx,
+    ctx: workerExecutionContext(c),
   };
   const limiter = getLimiter(cacheCtx);
 

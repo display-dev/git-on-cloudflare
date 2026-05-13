@@ -139,7 +139,8 @@ async function performIdleCleanup(
 ): Promise<void> {
   const storage = ctx.storage;
 
-  // Purge DO storage
+  // Purge DO storage. The 2026-05-13 compatibility date includes
+  // `delete_all_deletes_alarm`, so this also clears any pending alarm.
   try {
     await storage.deleteAll();
   } catch (e) {
@@ -149,13 +150,6 @@ async function performIdleCleanup(
   // Purge R2 mirror
   const prefix = doPrefix(ctx.id.toString());
   await purgeR2Mirror(env, prefix, logger);
-
-  // Clear the alarm after cleanup
-  try {
-    await storage.deleteAlarm();
-  } catch (e) {
-    logger?.warn("cleanup:delete-alarm-failed", { error: String(e) });
-  }
 }
 
 /**
