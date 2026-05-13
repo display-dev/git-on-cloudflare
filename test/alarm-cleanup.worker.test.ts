@@ -1,23 +1,10 @@
 import { it, expect } from "vitest";
-import { runDurableObjectAlarm } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
-import { runDOWithRetry, withEnvOverrides, type RepoDOStub } from "./util/test-helpers";
+import { runAlarmWithRetry, runDOWithRetry, withEnvOverrides } from "./util/test-helpers";
 
 function makeRepoId(suffix: string) {
   return `alarm/${suffix}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-async function runAlarmWithRetry(getStub: () => RepoDOStub): Promise<boolean> {
-  try {
-    return await runDurableObjectAlarm(getStub());
-  } catch (e) {
-    const msg = String(e || "");
-    if (msg.includes("invalidating this Durable Object")) {
-      return await runDurableObjectAlarm(getStub());
-    }
-    throw e;
-  }
 }
 
 it("alarm: deletes empty repo storage and R2 objects when idle", async () => {

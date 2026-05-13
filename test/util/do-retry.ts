@@ -1,4 +1,4 @@
-import { runInDurableObject } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 
 import type { RepoDurableObject } from "@/worker/do";
 
@@ -43,6 +43,22 @@ export async function callStubWithRetry<T>(
     const message = String(error || "");
     if (message.includes("invalidating this Durable Object")) {
       return await fn(getStub());
+    }
+    throw error;
+  }
+}
+
+/**
+ * Fire a Durable Object alarm and reacquire the stub if workerd invalidated the
+ * previous instance during local test execution.
+ */
+export async function runAlarmWithRetry(getStub: RepoDOStubFactory): Promise<boolean> {
+  try {
+    return await runDurableObjectAlarm(getStub());
+  } catch (error) {
+    const message = String(error || "");
+    if (message.includes("invalidating this Durable Object")) {
+      return await runDurableObjectAlarm(getStub());
     }
     throw error;
   }
