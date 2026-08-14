@@ -31,6 +31,14 @@ type IngestionResponse = {
   replayed: boolean;
 };
 
+type SnapshotManifest = {
+  version: number;
+  repositoryId: string;
+  commitSha: string;
+  treeSha: string;
+  files: Array<{ path: string; bytes: number; sha256: string }>;
+};
+
 function ingestionForm(args?: {
   expectedOid?: string;
   committedAtSeconds?: number;
@@ -127,14 +135,52 @@ describe("internal ingestion", () => {
     expect(blob?.type).toBe("blob");
     expect(new TextDecoder().decode(blob!.payload)).toBe("hello from ingestion\n");
 
+    const snapshotBase = `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}`;
+    const snapshotHeaders = { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` };
+    const manifestResponse = await workerExports.default.fetch(`${snapshotBase}/manifest`, {
+      headers: snapshotHeaders,
+    });
+    expect(manifestResponse.status).toBe(200);
+    const manifest = (await manifestResponse.json()) as SnapshotManifest;
+    expect(manifest).toMatchObject({
+      version: 1,
+      repositoryId: seeded.repositoryId,
+      commitSha: body.acceptedWrite.afterSha,
+      treeSha: body.treeSha,
+    });
+    expect(manifest.files.map((file) => file.path)).toEqual(["index.html", "nested/hello.txt"]);
+    const servedBlob = await workerExports.default.fetch(
+      `${snapshotBase}/file?path=${encodeURIComponent("nested/hello.txt")}`,
+      { headers: snapshotHeaders }
+    );
+    expect(servedBlob.status).toBe(200);
+    expect(await servedBlob.text()).toBe("hello from ingestion\n");
+    expect(
+      (
+        await workerExports.default.fetch(`${snapshotBase}/manifest`, {
+          headers: { Authorization: "Bearer wrong-token" },
+        })
+      ).status
+    ).toBe(401);
+
     const catalogBeforeReplay = await callStubWithRetry(
       () => stub,
       (repoStub) => repoStub.getActivePackCatalog()
+    );
+    await env.REPO_BUCKET.delete(
+      `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/${body.acceptedWrite.afterSha}/manifest.json`
     );
     const replay = await postIngestion(owner, repo, ingestionForm());
     expect(replay.status).toBe(200);
     const replayBody = (await replay.json()) as IngestionResponse;
     expect(replayBody).toEqual({ ...body, replayed: true });
+    expect(
+      (
+        await workerExports.default.fetch(`${snapshotBase}/manifest`, {
+          headers: snapshotHeaders,
+        })
+      ).status
+    ).toBe(200);
     const catalogAfterReplay = await callStubWithRetry(
       () => stub,
       (repoStub) => repoStub.getActivePackCatalog()
@@ -420,5 +466,43 @@ describe("internal ingestion", () => {
       const response = await postIngestion("missing", "missing", ingestionForm(), "anything");
       expect(response.status).toBe(404);
     });
+  });
+
+  it("keeps snapshot reads hidden when the benchmark prefix is not configured", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-disabled");
+    await setupRepoForTests(env, owner, repo);
+    await withEnvOverrides(env, { SNAPSHOT_BENCHMARK_PREFIX: "" }, async () => {
+      const response = await workerExports.default.fetch(
+        `https://example.com/_internal/snapshots/${owner}/${repo}/${"a".repeat(40)}/manifest`,
+        { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+      );
+      expect(response.status).toBe(404);
+    });
+  });
+
+  it("serves materialized binary bytes without transformation", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-binary");
+    await setupRepoForTests(env, owner, repo);
+    const bytes = new Uint8Array(250_000);
+    for (let index = 0; index < bytes.length; index++) {
+      bytes[index] = index % 256;
+    }
+    const form = new FormData();
+    form.set("expectedOid", zeroOid());
+    form.set("actor", "binary-test");
+    form.set("idempotencyKey", "binary-snapshot-request");
+    form.set("committedAtSeconds", "1700000000");
+    form.append("files", new Blob([bytes]), "assets/file.bin");
+    const response = await postIngestion(owner, repo, form);
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as IngestionResponse;
+    const served = await workerExports.default.fetch(
+      `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}/file?path=${encodeURIComponent("assets/file.bin")}`,
+      { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+    );
+    expect(served.status).toBe(200);
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(bytes);
   });
 });

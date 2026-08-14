@@ -1,5 +1,4 @@
 import { asBodyInit, asBufferSource, bytesToHex, getRepoStub, zeroOid } from "@/worker/common";
-import { constantTimeEquals } from "@/worker/auth/pat";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
 import type { BeginReceiveResult } from "@/worker/do/repo/catalog/shared";
 import { acceptedWriteFactsForCommands, emitAcceptedWriteFacts } from "@/worker/git/acceptedWrite";
@@ -7,9 +6,11 @@ import { buildIngestionCommit, type IngestionFile } from "@/worker/git/ingestion
 import { countSubrequest } from "@/worker/git/operations/limits";
 import type { ReceiveCommand } from "@/worker/git/operations/validation";
 import { executeReceivePipeline } from "@/worker/git/receive/pipeline";
+import { materializeAcceptedWrite } from "@/worker/git/snapshot/materialize";
 import { resolveRepositoryRoute } from "@/worker/repositories/route";
 import { isValidOwnerRepo, MAX_PATH_LEN } from "@/shared/web";
 import { workerExecutionContext, type AppContext, type AppRouter } from "./hono";
+import { authorizeInternalRequest } from "./internalAuth";
 
 const INGESTION_REF = "refs/heads/main";
 const MAX_FILES = 100;
@@ -46,16 +47,6 @@ function jsonResponse(body: unknown, status: number): Response {
     status,
     headers: { "Cache-Control": "no-store" },
   });
-}
-
-function disabledOrUnauthorized(c: AppContext): Promise<Response> | Response {
-  const configuredToken = c.env.INGESTION_RPC_TOKEN;
-  if (!configuredToken) return new Response("Not found\n", { status: 404 });
-  const match = /^Bearer (.+)$/.exec(c.req.header("Authorization") ?? "");
-  if (!match) return jsonResponse({ error: "Unauthorized" }, 401);
-  return constantTimeEquals(configuredToken, match[1]!).then((authorized) =>
-    authorized ? new Response(null, { status: 204 }) : jsonResponse({ error: "Unauthorized" }, 401)
-  );
 }
 
 function validatePath(path: string): void {
@@ -182,8 +173,8 @@ async function sha256(value: string): Promise<string> {
 }
 
 async function handleIngestion(c: AppContext): Promise<Response> {
-  const authResult = await disabledOrUnauthorized(c);
-  if (authResult.status !== 204) return authResult;
+  const authResult = await authorizeInternalRequest(c);
+  if (authResult) return authResult;
 
   const owner = c.req.param("owner") ?? "";
   const repo = c.req.param("repo") ?? "";
@@ -236,6 +227,15 @@ async function handleIngestion(c: AppContext): Promise<Response> {
       if (priorReceipt.fingerprint !== fingerprint) {
         return jsonResponse({ error: "Idempotency key conflict" }, 409);
       }
+      await materializeAcceptedWrite({
+        env: c.env,
+        repoId: route.doName,
+        fact: priorReceipt.acceptedWrite,
+        request: c.req.raw,
+        ctx,
+        limiter,
+        log,
+      });
       return jsonResponse(
         {
           acceptedWrite: priorReceipt.acceptedWrite,
@@ -317,6 +317,15 @@ async function handleIngestion(c: AppContext): Promise<Response> {
       }
 
       emitAcceptedWriteFacts(log, [acceptedWrite]);
+      await materializeAcceptedWrite({
+        env: c.env,
+        repoId: route.doName,
+        fact: acceptedWrite,
+        request: c.req.raw,
+        ctx,
+        limiter,
+        log,
+      });
       try {
         await touchRepositoryUpdatedAt(c.var.db, route.repositoryId, Date.now());
       } catch (error) {

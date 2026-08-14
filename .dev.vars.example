@@ -27,3 +27,7 @@ TESSERA_OIDC_CLIENT_SECRET=local-goc-dev-secret-change-me
 # Optional internal ingestion endpoint. Production remains disabled until this
 # secret is explicitly configured with `wrangler secret put`.
 INGESTION_RPC_TOKEN=local-goc-ingestion-token-change-me
+
+# Investigation-only synchronous snapshot materializer. Leave empty outside
+# disposable benchmark deployments.
+SNAPSHOT_BENCHMARK_PREFIX=

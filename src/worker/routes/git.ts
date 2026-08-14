@@ -28,6 +28,7 @@ import type { Logger } from "@/worker/common/logger";
 import type { Limiter } from "@/worker/git/operations/limits";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
 import { acceptedWriteFactsForCommands, emitAcceptedWriteFacts } from "@/worker/git/acceptedWrite";
+import { materializeAcceptedWrite } from "@/worker/git/snapshot/materialize";
 import { workerExecutionContext, type AppContext, type AppRouter } from "./hono";
 
 type GitService = "git-upload-pack" | "git-receive-pack";
@@ -217,16 +218,36 @@ async function handleReceivePackPOST(
     limiter,
     onRepoStateChanged: async ({ changed, commands }) => {
       if (!changed) return;
-      emitAcceptedWriteFacts(
-        log,
-        acceptedWriteFactsForCommands({
-          repositoryId: route.repositoryId,
-          commands,
-          actor,
-          sourceSurface: "git-push",
-          idempotencyKey: null,
-        })
-      );
+      const acceptedWrites = acceptedWriteFactsForCommands({
+        repositoryId: route.repositoryId,
+        commands,
+        actor,
+        sourceSurface: "git-push",
+        idempotencyKey: null,
+      });
+      emitAcceptedWriteFacts(log, acceptedWrites);
+      for (const fact of acceptedWrites) {
+        try {
+          await materializeAcceptedWrite({
+            env,
+            repoId: route.doName,
+            fact,
+            request,
+            ctx,
+            limiter,
+            log,
+          });
+        } catch (error) {
+          // Git receive is already authoritative when this callback runs.
+          // Investigation 6 owns durable retry/reconciliation; the benchmark
+          // hook must not turn an accepted protocol push into an unhandled task.
+          log.warn("snapshot:materialization-failed", {
+            repositoryId: route.repositoryId,
+            commitSha: fact.afterSha,
+            error: String(error),
+          });
+        }
+      }
       try {
         await touchRepositoryUpdatedAt(db, route.repositoryId, Date.now());
         log.debug("receive:repo-updated-at-touched", { repositoryId: route.repositoryId });
