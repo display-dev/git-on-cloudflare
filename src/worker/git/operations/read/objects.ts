@@ -115,6 +115,14 @@ export async function readBlob(
   return { content: obj.payload, type: obj.type };
 }
 
+/** Release a large object after a bounded streaming-style consumer is done. */
+export function evictObjectFromRequestMemo(cacheCtx: CacheContext, oid: string): void {
+  const normalized = oid.toLowerCase();
+  cacheCtx.memo?.objects?.delete(normalized);
+  cacheCtx.memo?.packedObjects?.delete(normalized);
+  cacheCtx.memo?.packedObjectPromises?.delete(normalized);
+}
+
 export async function readBlobStream(
   env: Env,
   repoId: string,

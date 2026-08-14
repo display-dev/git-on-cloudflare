@@ -21,8 +21,51 @@ import { buildPack } from "./util/git-pack";
 import { buildTreePayload } from "./util/packed-repo";
 import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first";
 import { encodeGitObject } from "@/worker/git/core";
+import { __test as idxViewTest } from "@/worker/git/object-store/idxView";
 
 const UINT32_SPAN = 0x1_0000_0000;
+
+describe("request-scoped cold idx reads", () => {
+  it("bypasses isolate hits and population without evicting unrelated entries", async () => {
+    idxViewTest.resetIsolateCache();
+    const first = await seedPackFirstRepo(uniqueRepoId("idx-warm"));
+    const firstKey = first.packKeys[0]!;
+    const firstHead = await env.REPO_BUCKET.head(firstKey);
+    expect(firstHead).not.toBeNull();
+    await loadIdxView(
+      env,
+      firstKey,
+      createTestCacheContext("https://example.com/idx-warm"),
+      firstHead!.size
+    );
+    const warmedKeys = idxViewTest.isolateCacheKeys();
+    expect(warmedKeys).toHaveLength(1);
+
+    const coldWarmCtx = createTestCacheContext("https://example.com/idx-cold-warm");
+    coldWarmCtx.memo!.flags = new Set(["no-isolate-idx-cache"]);
+    await loadIdxView(env, firstKey, coldWarmCtx, firstHead!.size);
+    expect(idxViewTest.isolateCacheHits()).toBe(0);
+    expect(idxViewTest.isolateCacheKeys()).toEqual(warmedKeys);
+
+    const second = await seedPackFirstRepo(uniqueRepoId("idx-cold"));
+    const secondKey = second.packKeys[0]!;
+    const secondHead = await env.REPO_BUCKET.head(secondKey);
+    expect(secondHead).not.toBeNull();
+    const coldCtx = createTestCacheContext("https://example.com/idx-cold");
+    coldCtx.memo!.flags = new Set(["no-isolate-idx-cache"]);
+    await loadIdxView(env, secondKey, coldCtx, secondHead!.size);
+    expect(idxViewTest.isolateCacheKeys()).toEqual(warmedKeys);
+    expect(idxViewTest.isolateCacheHits()).toBe(0);
+
+    await loadIdxView(
+      env,
+      firstKey,
+      createTestCacheContext("https://example.com/idx-reuse"),
+      firstHead!.size
+    );
+    expect(idxViewTest.isolateCacheHits()).toBe(1);
+  });
+});
 
 function buildSingleEntryIdx(
   oidHex: string,
@@ -314,5 +357,19 @@ describe("pack-first read path closure", () => {
 
     expect(diff.truncated).toBe(true);
     expect(diff.truncateReason).toBe("soft_budget");
+
+    const reservedCtx = createTestCacheContext(
+      `https://example.com/${repoId}/commit/${seeded.nextCommit.oid}?reserved=1`,
+      300
+    );
+    const reservedDiff = await listCommitChangedFiles(
+      env,
+      repoId,
+      seeded.nextCommit.oid,
+      reservedCtx,
+      { timeBudgetMs: 2000, minSubrequestBudget: 300 }
+    );
+    expect(reservedDiff.truncated).toBe(true);
+    expect(reservedDiff.truncateReason).toBe("soft_budget");
   });
 });

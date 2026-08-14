@@ -7,6 +7,7 @@ import { readObject } from "@/worker/git/object-store";
 import { parseTree } from "@/worker/git/operations/read/objects";
 import { __test as receivePipelineTest } from "@/worker/git/receive/pipeline";
 import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
+import { __test as readBenchmarkTest } from "@/worker/routes/readBenchmark";
 import type {
   FinalizeReceiveResult,
   ReconcileReceiveResult,
@@ -37,6 +38,25 @@ type SnapshotManifest = {
   commitSha: string;
   treeSha: string;
   files: Array<{ path: string; bytes: number; sha256: string }>;
+};
+
+type ReadBenchmarkResponse = {
+  operation: string;
+  operationMs: number;
+  fileCount?: number;
+  bytes?: number;
+  sha256?: string;
+  totalBytes?: number;
+  matches?: number;
+  digest?: string;
+  commitCount?: number;
+  total?: number;
+  truncated?: boolean;
+  head?: string;
+  activePackCount?: number;
+  packCatalogVersion?: number;
+  compactionQueued?: boolean;
+  compactionRunning?: boolean;
 };
 
 function ingestionForm(args?: {
@@ -155,6 +175,81 @@ describe("internal ingestion", () => {
     );
     expect(servedBlob.status).toBe(200);
     expect(await servedBlob.text()).toBe("hello from ingestion\n");
+
+    const benchmarkBase = `https://example.com/_internal/read-benchmark/${owner}/${repo}/${body.acceptedWrite.afterSha}`;
+    const runBenchmark = async (operation: string, query = "") => {
+      const response = await workerExports.default.fetch(`${benchmarkBase}/${operation}${query}`, {
+        headers: snapshotHeaders,
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as ReadBenchmarkResponse;
+    };
+    const treeBenchmark = await runBenchmark("tree", "?cold=1");
+    expect(treeBenchmark).toMatchObject({ operation: "tree", fileCount: 2 });
+    expect(treeBenchmark.operationMs).toBeGreaterThanOrEqual(0);
+    const stateBenchmark = await runBenchmark("state");
+    expect(stateBenchmark).toMatchObject({
+      operation: "state",
+      head: body.acceptedWrite.afterSha,
+      activePackCount: 1,
+      compactionQueued: false,
+      compactionRunning: false,
+    });
+    expect(stateBenchmark.packCatalogVersion).toBeGreaterThan(0);
+    const blobBenchmark = await runBenchmark(
+      "blob",
+      `?path=${encodeURIComponent("nested/hello.txt")}&cold=1`
+    );
+    expect(blobBenchmark).toMatchObject({
+      operation: "blob",
+      bytes: 21,
+    });
+    for (const invalidPath of [
+      "/nested/hello.txt",
+      "nested//hello.txt",
+      "nested/hello.txt/",
+      "nested/../hello.txt",
+    ]) {
+      const invalid = await workerExports.default.fetch(
+        `${benchmarkBase}/blob?path=${encodeURIComponent(invalidPath)}&cold=1`,
+        { headers: snapshotHeaders }
+      );
+      expect(invalid.status).toBe(422);
+    }
+    const logBenchmark = await runBenchmark("log", "?limit=20&cold=1");
+    expect(logBenchmark).toMatchObject({ operation: "log", commitCount: 1 });
+    const compareBenchmark = await runBenchmark("compare", "?cold=1");
+    expect(compareBenchmark).toMatchObject({
+      operation: "compare",
+      total: 2,
+      truncated: false,
+    });
+    const directSearch = await runBenchmark(
+      "search",
+      `?needle=${encodeURIComponent("hello")}&cold=1`
+    );
+    const snapshotTree = await runBenchmark("snapshot-tree", "?cold=1");
+    expect(snapshotTree).toMatchObject({ operation: "snapshot-tree", fileCount: 2 });
+    const snapshotBlob = await runBenchmark(
+      "snapshot-blob",
+      `?path=${encodeURIComponent("nested/hello.txt")}&needle=${encodeURIComponent("hello")}`
+    );
+    expect(snapshotBlob).toMatchObject({
+      operation: "snapshot-blob",
+      bytes: 21,
+      sha256: blobBenchmark.sha256,
+    });
+    const snapshotSearch = await runBenchmark(
+      "snapshot-search",
+      `?needle=${encodeURIComponent("hello")}&cold=1`
+    );
+    expect(snapshotSearch).toMatchObject({
+      operation: "snapshot-search",
+      fileCount: 2,
+      matches: 1,
+      digest: directSearch.digest,
+    });
+
     expect(
       (
         await workerExports.default.fetch(`${snapshotBase}/manifest`, {
@@ -478,7 +573,131 @@ describe("internal ingestion", () => {
         { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
       );
       expect(response.status).toBe(404);
+      const benchmark = await workerExports.default.fetch(
+        `https://example.com/_internal/read-benchmark/${owner}/${repo}/${"a".repeat(40)}/tree`,
+        { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+      );
+      expect(benchmark.status).toBe(404);
+      const anonymousBenchmark = await workerExports.default.fetch(
+        `https://example.com/_internal/read-benchmark/${owner}/${repo}/${"a".repeat(40)}/tree`
+      );
+      expect(anonymousBenchmark.status).toBe(404);
+      const wrongTokenBenchmark = await workerExports.default.fetch(
+        `https://example.com/_internal/read-benchmark/${owner}/${repo}/${"a".repeat(40)}/tree`,
+        { headers: { Authorization: "Bearer wrong-token" } }
+      );
+      expect(wrongTokenBenchmark.status).toBe(404);
     });
+  });
+
+  it("benchmarks direct and snapshot blobs above the UI preview cap equivalently", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("large-read-benchmark");
+    await setupRepoForTests(env, owner, repo);
+    const bytes = new Uint8Array(8 * 1024 * 1024);
+    for (let index = 0; index < bytes.length; index++) bytes[index] = index % 251;
+    const form = new FormData();
+    form.set("expectedOid", zeroOid());
+    form.set("actor", "large-read-test");
+    form.set("idempotencyKey", "large-read-request");
+    form.set("committedAtSeconds", "1700000000");
+    form.append("files", new Blob([bytes]), "large.bin");
+    const ingested = await postIngestion(owner, repo, form);
+    expect(ingested.status).toBe(201);
+    const body = (await ingested.json()) as IngestionResponse;
+    const base = `https://example.com/_internal/read-benchmark/${owner}/${repo}/${body.acceptedWrite.afterSha}`;
+    const headers = { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` };
+    const directResponse = await workerExports.default.fetch(
+      `${base}/blob?path=${encodeURIComponent("large.bin")}&cold=1`,
+      { headers }
+    );
+    const snapshotResponse = await workerExports.default.fetch(
+      `${base}/snapshot-blob?path=${encodeURIComponent("large.bin")}&cold=1`,
+      { headers }
+    );
+    expect(directResponse.status).toBe(200);
+    expect(snapshotResponse.status).toBe(200);
+    const direct = (await directResponse.json()) as ReadBenchmarkResponse;
+    const snapshot = (await snapshotResponse.json()) as ReadBenchmarkResponse;
+    expect(direct).toMatchObject({ operation: "blob", bytes: bytes.byteLength });
+    expect(snapshot).toMatchObject({
+      operation: "snapshot-blob",
+      bytes: bytes.byteLength,
+      sha256: direct.sha256,
+    });
+  });
+
+  it("rejects a snapshot manifest beyond the bounded benchmark file count", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("read-budget-bound");
+    const seeded = await setupRepoForTests(env, owner, repo);
+    const commitSha = "b".repeat(40);
+    const manifest = {
+      version: 1,
+      repositoryId: seeded.repositoryId,
+      commitSha,
+      treeSha: "c".repeat(40),
+      files: Array.from({ length: 101 }, (_, index) => ({
+        path: `file-${index}.txt`,
+        bytes: 1,
+        sha256: "d".repeat(64),
+      })),
+    };
+    await env.REPO_BUCKET.put(
+      `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/${commitSha}/manifest.json`,
+      JSON.stringify(manifest)
+    );
+    const response = await workerExports.default.fetch(
+      `https://example.com/_internal/read-benchmark/${owner}/${repo}/${commitSha}/snapshot-search`,
+      { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+    );
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: "Invalid snapshot manifest" });
+  });
+
+  it("rejects snapshot manifests outside canonical path and byte bounds", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("read-manifest-bounds");
+    const seeded = await setupRepoForTests(env, owner, repo);
+    const commitSha = "e".repeat(40);
+    const invalidFiles = [
+      [{ path: `${"a".repeat(4097)}.txt`, bytes: 1, sha256: "f".repeat(64) }],
+      [
+        {
+          path: Array.from({ length: 129 }, () => "segment").join("/"),
+          bytes: 1,
+          sha256: "f".repeat(64),
+        },
+      ],
+      [{ path: "too-large.bin", bytes: 512 * 1024 * 1024 + 1, sha256: "f".repeat(64) }],
+    ];
+    for (const files of invalidFiles) {
+      await env.REPO_BUCKET.put(
+        `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/${commitSha}/manifest.json`,
+        JSON.stringify({
+          version: 1,
+          repositoryId: seeded.repositoryId,
+          commitSha,
+          treeSha: "a".repeat(40),
+          files,
+        })
+      );
+      const response = await workerExports.default.fetch(
+        `https://example.com/_internal/read-benchmark/${owner}/${repo}/${commitSha}/snapshot-tree`,
+        { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+      );
+      expect(response.status).toBe(422);
+      expect(await response.json()).toEqual({ error: "Invalid snapshot manifest" });
+    }
+  });
+
+  it("enforces the direct-search aggregate byte boundary before inflation", () => {
+    expect(readBenchmarkTest.addBenchmarkBytes(504 * 1024 * 1024, 8 * 1024 * 1024)).toBe(
+      512 * 1024 * 1024
+    );
+    expect(() => readBenchmarkTest.addBenchmarkBytes(512 * 1024 * 1024, 1)).toThrow(
+      "Benchmark aggregate byte limit exceeded"
+    );
   });
 
   it("serves materialized binary bytes without transformation", async () => {

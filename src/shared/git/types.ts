@@ -20,7 +20,12 @@ export interface CommitDiffResult {
   deleted: number;
   total: number;
   truncated: boolean;
-  truncateReason?: "max_files" | "max_tree_pairs" | "time_budget" | "soft_budget";
+  truncateReason?:
+    | "max_files"
+    | "max_tree_pairs"
+    | "max_tree_reads"
+    | "time_budget"
+    | "soft_budget";
 }
 
 export interface CommitFilePatchResult {

@@ -20,12 +20,16 @@ export async function listCommitChangedFiles(
   opts?: {
     maxFiles?: number;
     maxTreePairs?: number;
+    maxTreeReads?: number;
     timeBudgetMs?: number;
+    minSubrequestBudget?: number;
   }
 ): Promise<CommitDiffResult> {
   const maxFiles = Math.max(1, Math.floor(opts?.maxFiles ?? 300));
   const maxTreePairs = Math.max(1, Math.floor(opts?.maxTreePairs ?? 2000));
+  const maxTreeReads = Math.max(1, Math.floor(opts?.maxTreeReads ?? 2000));
   const timeBudgetMs = Math.max(1, Math.floor(opts?.timeBudgetMs ?? 2000));
+  const minSubrequestBudget = Math.max(0, Math.floor(opts?.minSubrequestBudget ?? 0));
   const startedAt = Date.now();
   const treeMemo = new Map<string, TreeEntry[]>();
   const entries: CommitDiffEntry[] = [];
@@ -34,6 +38,7 @@ export async function listCommitChangedFiles(
   let modified = 0;
   let deleted = 0;
   let treePairs = 0;
+  let treeReads = 0;
   let truncated = false;
   let truncateReason: CommitDiffResult["truncateReason"];
 
@@ -46,19 +51,12 @@ export async function listCommitChangedFiles(
 
   const shouldStop = () => {
     if (truncated) return true;
-    if (entries.length >= maxFiles) {
-      setTruncated("max_files");
-      return true;
-    }
-    if (treePairs >= maxTreePairs) {
-      setTruncated("max_tree_pairs");
-      return true;
-    }
     if (Date.now() - startedAt >= timeBudgetMs) {
       setTruncated("time_budget");
       return true;
     }
-    if ((cacheCtx?.memo?.subreqBudget ?? 0) < 0) {
+    const remainingSubrequests = cacheCtx?.memo?.subreqBudget;
+    if (remainingSubrequests !== undefined && remainingSubrequests <= minSubrequestBudget) {
       setTruncated("soft_budget");
       return true;
     }
@@ -69,6 +67,12 @@ export async function listCommitChangedFiles(
     if (!treeOid) return [];
     const cached = treeMemo.get(treeOid);
     if (cached) return cached;
+    if (shouldStop()) return null;
+    if (treeReads >= maxTreeReads) {
+      setTruncated("max_tree_reads");
+      return null;
+    }
+    treeReads++;
     try {
       const treeEntries = await readTree(env, repoId, treeOid, cacheCtx);
       treeMemo.set(treeOid, treeEntries);
@@ -78,7 +82,8 @@ export async function listCommitChangedFiles(
         setTruncated("time_budget");
         return null;
       }
-      if ((cacheCtx?.memo?.subreqBudget ?? 0) < 0) {
+      const remainingSubrequests = cacheCtx?.memo?.subreqBudget;
+      if (remainingSubrequests !== undefined && remainingSubrequests <= minSubrequestBudget) {
         setTruncated("soft_budget");
         return null;
       }
@@ -93,6 +98,10 @@ export async function listCommitChangedFiles(
     newEntry?: TreeEntry
   ) => {
     if (shouldStop()) return;
+    if (entries.length >= maxFiles) {
+      setTruncated("max_files");
+      return;
+    }
     entries.push({
       path,
       changeType,
@@ -169,8 +178,11 @@ export async function listCommitChangedFiles(
       return;
     }
 
+    if (treePairs >= maxTreePairs) {
+      setTruncated("max_tree_pairs");
+      return;
+    }
     treePairs++;
-    if (shouldStop()) return;
 
     const [oldEntries, newEntries] = await Promise.all([
       readTreeEntriesMemoized(oldTreeOid),
@@ -241,8 +253,33 @@ export async function listCommitChangedFiles(
     }
   };
 
+  if (shouldStop()) {
+    return {
+      compareMode: "root",
+      entries,
+      added,
+      modified,
+      deleted,
+      total: entries.length,
+      truncated,
+      truncateReason,
+    };
+  }
   const commit = await readCommitInfo(env, repoId, oid, cacheCtx);
   const baseCommitOid = commit.parents[0];
+  if (shouldStop()) {
+    return {
+      baseCommitOid,
+      compareMode: baseCommitOid ? "first-parent" : "root",
+      entries,
+      added,
+      modified,
+      deleted,
+      total: entries.length,
+      truncated,
+      truncateReason,
+    };
+  }
   const baseCommit = baseCommitOid
     ? await readCommitInfo(env, repoId, baseCommitOid, cacheCtx)
     : undefined;

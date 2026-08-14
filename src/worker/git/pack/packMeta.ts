@@ -14,6 +14,18 @@ export type PackHeaderEx = {
   baseRel?: number;
 };
 
+export function decodePackObjectSize(sizeVarBytes: Uint8Array): number | undefined {
+  if (sizeVarBytes.byteLength === 0) return undefined;
+  let size = sizeVarBytes[0]! & 0x0f;
+  let shift = 4;
+  for (let index = 1; index < sizeVarBytes.byteLength; index++) {
+    size += (sizeVarBytes[index]! & 0x7f) * 2 ** shift;
+    if (!Number.isSafeInteger(size)) return undefined;
+    shift += 7;
+  }
+  return size;
+}
+
 /**
  * Read a byte range from an R2 `.pack` object.
  */

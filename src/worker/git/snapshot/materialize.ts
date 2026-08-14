@@ -39,7 +39,7 @@ function snapshotRoot(prefix: string, repositoryId: string, commitSha: string): 
   return `${prefix}/${encodeURIComponent(repositoryId)}/${commitSha}`;
 }
 
-function validateMaterializedPath(path: string): void {
+export function validateSnapshotPath(path: string): void {
   const segments = path.split("/");
   if (
     !path ||
@@ -83,7 +83,7 @@ export async function materializeAcceptedWrite(args: {
     const entries = await readTree(args.env, args.repoId, treeOid, cacheCtx);
     for (const entry of entries) {
       const path = joinTreePath(basePath, entry.name);
-      validateMaterializedPath(path);
+      validateSnapshotPath(path);
       if (isTreeMode(entry.mode)) {
         await visitTree(entry.oid, path);
         continue;
@@ -151,6 +151,6 @@ export function snapshotObjectKey(args: {
   if (!prefix || !/^[0-9a-f]{40}$/.test(args.commitSha)) return null;
   const root = snapshotRoot(prefix, args.repositoryId, args.commitSha);
   if (args.path === undefined) return `${root}/manifest.json`;
-  validateMaterializedPath(args.path);
+  validateSnapshotPath(args.path);
   return `${root}/files/${args.path}`;
 }

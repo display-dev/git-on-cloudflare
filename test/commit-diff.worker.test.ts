@@ -127,6 +127,13 @@ describe("commit diff v1", () => {
         newMode: "100644",
       },
     ]);
+
+    const exactFileLimit = await listCommitChangedFiles(env as Env, repoId, commit.oid, undefined, {
+      maxFiles: 1,
+      maxTreeReads: 1,
+    });
+    expect(exactFileLimit.truncated).toBe(false);
+    expect(exactFileLimit.total).toBe(1);
   });
 
   it("detects modifications and file-to-directory transitions", async () => {

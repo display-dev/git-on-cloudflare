@@ -15,6 +15,21 @@ type CachedIdxView = {
 
 const idxViewCache = new Map<string, CachedIdxView>();
 let idxViewCacheBytes = 0;
+let idxViewCacheHits = 0;
+
+export const __test = {
+  resetIsolateCache(): void {
+    idxViewCache.clear();
+    idxViewCacheBytes = 0;
+    idxViewCacheHits = 0;
+  },
+  isolateCacheKeys(): string[] {
+    return [...idxViewCache.keys()];
+  },
+  isolateCacheHits(): number {
+    return idxViewCacheHits;
+  },
+};
 
 function getIdxViewCacheKey(packKey: string, packSize: number): string {
   // Hinted loads can be wrong if a stale catalog row slips through. Key the
@@ -247,8 +262,9 @@ export async function loadIdxView(
   if (cacheCtx && !cacheCtx.memo) {
     cacheCtx.memo = {};
   }
+  const bypassIsolateCache = cacheCtx?.memo?.flags?.has("no-isolate-idx-cache") === true;
   const cached =
-    packSizeHint === undefined
+    bypassIsolateCache || packSizeHint === undefined
       ? undefined
       : idxViewCache.get(getIdxViewCacheKey(packKey, packSizeHint));
   const memoView = cacheCtx?.memo?.idxViews?.get(packKey);
@@ -264,6 +280,7 @@ export async function loadIdxView(
         cacheCtx.memo.idxViews = cacheCtx.memo.idxViews || new Map();
         cacheCtx.memo.idxViews.set(packKey, cached.view);
       }
+      idxViewCacheHits++;
       return cached.view;
     }
     cacheCtx?.memo?.idxViews?.delete(packKey);
@@ -280,6 +297,7 @@ export async function loadIdxView(
       cacheCtx.memo.idxViews = cacheCtx.memo.idxViews || new Map();
       cacheCtx.memo.idxViews.set(packKey, cached.view);
     }
+    idxViewCacheHits++;
     return cached.view;
   }
 
@@ -323,7 +341,7 @@ export async function loadIdxView(
     // isolate cache is keyed by both pack key and pack size. That lets normal
     // hinted reads reuse idx views across requests without allowing a stale hint
     // to overwrite the correct entry for the same pack key.
-    touchIdxViewCache(packKey, packSize, view);
+    if (!bypassIsolateCache) touchIdxViewCache(packKey, packSize, view);
     if (cacheCtx?.memo) {
       cacheCtx.memo.idxViews = cacheCtx.memo.idxViews || new Map();
       cacheCtx.memo.idxViews.set(packKey, view);
