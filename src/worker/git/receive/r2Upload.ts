@@ -1,6 +1,6 @@
 import { bytesToHex, createDigestStream } from "@/worker/common";
 import { packIndexKey, packRefsKey } from "@/worker/keys";
-import { SubrequestLimiter } from "../operations/limits";
+import type { Limiter } from "../operations/limits";
 import { appendBytes, cloneBytes } from "./bytes";
 
 const MULTIPART_PART_BYTES = 8 * 1024 * 1024;
@@ -121,7 +121,7 @@ async function stageKnownLengthPack(args: {
   packKey: string;
   expectedLength: number;
   packStream: ReadableStream<Uint8Array>;
-  limiter: SubrequestLimiter;
+  limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
   onProgress?: (message: string) => void;
 }): Promise<StagedPackUpload> {
@@ -224,7 +224,7 @@ async function uploadMultipartPart(args: {
   upload: R2MultipartUpload;
   partNumber: number;
   bytes: Uint8Array;
-  limiter: SubrequestLimiter;
+  limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
 }): Promise<R2UploadedPart> {
   args.countSubrequest("r2:upload-pack-part");
@@ -237,7 +237,7 @@ async function stageMultipartPack(args: {
   env: Env;
   packKey: string;
   packStream: ReadableStream<Uint8Array>;
-  limiter: SubrequestLimiter;
+  limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
   onProgress?: (message: string) => void;
 }): Promise<StagedPackUpload> {
@@ -364,7 +364,7 @@ async function stageMultipartPack(args: {
 async function deletePackArtifact(args: {
   env: Env;
   key: string;
-  limiter: SubrequestLimiter;
+  limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
   op: string;
 }): Promise<void> {
@@ -377,7 +377,7 @@ async function deletePackArtifact(args: {
 async function deleteStagedPackArtifacts(args: {
   env: Env;
   packKey: string;
-  limiter: SubrequestLimiter;
+  limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
 }): Promise<void> {
   // Cleanup is intentionally split per artifact so logs and request accounting
@@ -414,7 +414,7 @@ export async function stagePackToR2(args: {
   packStream: ReadableStream<Uint8Array>;
   packKey: string;
   bytesConsumed: number;
-  limiter: SubrequestLimiter;
+  limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
   onProgress?: (message: string) => void;
 }): Promise<StagedPackUpload> {

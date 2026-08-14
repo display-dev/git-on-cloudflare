@@ -1,4 +1,4 @@
-import type { Head } from "./repoState";
+import type { Head, IngestionReceipt } from "./repoState";
 import type { RepoActivity } from "@/worker/common";
 import type { PackCatalogRow } from "./db/schema";
 
@@ -19,6 +19,8 @@ import {
   type CommitCompactionResult,
   commitCompactionState,
   finalizeReceiveState,
+  getIngestionReceiptState,
+  reconcileReceiveState,
   type PreviewCompactionResult,
   previewCompactionState,
   type RequestCompactionResult,
@@ -178,6 +180,21 @@ export class RepoDurableObject extends DurableObject {
     return await abortReceiveLease(this.ctx, token);
   }
 
+  public async getIngestionReceipt(keyHash: string): Promise<IngestionReceipt | null> {
+    await this.ensureAccessAndAlarm();
+    return await getIngestionReceiptState(this.ctx, keyHash);
+  }
+
+  public async reconcileReceive(args: {
+    token: string;
+    commands: Array<{ oldOid: string; newOid: string; ref: string }>;
+    stagedPackKey?: string | undefined;
+    ingestionReceipt?: IngestionReceipt | undefined;
+  }) {
+    await this.ensureAccessAndAlarm();
+    return await reconcileReceiveState(this.ctx, args);
+  }
+
   public async finalizeReceive(args: {
     token: string;
     commands: Array<{ oldOid: string; newOid: string; ref: string }>;
@@ -189,6 +206,7 @@ export class RepoDurableObject extends DurableObject {
           objectCount: number;
         }
       | undefined;
+    ingestionReceipt?: IngestionReceipt | undefined;
   }) {
     await this.ensureAccessAndAlarm();
     return await finalizeReceiveState({
@@ -197,6 +215,7 @@ export class RepoDurableObject extends DurableObject {
       token: args.token,
       commands: args.commands,
       stagedPack: args.stagedPack,
+      ingestionReceipt: args.ingestionReceipt,
       logger: this.logger,
     });
   }

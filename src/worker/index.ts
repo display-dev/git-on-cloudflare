@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { registerGitRoutes } from "./routes/git";
+import { registerIngestionRoutes } from "./routes/ingestion";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerUiRoutes } from "./routes/ui";
 import { registerAuthRoutes } from "./routes/auth";
@@ -11,6 +12,8 @@ import { handleRepoTaskQueue } from "./tasks/queue";
 
 const app = new Hono<AppBindings>({ strict: false });
 app.use("*", requestServicesMiddleware);
+// Disabled-by-default internal ingestion path must precede owner/repo routes.
+registerIngestionRoutes(app);
 // Register Git protocol routes (info/refs, upload-pack, receive-pack)
 registerGitRoutes(app);
 // Register Admin routes

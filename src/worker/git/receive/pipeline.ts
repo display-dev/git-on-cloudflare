@@ -1,10 +1,15 @@
 import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
 import type { RepoDurableObject } from "@/worker/do";
+import type { IngestionReceipt } from "@/worker/do/repo/repoState";
+import type {
+  FinalizeReceiveResult,
+  ReconcileReceiveResult,
+} from "@/worker/do/repo/catalog/receive";
 import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
 import type { ReceiveCommand, ReceiveStatus } from "@/worker/git/operations/validation";
 
-import { SubrequestLimiter } from "@/worker/git/operations/limits";
+import type { Limiter } from "@/worker/git/operations/limits";
 import {
   resolveDeltasAndWriteIdx,
   runPackConnectivityCheck,
@@ -15,6 +20,19 @@ import { deleteStagedPack, stagePackToR2, type StagedPackUpload } from "./r2Uplo
 import { buildReceiveReportStatus, isReceiveAbort, throwIfReceiveAborted } from "./support";
 
 type RepoStub = DurableObjectStub<RepoDurableObject>;
+
+let afterFinalizeResponseForTesting: (() => void) | undefined;
+
+export const __test = {
+  failNextFinalizeResponse(): void {
+    afterFinalizeResponseForTesting = () => {
+      throw new Error("simulated lost finalize response");
+    };
+  },
+  reset(): void {
+    afterFinalizeResponseForTesting = undefined;
+  },
+};
 
 export type ReceivePipelineResult = {
   reportStatusBody: Uint8Array;
@@ -41,12 +59,17 @@ type ReceiveCleanupAttempt = "inline" | "retry";
 async function abortReceiveLease(args: {
   stub: RepoStub;
   leaseToken: string;
+  limiter: Limiter;
+  countSubrequest(op: string, n?: number): void;
   log: Logger;
   reason: string;
   attempt: ReceiveCleanupAttempt;
 }): Promise<boolean> {
   try {
-    const cleared = await args.stub.abortReceive(args.leaseToken);
+    args.countSubrequest("do:abort-receive");
+    const cleared = await args.limiter.run("do:abort-receive", () =>
+      args.stub.abortReceive(args.leaseToken)
+    );
     if (!cleared) {
       args.log.warn("receive:abort-missed", {
         reason: args.reason,
@@ -95,20 +118,29 @@ async function cleanupFailedReceive(args: {
   stagedUpload: StagedPackUpload | undefined;
   log: Logger;
   reason: string;
+  limiter: Limiter;
+  countSubrequest(op: string, n?: number): void;
 }): Promise<void> {
   const leaseCleared = await abortReceiveLease({
     stub: args.stub,
     leaseToken: args.leaseToken,
+    limiter: args.limiter,
+    countSubrequest: args.countSubrequest,
     log: args.log,
     reason: args.reason,
     attempt: "inline",
   });
-  const stagedPackDeleted = await cleanupStagedPack({
-    stagedUpload: args.stagedUpload,
-    log: args.log,
-    reason: args.reason,
-    attempt: "inline",
-  });
+  // A false/ambiguous abort can mean finalization already committed. Never
+  // delete staged objects unless the DO proved this lease was still active
+  // and atomically aborted it.
+  const stagedPackDeleted = leaseCleared
+    ? await cleanupStagedPack({
+        stagedUpload: args.stagedUpload,
+        log: args.log,
+        reason: args.reason,
+        attempt: "inline",
+      })
+    : false;
 
   if (leaseCleared && stagedPackDeleted) return;
 
@@ -124,18 +156,21 @@ async function cleanupFailedReceive(args: {
         (await abortReceiveLease({
           stub: args.stub,
           leaseToken: args.leaseToken,
+          limiter: args.limiter,
+          countSubrequest: args.countSubrequest,
           log: args.log,
           reason: args.reason,
           attempt: "retry",
         }));
-      const retryStagedPackDeleted =
-        stagedPackDeleted ||
-        (await cleanupStagedPack({
+      let retryStagedPackDeleted = stagedPackDeleted;
+      if (!retryStagedPackDeleted && retryLeaseCleared) {
+        retryStagedPackDeleted = await cleanupStagedPack({
           stagedUpload: args.stagedUpload,
           log: args.log,
           reason: args.reason,
           attempt: "retry",
-        }));
+        });
+      }
 
       if (!retryLeaseCleared || !retryStagedPackDeleted) {
         args.log.error("receive:cleanup-retry-incomplete", {
@@ -161,9 +196,10 @@ type ExecuteReceivePipelineArgs = {
   leaseToken: string;
   activeCatalog: PackCatalogRow[];
   commands: ReceiveCommand[];
+  ingestionReceipt?: IngestionReceipt | undefined;
   log: Logger;
   cacheCtx: CacheContext;
-  limiter: SubrequestLimiter;
+  limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
   onProgress?: (message: string) => void;
 };
@@ -196,6 +232,7 @@ export async function executeReceivePipeline(
   args: ExecuteReceivePipelineArgs
 ): Promise<ReceivePipelineResult> {
   let stagedUpload: StagedPackUpload | undefined;
+  let finalizationAttempted = false;
 
   try {
     const hasNonDelete = args.commands.some((command) => !/^0{40}$/i.test(command.newOid));
@@ -273,7 +310,6 @@ export async function executeReceivePipeline(
       throwIfReceiveAborted(args.request, args.log, "connectivity-check");
 
       if (!connectivityStatuses.every((status) => status.ok)) {
-        args.countSubrequest("do:abort-receive");
         await cleanupFailedReceive({
           ctx: args.ctx,
           stub: args.stub,
@@ -281,6 +317,8 @@ export async function executeReceivePipeline(
           stagedUpload,
           log: args.log,
           reason: "connectivity-rejected",
+          limiter: args.limiter,
+          countSubrequest: args.countSubrequest,
         });
         args.log.warn("receive:connectivity-rejected", {
           conflictCount: connectivityStatuses.filter((status) => !status.ok).length,
@@ -305,20 +343,83 @@ export async function executeReceivePipeline(
     args.countSubrequest("do:finalize-receive");
     throwIfReceiveAborted(args.request, args.log, "finalize-receive");
     args.onProgress?.("Updating refs\n");
-    const finalize = await args.stub.finalizeReceive({
-      token: args.leaseToken,
-      commands: args.commands,
-      stagedPack,
-    });
+    finalizationAttempted = true;
+    let finalize: FinalizeReceiveResult;
+    try {
+      finalize = await args.limiter.run<FinalizeReceiveResult>("do:finalize-receive", async () => {
+        const result = await args.stub.finalizeReceive({
+          token: args.leaseToken,
+          commands: args.commands,
+          stagedPack,
+          ingestionReceipt: args.ingestionReceipt,
+        });
+        const hook = afterFinalizeResponseForTesting;
+        afterFinalizeResponseForTesting = undefined;
+        hook?.();
+        return result;
+      });
+    } catch (finalizeError) {
+      args.countSubrequest("do:reconcile-receive");
+      let reconciliation: ReconcileReceiveResult;
+      try {
+        reconciliation = await args.limiter.run<ReconcileReceiveResult>(
+          "do:reconcile-receive",
+          async () =>
+            await args.stub.reconcileReceive({
+              token: args.leaseToken,
+              commands: args.commands,
+              stagedPackKey: stagedUpload?.packKey,
+              ingestionReceipt: args.ingestionReceipt,
+            })
+        );
+      } catch (reconcileError) {
+        args.log.error("receive:finalize-outcome-unknown", {
+          leaseToken: args.leaseToken,
+          packKey: stagedUpload?.packKey,
+          finalizeError: String(finalizeError),
+          reconcileError: String(reconcileError),
+        });
+        throw finalizeError;
+      }
+
+      if (reconciliation.status === "committed") {
+        args.log.warn("receive:finalize-response-recovered", { leaseToken: args.leaseToken });
+        finalize = reconciliation.result;
+      } else if (reconciliation.status === "aborted") {
+        const cleaned = await cleanupStagedPack({
+          stagedUpload,
+          log: args.log,
+          reason: "finalize-not-committed",
+          attempt: "inline",
+        });
+        if (!cleaned) {
+          args.ctx.waitUntil(
+            cleanupStagedPack({
+              stagedUpload,
+              log: args.log,
+              reason: "finalize-not-committed",
+              attempt: "retry",
+            })
+          );
+        }
+        throw finalizeError;
+      } else {
+        args.log.error("receive:finalize-outcome-unknown", {
+          leaseToken: args.leaseToken,
+          packKey: stagedUpload?.packKey,
+          finalizeError: String(finalizeError),
+        });
+        throw finalizeError;
+      }
+    }
 
     if (finalize.status === "lease_mismatch") {
-      await cleanupStagedPack({
-        stagedUpload,
-        log: args.log,
-        reason: "finalize-lease-mismatch",
-        attempt: "inline",
+      // A missing lease without a retained outcome is not proof that the
+      // staged pack was never committed. Preserve it for reconciliation.
+      args.log.error("receive:lease-mismatch-pack-preserved", {
+        leaseToken: args.leaseToken,
+        packKey: stagedUpload?.packKey,
       });
-      args.log.warn("receive:lease-mismatch", { leaseToken: args.leaseToken });
       throw new ReceivePipelineHttpError(
         503,
         "lease-mismatch",
@@ -372,16 +473,19 @@ export async function executeReceivePipeline(
       packBytes: stagedPack?.packBytes,
     });
   } catch (error) {
-    args.countSubrequest("do:abort-receive");
     const aborted = isReceiveAbort(args.request, error);
-    await cleanupFailedReceive({
-      ctx: args.ctx,
-      stub: args.stub,
-      leaseToken: args.leaseToken,
-      stagedUpload,
-      log: args.log,
-      reason: aborted ? "receive-aborted" : "receive-error",
-    });
+    if (!finalizationAttempted) {
+      await cleanupFailedReceive({
+        ctx: args.ctx,
+        stub: args.stub,
+        leaseToken: args.leaseToken,
+        stagedUpload,
+        log: args.log,
+        reason: aborted ? "receive-aborted" : "receive-error",
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+      });
+    }
     throw error;
   }
 }

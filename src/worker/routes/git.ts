@@ -25,7 +25,9 @@ import {
 } from "@/worker/auth/gitAuth";
 import type { Db } from "@/worker/db/d1/client";
 import type { Logger } from "@/worker/common/logger";
+import type { Limiter } from "@/worker/git/operations/limits";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
+import { acceptedWriteFactsForCommands, emitAcceptedWriteFacts } from "@/worker/git/acceptedWrite";
 import { workerExecutionContext, type AppContext, type AppRouter } from "./hono";
 
 type GitService = "git-upload-pack" | "git-receive-pack";
@@ -205,11 +207,26 @@ async function handleReceivePackPOST(
   request: Request,
   ctx: ExecutionContext,
   db: Db,
-  log: Logger
+  log: Logger,
+  actor: string,
+  cacheCtx: CacheContext,
+  limiter: Limiter
 ) {
   return await handleStreamingReceivePackPOST(env, route.doName, request, ctx, {
-    onRepoStateChanged: async ({ changed }) => {
+    cacheCtx,
+    limiter,
+    onRepoStateChanged: async ({ changed, commands }) => {
       if (!changed) return;
+      emitAcceptedWriteFacts(
+        log,
+        acceptedWriteFactsForCommands({
+          repositoryId: route.repositoryId,
+          commands,
+          actor,
+          sourceSurface: "git-push",
+          idempotencyKey: null,
+        })
+      );
       try {
         await touchRepositoryUpdatedAt(db, route.repositoryId, Date.now());
         log.debug("receive:repo-updated-at-touched", { repositoryId: route.repositoryId });
@@ -378,7 +395,7 @@ async function gateGitPush(
 }
 
 type GitAuthorizationResult =
-  | { kind: "ok"; cacheCtx: CacheContext }
+  | { kind: "ok"; cacheCtx: CacheContext; principalUserId: string | null }
   | { kind: "response"; response: Response };
 
 async function authorizeGitRouteForRequest(
@@ -419,7 +436,11 @@ async function authorizeGitRouteForRequest(
     );
   }
 
-  return { kind: "ok", cacheCtx };
+  return {
+    kind: "ok",
+    cacheCtx,
+    principalUserId: auth.kind === "pat" ? auth.verified.userId : null,
+  };
 }
 
 /**
@@ -477,13 +498,17 @@ export function registerGitRoutes(router: AppRouter) {
       "write"
     );
     if (authorized.kind === "response") return authorized.response;
+    if (!authorized.principalUserId) return forbidden();
     return await handleReceivePackPOST(
       c.env,
       route,
       c.req.raw,
       workerExecutionContext(c),
       c.var.db,
-      c.var.logFor({ service: "ReceiveAcl", repoId: route.doName })
+      c.var.logFor({ service: "ReceiveAcl", repoId: route.doName }),
+      authorized.principalUserId,
+      authorized.cacheCtx,
+      c.var.limiter
     );
   });
 }

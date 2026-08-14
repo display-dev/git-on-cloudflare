@@ -1,7 +1,7 @@
 import type { Logger } from "@/worker/common/logger";
-import type { RepoStateSchema } from "../repoState";
+import type { IngestionReceipt, ReceiveCommitOutcome, RepoStateSchema } from "../repoState";
 
-import { asTypedStorage } from "../repoState";
+import { asTypedStorage, ingestionReceiptKey, receiveOutcomeKey } from "../repoState";
 import {
   applyReceiveCommands,
   isValidRefName,
@@ -30,6 +30,165 @@ export type FinalizeReceiveResult =
       status: "lease_mismatch";
       message: string;
     };
+
+export type ReconcileReceiveResult =
+  | { status: "committed"; result: Extract<FinalizeReceiveResult, { status: "committed" }> }
+  | { status: "aborted" }
+  | { status: "unknown" };
+
+const MAX_INGESTION_RECEIPTS = 128;
+const MAX_RECEIVE_OUTCOMES = 128;
+let skipNextReceiptStoreForTesting = false;
+let failNextAfterOutcomeStoreForTesting = false;
+let failNextOutcomeIndexStoreForTesting = false;
+
+export const __test = {
+  skipNextReceiptStore(): void {
+    skipNextReceiptStoreForTesting = true;
+  },
+  failNextAfterOutcomeStore(): void {
+    failNextAfterOutcomeStoreForTesting = true;
+  },
+  failNextOutcomeIndexStore(): void {
+    failNextOutcomeIndexStoreForTesting = true;
+  },
+  reset(): void {
+    skipNextReceiptStoreForTesting = false;
+    failNextAfterOutcomeStoreForTesting = false;
+    failNextOutcomeIndexStoreForTesting = false;
+  },
+};
+
+async function storeReceiveOutcome(
+  storage: DurableObjectStorage,
+  outcome: ReceiveCommitOutcome
+): Promise<void> {
+  await storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const key = receiveOutcomeKey(outcome.token);
+    await store.put(key, outcome);
+    if (failNextOutcomeIndexStoreForTesting) {
+      failNextOutcomeIndexStoreForTesting = false;
+      throw new Error("injected receive outcome index failure");
+    }
+    const index = (await store.get("receiveOutcomeIndex")) ?? [];
+    const nextIndex = [...index.filter((token) => token !== outcome.token), outcome.token];
+    while (nextIndex.length > MAX_RECEIVE_OUTCOMES) {
+      const removedToken = nextIndex.shift();
+      if (removedToken) await store.delete(receiveOutcomeKey(removedToken));
+    }
+    await store.put("receiveOutcomeIndex", nextIndex);
+  });
+}
+
+async function storeIngestionReceipt(
+  storage: DurableObjectStorage,
+  receipt: IngestionReceipt
+): Promise<void> {
+  if (skipNextReceiptStoreForTesting) {
+    skipNextReceiptStoreForTesting = false;
+    return;
+  }
+  await storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const key = ingestionReceiptKey(receipt.keyHash);
+    const existing = await store.get(key);
+    if (existing && existing.fingerprint !== receipt.fingerprint) {
+      throw new Error("ingestion receipt fingerprint conflict");
+    }
+    await store.put(key, existing ?? receipt);
+    const index = (await store.get("ingestionReceiptIndex")) ?? [];
+    const nextIndex = [...index.filter((keyHash) => keyHash !== receipt.keyHash), receipt.keyHash];
+    while (nextIndex.length > MAX_INGESTION_RECEIPTS) {
+      const removedHash = nextIndex.shift();
+      if (removedHash) await store.delete(ingestionReceiptKey(removedHash));
+    }
+    await store.put("ingestionReceiptIndex", nextIndex);
+  });
+}
+
+async function clearMatchingReceiveLease(
+  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
+  token: string
+): Promise<void> {
+  const lease = await store.get("receiveLease");
+  if (lease?.token === token) await store.delete("receiveLease");
+}
+
+export async function getIngestionReceiptState(
+  ctx: DurableObjectState,
+  keyHash: string
+): Promise<IngestionReceipt | null> {
+  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  return (await store.get(ingestionReceiptKey(keyHash))) ?? null;
+}
+
+export async function reconcileReceiveState(
+  ctx: DurableObjectState,
+  args: {
+    token: string;
+    commands: ReceiveCommand[];
+    stagedPackKey?: string | undefined;
+    ingestionReceipt?: IngestionReceipt | undefined;
+  }
+): Promise<ReconcileReceiveResult> {
+  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const outcome = await store.get(receiveOutcomeKey(args.token));
+  if (outcome) {
+    await storeReceiveOutcome(ctx.storage, outcome);
+    if (args.ingestionReceipt) await storeIngestionReceipt(ctx.storage, args.ingestionReceipt);
+    await clearMatchingReceiveLease(store, args.token);
+    return {
+      status: "committed",
+      result: {
+        status: "committed",
+        statuses: outcome.statuses,
+        changed: outcome.changed,
+        empty: outcome.empty,
+        shouldQueueCompaction: outcome.shouldQueueCompaction,
+      },
+    };
+  }
+
+  const lease = await store.get("receiveLease");
+  if (lease?.token !== args.token) return { status: "unknown" };
+
+  const refs = (await store.get("refs")) ?? [];
+  const refsMatch = args.commands.every((command) => {
+    const current = refs.find((ref) => ref.name === command.ref)?.oid;
+    return /^0{40}$/i.test(command.newOid) ? current === undefined : current === command.newOid;
+  });
+  const activeCatalog = await listActivePackCatalog(getDb(ctx.storage));
+  const stagedPackActive = args.stagedPackKey
+    ? activeCatalog.some((pack) => pack.packKey === args.stagedPackKey)
+    : true;
+
+  if (refsMatch && stagedPackActive) {
+    const result: Extract<FinalizeReceiveResult, { status: "committed" }> = {
+      status: "committed",
+      statuses: args.commands.map((command) => ({ ref: command.ref, ok: true })),
+      changed: args.commands.length > 0,
+      empty: refs.length === 0,
+      shouldQueueCompaction: catalogNeedsCompaction(activeCatalog),
+    };
+    await storeReceiveOutcome(ctx.storage, {
+      token: args.token,
+      statuses: result.statuses,
+      changed: result.changed,
+      empty: result.empty,
+      shouldQueueCompaction: result.shouldQueueCompaction,
+    });
+    if (args.ingestionReceipt) await storeIngestionReceipt(ctx.storage, args.ingestionReceipt);
+    await store.delete("receiveLease");
+    return { status: "committed", result };
+  }
+
+  // A catalog row without matching refs is a partial/unknown finalize. Keep
+  // both the lease and staged data for operator reconciliation.
+  if (args.stagedPackKey && stagedPackActive) return { status: "unknown" };
+  await store.delete("receiveLease");
+  return { status: "aborted" };
+}
 
 function resolveHeadAfterReceive(args: {
   storedHead:
@@ -62,10 +221,27 @@ export async function finalizeReceiveState(args: {
         objectCount: number;
       }
     | undefined;
+  ingestionReceipt?: IngestionReceipt | undefined;
   logger?: Logger;
 }): Promise<FinalizeReceiveResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
   await ensureRepoMetadataDefaults(store);
+
+  const priorOutcome = await store.get(receiveOutcomeKey(args.token));
+  if (priorOutcome) {
+    await storeReceiveOutcome(args.ctx.storage, priorOutcome);
+    if (args.ingestionReceipt) {
+      await storeIngestionReceipt(args.ctx.storage, args.ingestionReceipt);
+    }
+    await clearMatchingReceiveLease(store, args.token);
+    return {
+      status: "committed",
+      statuses: priorOutcome.statuses,
+      changed: priorOutcome.changed,
+      empty: priorOutcome.empty,
+      shouldQueueCompaction: priorOutcome.shouldQueueCompaction,
+    };
+  }
 
   const lease = await store.get("receiveLease");
   if (!lease || lease.token !== args.token) {
@@ -136,9 +312,23 @@ export async function finalizeReceiveState(args: {
     }
   }
 
+  const committed: ReceiveCommitOutcome = {
+    token: args.token,
+    statuses,
+    changed: args.commands.length > 0,
+    empty: nextRefs.length === 0,
+    shouldQueueCompaction,
+  };
+
   await store.put("refs", nextRefs);
   await store.put("head", nextHead);
   await store.put("refsVersion", nextRefsVersion);
+  await storeReceiveOutcome(args.ctx.storage, committed);
+  if (failNextAfterOutcomeStoreForTesting) {
+    failNextAfterOutcomeStoreForTesting = false;
+    throw new Error("injected post-outcome finalize failure");
+  }
+  if (args.ingestionReceipt) await storeIngestionReceipt(args.ctx.storage, args.ingestionReceipt);
   await store.delete("receiveLease");
 
   args.logger?.info("receive:finalize-committed", {
@@ -152,8 +342,8 @@ export async function finalizeReceiveState(args: {
   return {
     status: "committed",
     statuses,
-    changed: args.commands.length > 0,
-    empty: nextRefs.length === 0,
+    changed: committed.changed,
+    empty: committed.empty,
     shouldQueueCompaction,
   };
 }

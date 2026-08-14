@@ -21,4 +21,7 @@ export const BASE_TEST_BINDINGS = {
   TESSERA_OIDC_ISSUER: "http://127.0.0.1:65535",
   TESSERA_OIDC_CLIENT_ID: "test-goc",
   TESSERA_OIDC_CLIENT_SECRET: "test-goc-secret",
+
+  // Hermetic internal ingestion authorization for worker tests.
+  INGESTION_RPC_TOKEN: "test-ingestion-token",
 } as const;

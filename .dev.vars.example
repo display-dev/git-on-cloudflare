@@ -23,3 +23,7 @@ TESSERA_OIDC_ISSUER=http://localhost:5174
 # never commit a real production value to wrangler.jsonc.vars.
 TESSERA_OIDC_CLIENT_ID=local-goc
 TESSERA_OIDC_CLIENT_SECRET=local-goc-dev-secret-change-me
+
+# Optional internal ingestion endpoint. Production remains disabled until this
+# secret is explicitly configured with `wrangler secret put`.
+INGESTION_RPC_TOKEN=local-goc-ingestion-token-change-me

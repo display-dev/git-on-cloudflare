@@ -132,7 +132,7 @@ export type PatVerifyError =
 
 export type PatVerifyResult = PatVerifyOk | PatVerifyError;
 
-async function constantTimeEquals(a: string, b: string): Promise<boolean> {
+export async function constantTimeEquals(a: string, b: string): Promise<boolean> {
   if (a.length !== b.length) return false;
   const encoder = new TextEncoder();
   const aBytes = encoder.encode(a);

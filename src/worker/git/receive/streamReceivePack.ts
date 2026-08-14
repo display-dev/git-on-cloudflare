@@ -2,14 +2,12 @@ import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
 import type { RepoDurableObject } from "@/worker/do";
 import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
+import type { BeginReceiveResult } from "@/worker/do/repo/catalog/shared";
 import type { ReceiveStatus } from "@/worker/git/operations/validation";
+import type { ReceiveCommand } from "@/worker/git/operations/validation";
 
 import { clientAbortedResponse, createLogger, getRepoStub } from "@/worker/common";
-import {
-  MAX_SIMULTANEOUS_CONNECTIONS,
-  SubrequestLimiter,
-  countSubrequest,
-} from "@/worker/git/operations/limits";
+import { countSubrequest, type Limiter } from "@/worker/git/operations/limits";
 import { isValidRefName, validateReceiveCommands } from "@/worker/git/operations/validation";
 import { logOnce } from "@/worker/git/object-store/support";
 import { executeReceivePipeline, ReceivePipelineHttpError } from "./pipeline";
@@ -35,9 +33,10 @@ import {
 const RECEIVE_SUBREQUEST_BUDGET = 5_000;
 
 type RepoStub = DurableObjectStub<RepoDurableObject>;
-type RepoStateChangeHandler = (change: {
+export type RepoStateChangeHandler = (change: {
   changed: boolean;
   empty: boolean;
+  commands: ReceiveCommand[];
 }) => Promise<void> | void;
 
 function countReceiveSubrequest(cacheCtx: CacheContext, log: Logger, op: string, n = 1) {
@@ -49,26 +48,6 @@ function countReceiveSubrequest(cacheCtx: CacheContext, log: Logger, op: string,
 
 function logReceiveEnd(log: Logger, status: number, extra?: Record<string, unknown>) {
   log.info("receive:end", { status, ...extra });
-}
-
-function buildReceiveCacheContext(
-  request: Request,
-  ctx: ExecutionContext,
-  repoId: string
-): { cacheCtx: CacheContext; limiter: SubrequestLimiter } {
-  const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
-  return {
-    cacheCtx: {
-      req: request,
-      ctx,
-      memo: {
-        repoId,
-        limiter,
-        subreqBudget: RECEIVE_SUBREQUEST_BUDGET,
-      },
-    },
-    limiter,
-  };
 }
 
 function selectReceiveResponseMode(
@@ -83,6 +62,7 @@ function scheduleRepoStateChange(
   change: {
     changed: boolean;
     empty: boolean;
+    commands: ReceiveCommand[];
   }
 ): void {
   if (!onRepoStateChanged || !change.changed) return;
@@ -148,7 +128,7 @@ function createSidebandReceiveResponse(args: {
   stub: RepoStub;
   log: Logger;
   cacheCtx: CacheContext;
-  limiter: SubrequestLimiter;
+  limiter: Limiter;
   leaseToken: string;
   activeCatalog: PackCatalogRow[];
   commands: ParsedReceiveRequest["commands"];
@@ -192,6 +172,7 @@ function createSidebandReceiveResponse(args: {
         scheduleRepoStateChange(args.ctx, args.onRepoStateChanged, {
           changed: result.changed,
           empty: result.empty,
+          commands: args.commands,
         });
         writer.reportStatus(result.reportStatusBody);
         logReceiveEnd(args.log, 200, {
@@ -237,6 +218,8 @@ export async function handleStreamingReceivePackPOST(
   request: Request,
   ctx: ExecutionContext,
   options?: {
+    cacheCtx?: CacheContext | undefined;
+    limiter?: Limiter | undefined;
     onRepoStateChanged?: RepoStateChangeHandler | undefined;
   }
 ): Promise<Response> {
@@ -256,10 +239,19 @@ export async function handleStreamingReceivePackPOST(
     return clientAbortedResponse();
   }
 
-  const { cacheCtx, limiter } = buildReceiveCacheContext(request, ctx, repoId);
+  const cacheCtx = options?.cacheCtx ?? {
+    req: request,
+    ctx,
+    memo: { repoId, subreqBudget: RECEIVE_SUBREQUEST_BUDGET },
+  };
+  const limiter = options?.limiter ?? cacheCtx.memo?.limiter;
+  if (!limiter) throw new Error("receive request limiter is required");
 
   countReceiveSubrequest(cacheCtx, log, "do:begin-receive");
-  const begin = await stub.beginReceive();
+  const begin = await limiter.run<BeginReceiveResult>(
+    "do:begin-receive",
+    async () => await stub.beginReceive()
+  );
   if (!begin.ok) {
     log.warn("receive:block-busy", { retryAfter: begin.retryAfter, mode: "streaming" });
     logReceiveEnd(log, 503, { reason: "receive-lease-active" });
@@ -283,7 +275,9 @@ export async function handleStreamingReceivePackPOST(
     const invalidCommand = parsedRequest.commands.find((command) => !isValidRefName(command.ref));
     if (invalidCommand) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
-      await stub.abortReceive(begin.lease.token).catch(() => {});
+      await limiter
+        .run("do:abort-receive", () => stub.abortReceive(begin.lease.token))
+        .catch(() => {});
       log.warn("receive:invalid-ref", { ref: invalidCommand.ref });
       const response = buildInvalidRefResponse({
         mode: responseMode,
@@ -296,7 +290,9 @@ export async function handleStreamingReceivePackPOST(
     const preflightStatuses = validateReceiveCommands(begin.refs, parsedRequest.commands);
     if (!preflightStatuses.every((status) => status.ok)) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
-      await stub.abortReceive(begin.lease.token).catch(() => {});
+      await limiter
+        .run("do:abort-receive", () => stub.abortReceive(begin.lease.token))
+        .catch(() => {});
       log.warn("receive:ref-conflict", {
         conflictCount: preflightStatuses.filter((status) => !status.ok).length,
         stage: "preflight",
@@ -351,6 +347,7 @@ export async function handleStreamingReceivePackPOST(
     scheduleRepoStateChange(ctx, options?.onRepoStateChanged, {
       changed: result.changed,
       empty: result.empty,
+      commands: parsedRequest.commands,
     });
 
     const response = buildReceiveResultResponse({
@@ -369,7 +366,9 @@ export async function handleStreamingReceivePackPOST(
   } catch (error) {
     if (!pipelineStarted) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
-      await stub.abortReceive(begin.lease.token).catch(() => {});
+      await limiter
+        .run("do:abort-receive", () => stub.abortReceive(begin.lease.token))
+        .catch(() => {});
     }
 
     if (isReceiveAbort(request, error)) {
