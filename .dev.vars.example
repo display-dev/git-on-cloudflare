@@ -31,3 +31,4 @@ INGESTION_RPC_TOKEN=local-goc-ingestion-token-change-me
 # Investigation-only synchronous snapshot materializer. Leave empty outside
 # disposable benchmark deployments.
 SNAPSHOT_BENCHMARK_PREFIX=
+SNAPSHOT_EVENT_PROBE=

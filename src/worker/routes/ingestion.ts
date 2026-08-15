@@ -7,6 +7,7 @@ import { countSubrequest } from "@/worker/git/operations/limits";
 import type { ReceiveCommand } from "@/worker/git/operations/validation";
 import { executeReceivePipeline } from "@/worker/git/receive/pipeline";
 import { materializeAcceptedWrite } from "@/worker/git/snapshot/materialize";
+import { snapshotEventProbeEnabled } from "@/worker/git/snapshot/config";
 import { resolveRepositoryRoute } from "@/worker/repositories/route";
 import { isValidOwnerRepo, MAX_PATH_LEN } from "@/shared/web";
 import { workerExecutionContext, type AppContext, type AppRouter } from "./hono";
@@ -227,15 +228,17 @@ async function handleIngestion(c: AppContext): Promise<Response> {
       if (priorReceipt.fingerprint !== fingerprint) {
         return jsonResponse({ error: "Idempotency key conflict" }, 409);
       }
-      await materializeAcceptedWrite({
-        env: c.env,
-        repoId: route.doName,
-        fact: priorReceipt.acceptedWrite,
-        request: c.req.raw,
-        ctx,
-        limiter,
-        log,
-      });
+      if (!snapshotEventProbeEnabled(c.env)) {
+        await materializeAcceptedWrite({
+          env: c.env,
+          repoId: route.doName,
+          fact: priorReceipt.acceptedWrite,
+          request: c.req.raw,
+          ctx,
+          limiter,
+          log,
+        });
+      }
       return jsonResponse(
         {
           acceptedWrite: priorReceipt.acceptedWrite,
@@ -307,6 +310,7 @@ async function handleIngestion(c: AppContext): Promise<Response> {
           treeSha: built.treeOid,
           createdAt: Date.now(),
         },
+        acceptedWrites: [acceptedWrite],
         log,
         cacheCtx: c.var.cacheCtx,
         limiter,
@@ -317,15 +321,17 @@ async function handleIngestion(c: AppContext): Promise<Response> {
       }
 
       emitAcceptedWriteFacts(log, [acceptedWrite]);
-      await materializeAcceptedWrite({
-        env: c.env,
-        repoId: route.doName,
-        fact: acceptedWrite,
-        request: c.req.raw,
-        ctx,
-        limiter,
-        log,
-      });
+      if (!snapshotEventProbeEnabled(c.env)) {
+        await materializeAcceptedWrite({
+          env: c.env,
+          repoId: route.doName,
+          fact: acceptedWrite,
+          request: c.req.raw,
+          ctx,
+          limiter,
+          log,
+        });
+      }
       try {
         await touchRepositoryUpdatedAt(c.var.db, route.repositoryId, Date.now());
       } catch (error) {

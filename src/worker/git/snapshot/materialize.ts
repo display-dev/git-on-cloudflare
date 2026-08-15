@@ -26,6 +26,14 @@ export type SnapshotManifest = {
   files: Array<{ path: string; bytes: number; sha256: string }>;
 };
 
+export type SnapshotMaterializationTarget =
+  | Pick<AcceptedWriteFact, "repositoryId" | "afterSha" | "sourceSurface">
+  | {
+      repositoryId: string;
+      afterSha: string;
+      sourceSurface: "reconcile";
+    };
+
 function configuredPrefix(env: Env): string | null {
   const prefix = env.SNAPSHOT_BENCHMARK_PREFIX?.trim();
   if (!prefix) return null;
@@ -62,7 +70,7 @@ function count(cacheCtx: CacheContext, log: Logger, op: string): void {
 export async function materializeAcceptedWrite(args: {
   env: Env;
   repoId: string;
-  fact: AcceptedWriteFact;
+  fact: SnapshotMaterializationTarget;
   request: Request;
   ctx: ExecutionContext;
   limiter: Limiter;

@@ -27,8 +27,9 @@ import type { Db } from "@/worker/db/d1/client";
 import type { Logger } from "@/worker/common/logger";
 import type { Limiter } from "@/worker/git/operations/limits";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
-import { acceptedWriteFactsForCommands, emitAcceptedWriteFacts } from "@/worker/git/acceptedWrite";
+import { emitAcceptedWriteFacts } from "@/worker/git/acceptedWrite";
 import { materializeAcceptedWrite } from "@/worker/git/snapshot/materialize";
+import { snapshotEventProbeEnabled } from "@/worker/git/snapshot/config";
 import { workerExecutionContext, type AppContext, type AppRouter } from "./hono";
 
 type GitService = "git-upload-pack" | "git-receive-pack";
@@ -216,16 +217,16 @@ async function handleReceivePackPOST(
   return await handleStreamingReceivePackPOST(env, route.doName, request, ctx, {
     cacheCtx,
     limiter,
-    onRepoStateChanged: async ({ changed, commands }) => {
+    acceptedWriteContext: {
+      repositoryId: route.repositoryId,
+      actor,
+      sourceSurface: "git-push",
+      idempotencyKey: null,
+    },
+    onRepoStateChanged: async ({ changed, acceptedWrites }) => {
       if (!changed) return;
-      const acceptedWrites = acceptedWriteFactsForCommands({
-        repositoryId: route.repositoryId,
-        commands,
-        actor,
-        sourceSurface: "git-push",
-        idempotencyKey: null,
-      });
       emitAcceptedWriteFacts(log, acceptedWrites);
+      if (snapshotEventProbeEnabled(env)) return;
       for (const fact of acceptedWrites) {
         try {
           await materializeAcceptedWrite({

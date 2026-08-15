@@ -6,6 +6,10 @@ import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 export type ObjKey = `obj:${string}`;
 export type ReceiveOutcomeKey = `receiveOutcome:${string}`;
 export type IngestionReceiptKey = `ingestionReceipt:${string}`;
+export type AcceptedWriteJournalKey = `acceptedWrite:${string}`;
+export type AcceptedWriteHeadKey = `acceptedWriteHead:${string}`;
+export type MaterializedSnapshotKey = `materializedSnapshot:${string}`;
+export type SnapshotCurrentKey = `snapshotCurrent:${string}`;
 
 export type Ref = { name: string; oid: string };
 export type Head = { target: string; oid?: string; unborn?: boolean };
@@ -31,6 +35,34 @@ export type ReceiveCommitOutcome = {
   shouldQueueCompaction: boolean;
 };
 
+export type AcceptedWriteJournalEntry = {
+  id: string;
+  sequence: number;
+  fact: AcceptedWriteFact;
+  acceptedAt: number;
+  materializedAt?: number;
+};
+
+export type AcceptedWriteHead = {
+  ref: string;
+  beforeSha: string;
+  afterSha: string;
+  sequence: number;
+};
+
+export type MaterializedSnapshot = {
+  commitSha: string;
+  firstSequence: number;
+  materializedAt: number;
+};
+
+export type SnapshotCurrent = {
+  ref: string;
+  commitSha: string;
+  sequence: number;
+  updatedAt: number;
+};
+
 export type RepoStateSchema = {
   refs: Ref[];
   head: Head;
@@ -45,7 +77,11 @@ export type RepoStateSchema = {
   lastAccessMs: number;
 } & Record<ObjKey, Uint8Array | ArrayBuffer> &
   Record<ReceiveOutcomeKey, ReceiveCommitOutcome> &
-  Record<IngestionReceiptKey, IngestionReceipt>;
+  Record<IngestionReceiptKey, IngestionReceipt> &
+  Record<AcceptedWriteJournalKey, AcceptedWriteJournalEntry> &
+  Record<AcceptedWriteHeadKey, AcceptedWriteHead> &
+  Record<MaterializedSnapshotKey, MaterializedSnapshot> &
+  Record<SnapshotCurrentKey, SnapshotCurrent>;
 
 export type TypedStorage<S> = {
   get<K extends keyof S & string>(key: K): Promise<S[K] | undefined>;
@@ -79,4 +115,20 @@ export function receiveOutcomeKey(token: string): ReceiveOutcomeKey {
 
 export function ingestionReceiptKey(keyHash: string): IngestionReceiptKey {
   return `ingestionReceipt:${keyHash}`;
+}
+
+export function acceptedWriteJournalKey(id: string): AcceptedWriteJournalKey {
+  return `acceptedWrite:${id}` as AcceptedWriteJournalKey;
+}
+
+export function acceptedWriteHeadKey(ref: string): AcceptedWriteHeadKey {
+  return `acceptedWriteHead:${encodeURIComponent(ref)}` as AcceptedWriteHeadKey;
+}
+
+export function materializedSnapshotKey(commitSha: string): MaterializedSnapshotKey {
+  return `materializedSnapshot:${commitSha}` as MaterializedSnapshotKey;
+}
+
+export function snapshotCurrentKey(ref: string): SnapshotCurrentKey {
+  return `snapshotCurrent:${encodeURIComponent(ref)}` as SnapshotCurrentKey;
 }

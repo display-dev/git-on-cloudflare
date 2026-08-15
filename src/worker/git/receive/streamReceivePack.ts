@@ -5,6 +5,11 @@ import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
 import type { BeginReceiveResult } from "@/worker/do/repo/catalog/shared";
 import type { ReceiveStatus } from "@/worker/git/operations/validation";
 import type { ReceiveCommand } from "@/worker/git/operations/validation";
+import {
+  acceptedWriteFactsForCommands,
+  type AcceptedWriteFact,
+  type AcceptedWriteSource,
+} from "@/worker/git/acceptedWrite";
 
 import { clientAbortedResponse, createLogger, getRepoStub } from "@/worker/common";
 import { countSubrequest, type Limiter } from "@/worker/git/operations/limits";
@@ -37,7 +42,15 @@ export type RepoStateChangeHandler = (change: {
   changed: boolean;
   empty: boolean;
   commands: ReceiveCommand[];
+  acceptedWrites: AcceptedWriteFact[];
 }) => Promise<void> | void;
+
+export type AcceptedWriteContext = {
+  repositoryId: string;
+  actor: string;
+  sourceSurface: AcceptedWriteSource;
+  idempotencyKey: string | null;
+};
 
 function countReceiveSubrequest(cacheCtx: CacheContext, log: Logger, op: string, n = 1) {
   if (countSubrequest(cacheCtx, n)) return;
@@ -63,6 +76,7 @@ function scheduleRepoStateChange(
     changed: boolean;
     empty: boolean;
     commands: ReceiveCommand[];
+    acceptedWrites: AcceptedWriteFact[];
   }
 ): void {
   if (!onRepoStateChanged || !change.changed) return;
@@ -132,6 +146,7 @@ function createSidebandReceiveResponse(args: {
   leaseToken: string;
   activeCatalog: PackCatalogRow[];
   commands: ParsedReceiveRequest["commands"];
+  acceptedWrites: AcceptedWriteFact[];
   capabilities: ReceiveNegotiatedCapabilities;
   packStream: ReadableStream<Uint8Array>;
   bytesConsumed: number;
@@ -162,6 +177,7 @@ function createSidebandReceiveResponse(args: {
           leaseToken: args.leaseToken,
           activeCatalog: args.activeCatalog,
           commands: args.commands,
+          acceptedWrites: args.acceptedWrites,
           log: args.log,
           cacheCtx: args.cacheCtx,
           limiter: args.limiter,
@@ -173,6 +189,7 @@ function createSidebandReceiveResponse(args: {
           changed: result.changed,
           empty: result.empty,
           commands: args.commands,
+          acceptedWrites: args.acceptedWrites,
         });
         writer.reportStatus(result.reportStatusBody);
         logReceiveEnd(args.log, 200, {
@@ -221,6 +238,7 @@ export async function handleStreamingReceivePackPOST(
     cacheCtx?: CacheContext | undefined;
     limiter?: Limiter | undefined;
     onRepoStateChanged?: RepoStateChangeHandler | undefined;
+    acceptedWriteContext?: AcceptedWriteContext | undefined;
   }
 ): Promise<Response> {
   const stub = getRepoStub(env, repoId);
@@ -270,6 +288,12 @@ export async function handleStreamingReceivePackPOST(
     throwIfReceiveAborted(request, log, "read-command-section");
 
     const parsedRequest = parseReceiveRequest(lines);
+    const acceptedWrites = options?.acceptedWriteContext
+      ? acceptedWriteFactsForCommands({
+          ...options.acceptedWriteContext,
+          commands: parsedRequest.commands,
+        })
+      : [];
     const responseMode = selectReceiveResponseMode(parsedRequest.capabilities);
 
     const invalidCommand = parsedRequest.commands.find((command) => !isValidRefName(command.ref));
@@ -319,6 +343,7 @@ export async function handleStreamingReceivePackPOST(
         leaseToken: begin.lease.token,
         activeCatalog: begin.activeCatalog,
         commands: parsedRequest.commands,
+        acceptedWrites,
         capabilities: parsedRequest.capabilities,
         packStream,
         bytesConsumed,
@@ -338,6 +363,7 @@ export async function handleStreamingReceivePackPOST(
       leaseToken: begin.lease.token,
       activeCatalog: begin.activeCatalog,
       commands: parsedRequest.commands,
+      acceptedWrites,
       log,
       cacheCtx,
       limiter,
@@ -348,6 +374,7 @@ export async function handleStreamingReceivePackPOST(
       changed: result.changed,
       empty: result.empty,
       commands: parsedRequest.commands,
+      acceptedWrites,
     });
 
     const response = buildReceiveResultResponse({

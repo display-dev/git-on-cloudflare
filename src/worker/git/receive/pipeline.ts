@@ -2,6 +2,7 @@ import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
 import type { RepoDurableObject } from "@/worker/do";
 import type { IngestionReceipt } from "@/worker/do/repo/repoState";
+import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 import type {
   FinalizeReceiveResult,
   ReconcileReceiveResult,
@@ -197,6 +198,7 @@ type ExecuteReceivePipelineArgs = {
   activeCatalog: PackCatalogRow[];
   commands: ReceiveCommand[];
   ingestionReceipt?: IngestionReceipt | undefined;
+  acceptedWrites?: AcceptedWriteFact[] | undefined;
   log: Logger;
   cacheCtx: CacheContext;
   limiter: Limiter;
@@ -352,6 +354,7 @@ export async function executeReceivePipeline(
           commands: args.commands,
           stagedPack,
           ingestionReceipt: args.ingestionReceipt,
+          acceptedWrites: args.acceptedWrites,
         });
         const hook = afterFinalizeResponseForTesting;
         afterFinalizeResponseForTesting = undefined;

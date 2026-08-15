@@ -1,4 +1,5 @@
 import type { Head, IngestionReceipt } from "./repoState";
+import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 import type { RepoActivity } from "@/worker/common";
 import type { PackCatalogRow } from "./db/schema";
 
@@ -48,6 +49,14 @@ import {
   type RepoDOAccessContext,
 } from "./repoDO/access";
 import { seedMinimalRepoState } from "./repoDO/seeding";
+import {
+  dropAcceptedWriteJournalEntry,
+  getSnapshotReconcilePlanState,
+  getSnapshotProjectionState,
+  listAcceptedWriteJournalState,
+  projectAcceptedWriteState,
+  projectReconciledHeadState,
+} from "./acceptedWrites";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -185,6 +194,45 @@ export class RepoDurableObject extends DurableObject {
     return await getIngestionReceiptState(this.ctx, keyHash);
   }
 
+  public async listAcceptedWrites() {
+    await this.ensureAccessAndAlarm();
+    return await listAcceptedWriteJournalState(this.ctx);
+  }
+
+  public async projectAcceptedWrite(args: {
+    entryId: string;
+    commitSha: string;
+    materializedAt: number;
+  }) {
+    await this.ensureAccessAndAlarm();
+    return await projectAcceptedWriteState(this.ctx, args);
+  }
+
+  public async getSnapshotReconcilePlan(ref: string) {
+    await this.ensureAccessAndAlarm();
+    return await getSnapshotReconcilePlanState(this.ctx, ref);
+  }
+
+  public async getSnapshotProjection(ref: string) {
+    await this.ensureAccessAndAlarm();
+    return await getSnapshotProjectionState(this.ctx, ref);
+  }
+
+  public async dropAcceptedWriteForProbe(entryId: string) {
+    await this.ensureAccessAndAlarm();
+    return await dropAcceptedWriteJournalEntry(this.ctx, entryId);
+  }
+
+  public async projectReconciledHead(args: {
+    ref: string;
+    commitSha: string;
+    sequence: number;
+    materializedAt: number;
+  }) {
+    await this.ensureAccessAndAlarm();
+    return await projectReconciledHeadState(this.ctx, args);
+  }
+
   public async reconcileReceive(args: {
     token: string;
     commands: Array<{ oldOid: string; newOid: string; ref: string }>;
@@ -207,6 +255,7 @@ export class RepoDurableObject extends DurableObject {
         }
       | undefined;
     ingestionReceipt?: IngestionReceipt | undefined;
+    acceptedWrites?: AcceptedWriteFact[] | undefined;
   }) {
     await this.ensureAccessAndAlarm();
     return await finalizeReceiveState({
@@ -216,6 +265,7 @@ export class RepoDurableObject extends DurableObject {
       commands: args.commands,
       stagedPack: args.stagedPack,
       ingestionReceipt: args.ingestionReceipt,
+      acceptedWrites: args.acceptedWrites,
       logger: this.logger,
     });
   }

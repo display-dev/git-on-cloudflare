@@ -25,4 +25,5 @@ export const BASE_TEST_BINDINGS = {
   // Hermetic internal ingestion authorization for worker tests.
   INGESTION_RPC_TOKEN: "test-ingestion-token",
   SNAPSHOT_BENCHMARK_PREFIX: "test-snapshots",
+  SNAPSHOT_EVENT_PROBE: "",
 } as const;

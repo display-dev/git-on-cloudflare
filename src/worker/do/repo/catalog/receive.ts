@@ -12,6 +12,9 @@ import {
 import { getDb, listActivePackCatalog, upsertPackCatalogRow } from "../db";
 import { DEFAULT_HEAD, bumpPacksetVersion, ensureRepoMetadataDefaults } from "./shared";
 import { catalogNeedsCompaction, scheduleCompactionWake } from "./compaction/plan";
+import { acceptedWritesMatchCommands, recordAcceptedWrites } from "../acceptedWrites";
+import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
+import { snapshotEventProbeEnabled } from "@/worker/git/snapshot/config";
 
 export type FinalizeReceiveResult =
   | {
@@ -222,6 +225,7 @@ export async function finalizeReceiveState(args: {
       }
     | undefined;
   ingestionReceipt?: IngestionReceipt | undefined;
+  acceptedWrites?: AcceptedWriteFact[] | undefined;
   logger?: Logger;
 }): Promise<FinalizeReceiveResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
@@ -284,6 +288,9 @@ export async function finalizeReceiveState(args: {
   const storedHead = await store.get("head");
   const nextHead = resolveHeadAfterReceive({ storedHead, refs: nextRefs });
   const nextRefsVersion = ((await store.get("refsVersion")) || 0) + 1;
+  if (args.acceptedWrites && !acceptedWritesMatchCommands(args.commands, args.acceptedWrites)) {
+    throw new Error("accepted-write facts do not match receive commands");
+  }
 
   let shouldQueueCompaction = false;
   if (args.stagedPack) {
@@ -320,9 +327,21 @@ export async function finalizeReceiveState(args: {
     shouldQueueCompaction,
   };
 
-  await store.put("refs", nextRefs);
-  await store.put("head", nextHead);
-  await store.put("refsVersion", nextRefsVersion);
+  await args.ctx.storage.transaction(async (transaction) => {
+    const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+    await transactionStore.put("refs", nextRefs);
+    await transactionStore.put("head", nextHead);
+    await transactionStore.put("refsVersion", nextRefsVersion);
+    if (args.acceptedWrites) {
+      await recordAcceptedWrites(
+        transactionStore,
+        nextRefsVersion,
+        args.acceptedWrites,
+        Date.now(),
+        snapshotEventProbeEnabled(args.env)
+      );
+    }
+  });
   await storeReceiveOutcome(args.ctx.storage, committed);
   if (failNextAfterOutcomeStoreForTesting) {
     failNextAfterOutcomeStoreForTesting = false;
