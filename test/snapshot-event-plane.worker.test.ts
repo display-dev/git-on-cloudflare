@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { zeroOid } from "@/worker/common";
+import type { SnapshotProjectionResult } from "@/worker/do/repo/acceptedWrites";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
 import { setupRepoForTests } from "./util/repoSeed";
 import { decodeReportStatus, pushStreamingUpdate } from "./util/streaming-helpers";
@@ -27,6 +28,10 @@ type EventState = {
     snapshotCount: number;
     current?: { commitSha: string; sequence: number };
   };
+};
+
+type EventDeliveryResponse = {
+  projection: SnapshotProjectionResult;
 };
 
 function ingestionForm(args: {
@@ -195,14 +200,17 @@ describe("snapshot event plane", () => {
 
       const secondEntry = state.entries[1]!;
       const firstEntry = state.entries[0]!;
+      const concurrentSecondDeliveries = await Promise.all([
+        eventRequest(owner, repo, { action: "deliver", entryId: secondEntry.id }),
+        eventRequest(owner, repo, { action: "deliver", entryId: secondEntry.id }),
+      ]);
+      expect(concurrentSecondDeliveries.map((response) => response.status)).toEqual([200, 200]);
+      const concurrentSecondResults: EventDeliveryResponse[] = await Promise.all(
+        concurrentSecondDeliveries.map(async (response) => await response.json())
+      );
       expect(
-        (
-          await eventRequest(owner, repo, {
-            action: "deliver",
-            entryId: secondEntry.id,
-          })
-        ).status
-      ).toBe(200);
+        concurrentSecondResults.filter((result) => result.projection.snapshotCreated)
+      ).toHaveLength(1);
       expect(
         (
           await eventRequest(owner, repo, {

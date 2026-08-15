@@ -491,6 +491,52 @@ describe("internal ingestion", () => {
     });
   });
 
+  it("accepts exactly one of two same-base ingestion requests and rejects the loser", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("concurrent-conflict");
+    const seeded = await setupRepoForTests(env, owner, repo);
+    const candidates = [
+      {
+        committedAtSeconds: 1_700_000_010,
+        content: "candidate a\n",
+        idempotencyKey: "concurrent-a",
+      },
+      {
+        committedAtSeconds: 1_700_000_011,
+        content: "candidate b\n",
+        idempotencyKey: "concurrent-b",
+      },
+    ];
+    const responses = await Promise.all(
+      candidates.map(
+        async (candidate) => await postIngestion(owner, repo, ingestionForm(candidate))
+      )
+    );
+    const acceptedIndex = responses.findIndex((response) => response.status === 201);
+    expect(acceptedIndex).toBeGreaterThanOrEqual(0);
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(1);
+    const rejectedIndex = acceptedIndex === 0 ? 1 : 0;
+    expect([409, 503]).toContain(responses[rejectedIndex]!.status);
+
+    const rejectedRetry = await postIngestion(
+      owner,
+      repo,
+      ingestionForm(candidates[rejectedIndex]!)
+    );
+    expect(rejectedRetry.status).toBe(409);
+
+    const accepted = (await responses[acceptedIndex]!.json()) as IngestionResponse;
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
+    const state = await callStubWithRetry(
+      () => stub,
+      (repoStub) => repoStub.getHeadAndRefs()
+    );
+    expect(state.refs).toContainEqual({
+      name: "refs/heads/main",
+      oid: accepted.acceptedWrite.afterSha,
+    });
+  });
+
   it("authenticates before lookup and rejects unsafe paths before mutation", async () => {
     const owner = "ingest";
     const repo = uniqueRepoId("guards");
