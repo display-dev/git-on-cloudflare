@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { zeroOid } from "@/worker/common";
-import { parseCommitRefs } from "@/worker/git/core";
+import { encodeGitObject, parseCommitRefs } from "@/worker/git/core";
 import { readObject } from "@/worker/git/object-store";
 import { parseTree } from "@/worker/git/operations/read/objects";
 import { __test as receivePipelineTest } from "@/worker/git/receive/pipeline";
@@ -15,6 +15,8 @@ import type {
 import type { BeginReceiveResult } from "@/worker/do/repo/catalog/shared";
 
 import { createTestCacheContext } from "./util/pack-first";
+import { buildPack } from "./util/git-pack";
+import { buildTreePayload, seedPackedRepoState } from "./util/packed-repo";
 import { setupRepoForTests } from "./util/repoSeed";
 import { callStubWithRetry, uniqueRepoId, withEnvOverrides } from "./util/test-helpers";
 
@@ -699,6 +701,152 @@ describe("internal ingestion", () => {
     );
     expect(response.status).toBe(422);
     expect(await response.json()).toEqual({ error: "Invalid snapshot manifest" });
+  });
+
+  it("admits exactly 1,000 metadata-only paths only through the scale snapshot seam", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("scale-snapshot-bound");
+    const seeded = await setupRepoForTests(env, owner, repo);
+    const commitSha = "9".repeat(40);
+    const files = Array.from({ length: 1_000 }, (_, index) => ({
+      path: `files/file-${String(index).padStart(4, "0")}.bin`,
+      bytes: 5_000_000,
+      sha256: "8".repeat(64),
+    }));
+    await env.REPO_BUCKET.put(
+      `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/${commitSha}/manifest.json`,
+      JSON.stringify({
+        version: 1,
+        repositoryId: seeded.repositoryId,
+        commitSha,
+        treeSha: "7".repeat(40),
+        files,
+      })
+    );
+    const headers = { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` };
+    const ordinary = await workerExports.default.fetch(
+      `https://example.com/_internal/read-benchmark/${owner}/${repo}/${commitSha}/snapshot-tree`,
+      { headers }
+    );
+    expect(ordinary.status).toBe(422);
+    const scale = await workerExports.default.fetch(
+      `https://example.com/_internal/read-benchmark/${owner}/${repo}/${commitSha}/scale-snapshot-tree`,
+      { headers }
+    );
+    expect(scale.status).toBe(200);
+    expect(await scale.json()).toMatchObject({
+      operation: "scale-snapshot-tree",
+      fileCount: 1_000,
+      totalBytes: 5_000_000_000,
+    });
+
+    await env.REPO_BUCKET.put(
+      `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/${commitSha}/manifest.json`,
+      JSON.stringify({
+        version: 1,
+        repositoryId: seeded.repositoryId,
+        commitSha,
+        treeSha: "7".repeat(40),
+        files: [...files, { path: "files/file-1000.bin", bytes: 1, sha256: "8".repeat(64) }],
+      })
+    );
+    const tooMany = await workerExports.default.fetch(
+      `https://example.com/_internal/read-benchmark/${owner}/${repo}/${commitSha}/scale-snapshot-tree`,
+      { headers }
+    );
+    expect(tooMany.status).toBe(422);
+
+    await env.REPO_BUCKET.put(
+      `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/${commitSha}/manifest.json`,
+      JSON.stringify({
+        version: 1,
+        repositoryId: seeded.repositoryId,
+        commitSha,
+        treeSha: "7".repeat(40),
+        files: files.map((file, index) =>
+          index === 0 ? { ...file, bytes: file.bytes + 1 } : file
+        ),
+      })
+    );
+    const tooLarge = await workerExports.default.fetch(
+      `https://example.com/_internal/read-benchmark/${owner}/${repo}/${commitSha}/scale-snapshot-tree`,
+      { headers }
+    );
+    expect(tooLarge.status).toBe(422);
+  });
+
+  it("enforces the direct scale-tree 1,000-file boundary", () => {
+    expect(() =>
+      readBenchmarkTest.assertBenchmarkFileCapacity(
+        readBenchmarkTest.maxScaleBenchmarkFiles - 1,
+        readBenchmarkTest.maxScaleBenchmarkFiles
+      )
+    ).not.toThrow();
+    expect(() =>
+      readBenchmarkTest.assertBenchmarkFileCapacity(
+        readBenchmarkTest.maxScaleBenchmarkFiles,
+        readBenchmarkTest.maxScaleBenchmarkFiles
+      )
+    ).toThrow("Benchmark file limit exceeded");
+  });
+
+  it("selects the expanded direct tree limit only for the authenticated scale operation", async () => {
+    const owner = "ingest";
+    const headers = { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` };
+    const seedFlatTree = async (fileCount: number) => {
+      const repo = uniqueRepoId(`scale-tree-${fileCount}`);
+      const seeded = await setupRepoForTests(env, owner, repo);
+      const blobPayload = new TextEncoder().encode("scale tree fixture\n");
+      const blob = await encodeGitObject("blob", blobPayload);
+      const treePayload = buildTreePayload(
+        Array.from({ length: fileCount }, (_, index) => ({
+          mode: "100644",
+          name: `file-${String(index).padStart(4, "0")}.txt`,
+          oid: blob.oid,
+        }))
+      );
+      const tree = await encodeGitObject("tree", treePayload);
+      const author = "Scale Test <scale@example.invalid> 0 +0000";
+      const commitPayload = new TextEncoder().encode(
+        `tree ${tree.oid}\nauthor ${author}\ncommitter ${author}\n\nscale tree boundary\n`
+      );
+      const commit = await encodeGitObject("commit", commitPayload);
+      const getStub = () => env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
+      await seedPackedRepoState({
+        env,
+        repoId: seeded.repositoryId,
+        getStub,
+        packs: [
+          {
+            name: `pack-scale-tree-${fileCount}.pack`,
+            packBytes: await buildPack([
+              { type: "blob", payload: blobPayload },
+              { type: "tree", payload: treePayload },
+              { type: "commit", payload: commitPayload },
+            ]),
+          },
+        ],
+        refs: [{ name: "refs/heads/main", oid: commit.oid }],
+        head: { target: "refs/heads/main", oid: commit.oid },
+      });
+      return { repo, commitSha: commit.oid };
+    };
+    const request = async (repo: string, commitSha: string, operation: string) =>
+      await workerExports.default.fetch(
+        `https://example.com/_internal/read-benchmark/${owner}/${repo}/${commitSha}/${operation}`,
+        { headers }
+      );
+
+    const atLimit = await seedFlatTree(1_000);
+    const ordinary = await request(atLimit.repo, atLimit.commitSha, "tree");
+    expect(ordinary.status).toBe(422);
+    const scale = await request(atLimit.repo, atLimit.commitSha, "scale-tree");
+    expect(scale.status).toBe(200);
+    expect(await scale.json()).toMatchObject({ operation: "scale-tree", fileCount: 1_000 });
+
+    const overLimit = await seedFlatTree(1_001);
+    const tooMany = await request(overLimit.repo, overLimit.commitSha, "scale-tree");
+    expect(tooMany.status).toBe(422);
   });
 
   it("rejects snapshot manifests outside canonical path and byte bounds", async () => {

@@ -31,14 +31,21 @@ const MAX_SEARCH_NEEDLE_BYTES = 64;
 const MAX_LOG_COMMITS = 100;
 const MAX_BENCHMARK_FILES = 100;
 const MAX_BENCHMARK_TREES = 200;
+const MAX_SCALE_BENCHMARK_FILES = 1_000;
+const MAX_SCALE_BENCHMARK_TREES = 2_000;
 const MAX_BENCHMARK_PACKS = 128;
 const MAX_BENCHMARK_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_BENCHMARK_TOTAL_BYTES = 512 * 1024 * 1024;
+const MAX_SCALE_BENCHMARK_TOTAL_BYTES = 5_000_000_000;
 const BENCHMARK_SUBREQUEST_HEADROOM = 300;
 
 type WalkedFile = { path: string; oid: string };
 
 class BenchmarkLimitError extends Error {}
+
+function isSnapshotBenchmarkOperation(operation: string): boolean {
+  return operation.startsWith("snapshot-") || operation.startsWith("scale-snapshot-");
+}
 
 function addBenchmarkBytes(total: number, next: number): number {
   const result = total + next;
@@ -48,7 +55,17 @@ function addBenchmarkBytes(total: number, next: number): number {
   return result;
 }
 
-export const __test = { addBenchmarkBytes };
+function assertBenchmarkFileCapacity(fileCount: number, maxFiles: number): void {
+  if (fileCount >= maxFiles) {
+    throw new BenchmarkLimitError("Benchmark file limit exceeded");
+  }
+}
+
+export const __test = {
+  addBenchmarkBytes,
+  assertBenchmarkFileCapacity,
+  maxScaleBenchmarkFiles: MAX_SCALE_BENCHMARK_FILES,
+};
 
 async function sha256(bytes: Uint8Array): Promise<string> {
   return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", asBufferSource(bytes))));
@@ -95,7 +112,11 @@ async function walkCommitFiles(
   c: AppContext,
   route: RepositoryRoute,
   commitSha: string,
-  cacheCtx: CacheContext
+  cacheCtx: CacheContext,
+  limits: { maxFiles: number; maxTrees: number } = {
+    maxFiles: MAX_BENCHMARK_FILES,
+    maxTrees: MAX_BENCHMARK_TREES,
+  }
 ): Promise<{ treeSha: string; treeCount: number; files: WalkedFile[] }> {
   requireReadBudget(cacheCtx);
   const commit = await readCommit(c.env, route.doName, commitSha, cacheCtx);
@@ -103,7 +124,7 @@ async function walkCommitFiles(
   let treeCount = 0;
   const visit = async (treeSha: string, basePath: string): Promise<void> => {
     treeCount++;
-    if (treeCount > MAX_BENCHMARK_TREES) {
+    if (treeCount > limits.maxTrees) {
       throw new BenchmarkLimitError("Benchmark tree limit exceeded");
     }
     requireReadBudget(cacheCtx);
@@ -116,9 +137,7 @@ async function walkCommitFiles(
       } else if (isSymlinkMode(entry.mode) || !entry.mode.startsWith("100")) {
         throw new Error("Benchmark repository contains an unsupported Git entry");
       } else {
-        if (files.length >= MAX_BENCHMARK_FILES) {
-          throw new BenchmarkLimitError("Benchmark file limit exceeded");
-        }
+        assertBenchmarkFileCapacity(files.length, limits.maxFiles);
         files.push({ path, oid: entry.oid });
       }
     }
@@ -230,7 +249,13 @@ function isSnapshotManifestFile(value: unknown): value is SnapshotManifest["file
   );
 }
 
-function isSnapshotManifest(value: unknown): value is SnapshotManifest {
+function isSnapshotManifest(
+  value: unknown,
+  limits: { maxFiles: number; maxTotalBytes: number } = {
+    maxFiles: MAX_BENCHMARK_FILES,
+    maxTotalBytes: MAX_BENCHMARK_TOTAL_BYTES,
+  }
+): value is SnapshotManifest {
   if (
     value === null ||
     typeof value !== "object" ||
@@ -247,7 +272,7 @@ function isSnapshotManifest(value: unknown): value is SnapshotManifest {
     !/^[0-9a-f]{40}$/.test(value.treeSha) ||
     !("files" in value) ||
     !Array.isArray(value.files) ||
-    value.files.length > MAX_BENCHMARK_FILES ||
+    value.files.length > limits.maxFiles ||
     !value.files.every(isSnapshotManifestFile)
   ) {
     return false;
@@ -264,20 +289,24 @@ function isSnapshotManifest(value: unknown): value is SnapshotManifest {
     if (file.bytes > MAX_BENCHMARK_FILE_BYTES) return false;
     paths.add(file.path);
     totalBytes += file.bytes;
-    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_BENCHMARK_TOTAL_BYTES) return false;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > limits.maxTotalBytes) return false;
   }
   return true;
 }
 
-function assertSnapshotManifest(value: unknown): SnapshotManifest {
-  if (!isSnapshotManifest(value)) throw new Error("Invalid snapshot manifest");
+function assertSnapshotManifest(
+  value: unknown,
+  limits?: { maxFiles: number; maxTotalBytes: number }
+): SnapshotManifest {
+  if (!isSnapshotManifest(value, limits)) throw new Error("Invalid snapshot manifest");
   return value;
 }
 
 async function loadSnapshotManifest(
   c: AppContext,
   route: RepositoryRoute,
-  commitSha: string
+  commitSha: string,
+  limits?: { maxFiles: number; maxTotalBytes: number }
 ): Promise<SnapshotManifest> {
   const key = snapshotObjectKey({
     env: c.env,
@@ -287,7 +316,7 @@ async function loadSnapshotManifest(
   if (!key) throw new Error("Snapshot benchmark is disabled");
   const object = await getSnapshotObject(c, key, "get-benchmark-manifest");
   if (!object) throw new Error("Snapshot manifest not found");
-  return assertSnapshotManifest(await object.json());
+  return assertSnapshotManifest(await object.json(), limits);
 }
 
 async function runDirectOperation(
@@ -299,6 +328,18 @@ async function runDirectOperation(
 ): Promise<Record<string, unknown>> {
   if (operation === "tree") {
     const walked = await walkCommitFiles(c, route, commitSha, cacheCtx);
+    return {
+      treeSha: walked.treeSha,
+      treeCount: walked.treeCount,
+      fileCount: walked.files.length,
+      digest: await sha256Text(walked.files.map((file) => `${file.path}\0${file.oid}`).join("\n")),
+    };
+  }
+  if (operation === "scale-tree") {
+    const walked = await walkCommitFiles(c, route, commitSha, cacheCtx, {
+      maxFiles: MAX_SCALE_BENCHMARK_FILES,
+      maxTrees: MAX_SCALE_BENCHMARK_TREES,
+    });
     return {
       treeSha: walked.treeSha,
       treeCount: walked.treeCount,
@@ -417,11 +458,22 @@ async function runSnapshotOperation(
   commitSha: string,
   operation: string
 ): Promise<Record<string, unknown>> {
-  const manifest = await loadSnapshotManifest(c, route, commitSha);
+  const scaleOperation = operation === "scale-snapshot-tree" || operation === "scale-snapshot-blob";
+  const manifest = await loadSnapshotManifest(
+    c,
+    route,
+    commitSha,
+    scaleOperation
+      ? {
+          maxFiles: MAX_SCALE_BENCHMARK_FILES,
+          maxTotalBytes: MAX_SCALE_BENCHMARK_TOTAL_BYTES,
+        }
+      : undefined
+  );
   if (manifest.repositoryId !== route.repositoryId || manifest.commitSha !== commitSha) {
     throw new Error("Snapshot manifest identity mismatch");
   }
-  if (operation === "snapshot-tree") {
+  if (operation === "snapshot-tree" || operation === "scale-snapshot-tree") {
     return {
       treeSha: manifest.treeSha,
       fileCount: manifest.files.length,
@@ -433,13 +485,20 @@ async function runSnapshotOperation(
   }
   const requestedPath = c.req.query("path");
   const selected =
-    operation === "snapshot-blob"
+    operation === "snapshot-blob" || operation === "scale-snapshot-blob"
       ? manifest.files.filter((file) => file.path === requestedPath)
       : manifest.files;
-  if (operation === "snapshot-blob" && selected.length !== 1) {
+  if (
+    (operation === "snapshot-blob" || operation === "scale-snapshot-blob") &&
+    selected.length !== 1
+  ) {
     throw new Error("Benchmark snapshot path is not a blob");
   }
-  if (operation !== "snapshot-blob" && operation !== "snapshot-search") {
+  if (
+    operation !== "snapshot-blob" &&
+    operation !== "scale-snapshot-blob" &&
+    operation !== "snapshot-search"
+  ) {
     throw new Error("Unknown benchmark operation");
   }
   const indexed: string[] = [];
@@ -476,7 +535,7 @@ async function runSnapshotOperation(
     if (operation === "snapshot-search") matches += countNeedle(bytes, needle);
     indexed.push(`${file.path}\0${digest}`);
   }
-  if (operation === "snapshot-blob") {
+  if (operation === "snapshot-blob" || operation === "scale-snapshot-blob") {
     const file = selected[0]!;
     return { path: file.path, bytes: totalBytes, sha256: file.sha256 };
   }
@@ -517,7 +576,7 @@ async function handleReadBenchmark(c: AppContext): Promise<Response> {
   }
   const log = c.var.logFor({ service: "ReadBenchmark" });
   const cacheCtx = benchmarkCacheContext(c, resolved);
-  if (c.req.query("cold") === "1" && !operation.startsWith("snapshot-")) {
+  if (c.req.query("cold") === "1" && !isSnapshotBenchmarkOperation(operation)) {
     cacheCtx.memo?.flags?.add("no-isolate-idx-cache");
   }
   const startedAt = performance.now();
@@ -548,13 +607,13 @@ async function handleReadBenchmark(c: AppContext): Promise<Response> {
         { headers: { "Cache-Control": "no-store" } }
       );
     }
-    if (!operation.startsWith("snapshot-")) {
+    if (!isSnapshotBenchmarkOperation(operation)) {
       const catalog = await loadActivePackCatalog(c.env, resolved.doName, cacheCtx);
       if (catalog.length > MAX_BENCHMARK_PACKS) {
         throw new BenchmarkLimitError("Benchmark pack limit exceeded");
       }
     }
-    const result = operation.startsWith("snapshot-")
+    const result = isSnapshotBenchmarkOperation(operation)
       ? await runSnapshotOperation(c, resolved, commitSha, operation)
       : await runDirectOperation(c, resolved, commitSha, operation, cacheCtx);
     const operationMs = performance.now() - startedAt;
