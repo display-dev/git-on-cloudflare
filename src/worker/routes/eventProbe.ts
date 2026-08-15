@@ -1,5 +1,6 @@
 import { getRepoStub, zeroOid } from "@/worker/common";
 import type {
+  AcceptedWriteProjectionResult,
   ReconciledHeadProjectionResult,
   SnapshotReconcilePlan,
 } from "@/worker/do/repo/acceptedWrites";
@@ -126,13 +127,18 @@ async function materializeEntry(
     return Response.json({ error: "Injected crash after snapshot" }, { status: 503 });
   }
   count(c, "do:project-accepted-write");
-  const projection = await c.var.limiter.run("do:project-accepted-write", () =>
-    stub.projectAcceptedWrite({
-      entryId,
-      commitSha: entry.fact.afterSha,
-      materializedAt: Date.now(),
-    })
+  const projection = await c.var.limiter.run<AcceptedWriteProjectionResult>(
+    "do:project-accepted-write",
+    () =>
+      stub.projectAcceptedWrite({
+        entryId,
+        commitSha: entry.fact.afterSha,
+        materializedAt: Date.now(),
+      })
   );
+  if ("status" in projection) {
+    return Response.json({ error: "Repository is being deleted" }, { status: 409 });
+  }
   const elapsedMs = performance.now() - startedAt;
   log.info("event-probe:delivered", {
     entryId,
@@ -180,7 +186,7 @@ async function reconcile(c: AppContext, route: RepositoryRoute, ref: string): Pr
         materializedAt: Date.now(),
       })
   );
-  if (projection.status === "stale") {
+  if (projection.status === "stale" || projection.status === "repository-deleting") {
     log.info("event-probe:reconcile-stale", { ref: plan.ref, sequence: plan.sequence });
     return Response.json({ plan, status: "stale" }, { status: 409 });
   }

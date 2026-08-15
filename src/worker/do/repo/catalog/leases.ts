@@ -34,19 +34,24 @@ export async function beginReceiveLease(
   ctx: DurableObjectState,
   logger?: Logger
 ): Promise<BeginReceiveResult> {
-  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-  await clearExpiredLeases(ctx, logger);
-  const existing = await store.get("receiveLease");
-  if (existing) return { ok: false, retryAfter: LEASE_RETRY_AFTER_SECONDS };
-
   const now = Date.now();
   const lease: RepoLease = {
     token: crypto.randomUUID(),
     createdAt: now,
     expiresAt: now + RECEIVE_LEASE_TTL_MS,
   };
-  await store.put("receiveLease", lease);
+  const acquired = await ctx.storage.transaction(async (transaction) => {
+    const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+    if (await transactionStore.get("repositoryDeleting")) return false;
+    const existing = await transactionStore.get("receiveLease");
+    if (existing && existing.expiresAt > now) return false;
+    if (existing) logger?.debug("lease:expired", { kind: "receive" });
+    await transactionStore.put("receiveLease", lease);
+    return true;
+  });
+  if (!acquired) return { ok: false, retryAfter: LEASE_RETRY_AFTER_SECONDS };
 
+  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const activeCatalog = await getActivePackCatalogSnapshot(ctx);
   await ensureRepoMetadataDefaults(store);
   const refs = (await store.get("refs")) ?? [];

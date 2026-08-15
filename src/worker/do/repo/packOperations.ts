@@ -12,7 +12,13 @@ import type { Logger } from "@/worker/common/logger";
 import { createLogger } from "@/worker/common";
 import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits";
 import { doPrefix, packIndexKey, packRefsKey } from "@/worker/keys";
-import { deletePackCatalogRows, getDb, getPackCatalogCount, getPackCatalogRow } from "./db";
+import {
+  deleteAllPackCatalogRows,
+  deletePackCatalogRows,
+  getDb,
+  getPackCatalogCount,
+  getPackCatalogRow,
+} from "./db";
 import { getActivePackCatalogSnapshot } from "./catalog";
 
 export type RemovePackResult = {
@@ -174,9 +180,29 @@ export async function clearRepositoryStorage(
     doId: ctx.id.toString(),
   });
 
-  // The 2026-05-13 compatibility date includes `delete_all_deletes_alarm`,
-  // so this also clears any pending alarm for the deleted repository.
-  await ctx.storage.deleteAll();
+  if (!(await ctx.storage.get<boolean>("repositoryDeleting"))) {
+    throw new Error("repository deletion fence is required before clearing storage");
+  }
+
+  // SQL application rows are not exposed through the transactional KV API.
+  // Clear them first while the durable tombstone still rejects every writer.
+  // A reset here leaves the tombstone intact and queue replay safely repeats
+  // the idempotent SQL purge.
+  await deleteAllPackCatalogRows(getDb(ctx.storage));
+
+  // Preserve the deletion fence atomically with the KV clear. A reset between a
+  // standalone deleteAll() and put() would otherwise reopen this DO to stale
+  // queued writers after the final R2 sweep. DurableObjectTransaction does not
+  // expose deleteAll(), so enumerate and delete every non-fence key within the
+  // same transaction, and clear the alarm explicitly.
+  await ctx.storage.transaction(async (transaction) => {
+    const keys = [...(await transaction.list()).keys()].filter(
+      (key) => key !== "repositoryDeleting"
+    );
+    if (keys.length > 0) await transaction.delete(keys);
+    await transaction.deleteAlarm();
+    await transaction.put("repositoryDeleting", true);
+  });
   log.info("clear:storage-deleted-all");
 
   return { deletedDO: true };

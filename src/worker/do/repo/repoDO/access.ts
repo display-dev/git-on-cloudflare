@@ -15,6 +15,10 @@ export type RepoDOAccessContext = {
 export async function touchAndMaybeSchedule(args: RepoDOAccessContext): Promise<void> {
   const now = Date.now();
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
+  if (await store.get("repositoryDeleting")) {
+    await args.ctx.storage.deleteAlarm();
+    return;
+  }
   const lastAccessMemMs = args.getLastAccessMemMs();
 
   // Throttle access writes so RPC-heavy read paths do not amplify storage churn.

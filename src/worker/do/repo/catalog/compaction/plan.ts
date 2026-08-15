@@ -71,7 +71,7 @@ export type BeginCompactionResult =
       ok: false;
       status: "busy";
       retryAfter: number;
-      reason: "receive-active" | "compact-active";
+      reason: "receive-active" | "compact-active" | "repository-deleting";
       message: string;
     }
   | {
@@ -91,7 +91,12 @@ export type CommitCompactionResult =
     }
   | {
       status: "retry";
-      reason: "receive-active" | "lease-mismatch" | "packset-changed" | "source-changed";
+      reason:
+        | "receive-active"
+        | "lease-mismatch"
+        | "packset-changed"
+        | "repository-deleting"
+        | "source-changed";
       message: string;
     };
 

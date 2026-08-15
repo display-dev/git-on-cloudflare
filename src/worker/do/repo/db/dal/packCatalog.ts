@@ -101,3 +101,7 @@ export async function deletePackCatalogRows(
     await db.delete(packCatalog).where(inArray(packCatalog.packKey, batch));
   }
 }
+
+export async function deleteAllPackCatalogRows(db: DrizzleSqliteDODatabase): Promise<void> {
+  await db.delete(packCatalog);
+}

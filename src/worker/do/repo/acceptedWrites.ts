@@ -19,6 +19,10 @@ export type SnapshotProjectionResult = {
   current: SnapshotCurrent;
 };
 
+export type AcceptedWriteProjectionResult =
+  | SnapshotProjectionResult
+  | { status: "repository-deleting" };
+
 export type SnapshotProjectionState = {
   snapshotCount: number;
   current?: SnapshotCurrent;
@@ -119,9 +123,10 @@ export async function getSnapshotProjectionState(
 export async function projectAcceptedWriteState(
   ctx: DurableObjectState,
   args: { entryId: string; commitSha: string; materializedAt: number }
-): Promise<SnapshotProjectionResult> {
+): Promise<AcceptedWriteProjectionResult> {
   return await ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return { status: "repository-deleting" };
     const entryKey = acceptedWriteJournalKey(args.entryId);
     const entry = await store.get(entryKey);
     if (!entry || entry.fact.afterSha !== args.commitSha) {
@@ -167,7 +172,7 @@ export async function projectAcceptedWriteState(
 
 export type ReconciledHeadProjectionResult =
   | ({ status: "projected" } & SnapshotProjectionResult)
-  | { status: "stale" };
+  | { status: "stale" | "repository-deleting" };
 
 export async function projectReconciledHeadState(
   ctx: DurableObjectState,
@@ -175,6 +180,7 @@ export async function projectReconciledHeadState(
 ): Promise<ReconciledHeadProjectionResult> {
   return await ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return { status: "repository-deleting" };
     const acceptedHead = await store.get(acceptedWriteHeadKey(args.ref));
     const refs = (await store.get("refs")) ?? [];
     const authoritative = refs.find((ref) => ref.name === args.ref)?.oid ?? zeroOid();
@@ -261,7 +267,11 @@ export async function dropAcceptedWriteJournalEntry(
   ctx: DurableObjectState,
   entryId: string
 ): Promise<boolean> {
-  return Boolean(await ctx.storage.delete(acceptedWriteJournalKey(entryId)));
+  return await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return false;
+    return Boolean(await store.delete(acceptedWriteJournalKey(entryId)));
+  });
 }
 
 export const __test = {

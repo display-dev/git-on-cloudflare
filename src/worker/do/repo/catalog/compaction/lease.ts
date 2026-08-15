@@ -17,7 +17,6 @@ import {
   supersedePackCatalogRows,
   upsertPackCatalogRow,
 } from "../../db";
-import { clearExpiredLeases } from "../leases";
 import { getActivePackCatalogSnapshot } from "../state";
 import {
   bumpPacksetVersion,
@@ -51,9 +50,15 @@ export async function beginCompactionState(args: {
   logger?: Logger;
 }): Promise<BeginCompactionResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
-  await clearExpiredLeases(args.ctx, args.logger);
-  await ensureRepoMetadataDefaults(store);
-
+  if (await store.get("repositoryDeleting")) {
+    return {
+      ok: false,
+      status: "busy",
+      retryAfter: LEASE_RETRY_AFTER_SECONDS,
+      reason: "repository-deleting",
+      message: "Repository deletion has started, so compaction cannot begin.",
+    };
+  }
   const wantedAt = await store.get("compactionWantedAt");
   if (typeof wantedAt !== "number") {
     return {
@@ -65,32 +70,15 @@ export async function beginCompactionState(args: {
   }
 
   const now = Date.now();
-  const receiveLease = activeLeaseOrUndefined(await store.get("receiveLease"), now);
-  if (receiveLease) {
-    return {
-      ok: false,
-      status: "busy",
-      retryAfter: LEASE_RETRY_AFTER_SECONDS,
-      reason: "receive-active",
-      message: "A receive lease is active, so compaction must retry later.",
-    };
-  }
-
-  const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), now);
-  if (compactLease) {
-    return {
-      ok: false,
-      status: "busy",
-      retryAfter: LEASE_RETRY_AFTER_SECONDS,
-      reason: "compact-active",
-      message: "A compaction lease is already active for this repository.",
-    };
-  }
-
   const activeCatalog = await getActivePackCatalogSnapshot(args.ctx);
   const plan = selectCompactionPlan(activeCatalog);
   if (!plan) {
-    await store.delete("compactionWantedAt");
+    await args.ctx.storage.transaction(async (transaction) => {
+      const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+      if (!(await transactionStore.get("repositoryDeleting"))) {
+        await transactionStore.delete("compactionWantedAt");
+      }
+    });
     args.logger?.info("compaction:begin-no-work", {
       reason: "below-threshold",
     });
@@ -107,7 +95,32 @@ export async function beginCompactionState(args: {
     createdAt: now,
     expiresAt: now + COMPACT_LEASE_TTL_MS,
   };
-  await store.put("compactLease", lease);
+  const acquisition = await args.ctx.storage.transaction(async (transaction) => {
+    const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+    if (await transactionStore.get("repositoryDeleting")) return "repository-deleting";
+    if (activeLeaseOrUndefined(await transactionStore.get("receiveLease"), now)) {
+      return "receive-active";
+    }
+    if (activeLeaseOrUndefined(await transactionStore.get("compactLease"), now)) {
+      return "compact-active";
+    }
+    await transactionStore.put("compactLease", lease);
+    return "acquired";
+  });
+  if (acquisition !== "acquired") {
+    return {
+      ok: false,
+      status: "busy",
+      retryAfter: LEASE_RETRY_AFTER_SECONDS,
+      reason: acquisition,
+      message:
+        acquisition === "repository-deleting"
+          ? "Repository deletion has started, so compaction cannot begin."
+          : acquisition === "receive-active"
+            ? "A receive lease is active, so compaction must retry later."
+            : "A compaction lease is already active for this repository.",
+    };
+  }
 
   args.logger?.info("compaction:begin", {
     leaseToken: lease.token,
@@ -150,9 +163,29 @@ export async function commitCompactionState(args: {
 }): Promise<CommitCompactionResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
   await ensureRepoMetadataDefaults(store);
-
-  const lease = await store.get("compactLease");
-  if (!lease || lease.token !== args.token) {
+  const fence = await args.ctx.storage.transaction(async (transaction) => {
+    const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+    if (await transactionStore.get("repositoryDeleting")) return "repository-deleting";
+    const now = Date.now();
+    const lease = await transactionStore.get("compactLease");
+    if (!lease || lease.token !== args.token || lease.expiresAt <= now) {
+      if (lease?.token === args.token) await transactionStore.delete("compactLease");
+      return "lease-mismatch";
+    }
+    await transactionStore.put("compactLease", {
+      ...lease,
+      expiresAt: now + COMPACT_LEASE_TTL_MS,
+    });
+    return "held";
+  });
+  if (fence === "repository-deleting") {
+    return {
+      status: "retry",
+      reason: "repository-deleting",
+      message: "Repository deletion started before compaction could commit.",
+    };
+  }
+  if (fence === "lease-mismatch") {
     return {
       status: "retry",
       reason: "lease-mismatch",

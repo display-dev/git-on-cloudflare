@@ -100,7 +100,24 @@ export async function requestCompactionState(args: {
   }
 
   const wantedAt = Date.now();
-  await context.store.put("compactionWantedAt", wantedAt);
+  const recorded = await args.ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return false;
+    await store.put("compactionWantedAt", wantedAt);
+    return true;
+  });
+  if (!recorded) {
+    return {
+      action: "request",
+      status: "no_work",
+      queued: false,
+      shouldEnqueue: false,
+      activeCatalog: context.activeCatalog,
+      packCatalogVersion: context.packCatalogVersion,
+      reason: "below-threshold",
+      message: "Repository deletion has started, so compaction cannot be requested.",
+    };
+  }
   await scheduleCompactionWake(args.ctx, args.env);
 
   args.logger?.info("compaction:request", {
@@ -127,9 +144,13 @@ export async function clearCompactionRequestState(args: {
   ctx: DurableObjectState;
   logger?: Logger;
 }): Promise<ClearCompactionRequestResult> {
-  const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
-  const hadQueuedWork = typeof (await store.get("compactionWantedAt")) === "number";
-  await store.delete("compactionWantedAt");
+  const hadQueuedWork = await args.ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return false;
+    const queued = typeof (await store.get("compactionWantedAt")) === "number";
+    await store.delete("compactionWantedAt");
+    return queued;
+  });
   args.logger?.info("compaction:clear", {
     hadQueuedWork,
   });

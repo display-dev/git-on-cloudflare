@@ -28,8 +28,11 @@ export async function setRefs(
   ctx: DurableObjectState,
   refs: { name: string; oid: string }[]
 ): Promise<void> {
-  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-  await store.put("refs", refs);
+  await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return;
+    await store.put("refs", refs);
+  });
 }
 
 /**
@@ -39,6 +42,9 @@ export async function setRefs(
  */
 export async function resolveHead(ctx: DurableObjectState): Promise<Head> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  if (await store.get("repositoryDeleting")) {
+    return { target: "refs/heads/main", unborn: true };
+  }
   const stored = await store.get("head");
   const refs = await getRefs(ctx);
 
@@ -61,8 +67,11 @@ export async function resolveHead(ctx: DurableObjectState): Promise<Head> {
  * @param head - New HEAD value
  */
 export async function setHead(ctx: DurableObjectState, head: Head): Promise<void> {
-  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-  await store.put("head", head);
+  await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return;
+    await store.put("head", head);
+  });
 }
 
 /**

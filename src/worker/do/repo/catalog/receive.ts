@@ -10,7 +10,12 @@ import {
   validateReceiveCommands,
 } from "@/worker/git/operations/validation";
 import { getDb, listActivePackCatalog, upsertPackCatalogRow } from "../db";
-import { DEFAULT_HEAD, bumpPacksetVersion, ensureRepoMetadataDefaults } from "./shared";
+import {
+  DEFAULT_HEAD,
+  RECEIVE_LEASE_TTL_MS,
+  bumpPacksetVersion,
+  ensureRepoMetadataDefaults,
+} from "./shared";
 import { catalogNeedsCompaction, scheduleCompactionWake } from "./compaction/plan";
 import { acceptedWritesMatchCommands, recordAcceptedWrites } from "../acceptedWrites";
 import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
@@ -118,6 +123,28 @@ async function clearMatchingReceiveLease(
   if (lease?.token === token) await store.delete("receiveLease");
 }
 
+async function holdReceiveCompletionFence(
+  ctx: DurableObjectState,
+  token: string,
+  allowRecovery: boolean
+): Promise<boolean> {
+  return await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return false;
+    const now = Date.now();
+    const lease = await store.get("receiveLease");
+    if (lease && lease.token !== token && lease.expiresAt > now) return false;
+    if (lease?.token === token && lease.expiresAt <= now && !allowRecovery) return false;
+    if ((!lease || lease.token !== token) && !allowRecovery) return false;
+    await store.put("receiveLease", {
+      token,
+      createdAt: lease?.token === token ? lease.createdAt : now,
+      expiresAt: now + RECEIVE_LEASE_TTL_MS,
+    });
+    return true;
+  });
+}
+
 export async function getIngestionReceiptState(
   ctx: DurableObjectState,
   keyHash: string
@@ -137,6 +164,9 @@ export async function reconcileReceiveState(
 ): Promise<ReconcileReceiveResult> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const outcome = await store.get(receiveOutcomeKey(args.token));
+  if (!(await holdReceiveCompletionFence(ctx, args.token, Boolean(outcome)))) {
+    return { status: "unknown" };
+  }
   if (outcome) {
     await storeReceiveOutcome(ctx.storage, outcome);
     if (args.ingestionReceipt) await storeIngestionReceipt(ctx.storage, args.ingestionReceipt);
@@ -229,6 +259,12 @@ export async function finalizeReceiveState(args: {
   logger?: Logger;
 }): Promise<FinalizeReceiveResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
+  if (!(await holdReceiveCompletionFence(args.ctx, args.token, false))) {
+    return {
+      status: "lease_mismatch",
+      message: "Receive lease is no longer active for this request.",
+    };
+  }
   await ensureRepoMetadataDefaults(store);
 
   const priorOutcome = await store.get(receiveOutcomeKey(args.token));
@@ -248,7 +284,8 @@ export async function finalizeReceiveState(args: {
   }
 
   const lease = await store.get("receiveLease");
-  if (!lease || lease.token !== args.token) {
+  if (!lease || lease.token !== args.token || lease.expiresAt <= Date.now()) {
+    if (lease?.token === args.token) await store.delete("receiveLease");
     return {
       status: "lease_mismatch",
       message: "Receive lease is no longer active for this request.",

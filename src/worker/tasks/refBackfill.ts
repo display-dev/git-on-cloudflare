@@ -1,6 +1,7 @@
 import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
 import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
+import type { BeginRepositoryMaintenanceResult } from "@/worker/do/repo/repositoryLifecycle";
 
 import { type PackRefBackfillQueueMessage, type RepoQueueMessageHandle } from "./types";
 
@@ -55,9 +56,22 @@ export async function handlePackRefBackfillMessage(
   });
   const stub = getRepoStubByDoId(env, body.doId) as DurableObjectStub<RepoDurableObject>;
   const { cacheCtx, limiter } = task;
+  let maintenanceToken: string | undefined;
 
   try {
     log.info("ref-index:backfill-start", { packKey: body.packKey });
+
+    countBackfillSubrequest(cacheCtx, log, "do:begin-repository-maintenance");
+    const maintenance = await limiter.run<BeginRepositoryMaintenanceResult>(
+      "do:begin-repository-maintenance",
+      () => stub.beginRepositoryMaintenance()
+    );
+    if (!maintenance.ok) {
+      log.info("ref-index:backfill-deleting", { packKey: body.packKey });
+      message.ack();
+      return;
+    }
+    maintenanceToken = maintenance.token;
 
     countBackfillSubrequest(cacheCtx, log, "do:get-active-pack-catalog");
     const activeCatalog = await limiter.run("do:get-active-pack-catalog", async () => {
@@ -109,6 +123,15 @@ export async function handlePackRefBackfillMessage(
     });
 
     cacheCtx.memo.packCatalog = externalBaseCatalog;
+    countBackfillSubrequest(cacheCtx, log, "do:renew-repository-maintenance");
+    const renewed = await limiter.run("do:renew-repository-maintenance", () =>
+      stub.renewRepositoryMaintenance(maintenance.token)
+    );
+    if (!renewed) {
+      log.info("ref-index:backfill-fence-lost", { packKey: body.packKey });
+      message.ack();
+      return;
+    }
     const resolveResult = await resolveDeltasAndWriteIdx({
       env,
       packKey: target.packKey,
@@ -145,5 +168,13 @@ export async function handlePackRefBackfillMessage(
       error: String(error),
     });
     retryQueueMessage(message, REF_BACKFILL_RETRY_DELAY_SECONDS);
+  } finally {
+    if (maintenanceToken) {
+      countBackfillSubrequest(cacheCtx, log, "do:finish-repository-maintenance");
+      const token = maintenanceToken;
+      await limiter.run("do:finish-repository-maintenance", () =>
+        stub.finishRepositoryMaintenance(token)
+      );
+    }
   }
 }

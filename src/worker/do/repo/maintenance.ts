@@ -48,6 +48,11 @@ export async function handleIdleAndMaintenance(
     const cfg = getConfig(env);
     const now = Date.now();
     const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+    if (await store.get("repositoryDeleting")) {
+      logger?.info("cleanup:repository-deleted-tombstone-preserved");
+      await clearIdleAlarm(ctx, logger);
+      return;
+    }
     const lastAccess = await store.get("lastAccessMs");
     const decision = await decideIdleCleanup(ctx, cfg.idleMs, lastAccess, now);
 

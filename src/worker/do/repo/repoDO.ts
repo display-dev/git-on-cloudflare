@@ -57,6 +57,18 @@ import {
   projectAcceptedWriteState,
   projectReconciledHeadState,
 } from "./acceptedWrites";
+import {
+  beginRepositoryDeletionState,
+  beginRepositoryMaintenanceState,
+  beginSnapshotMaterializationState,
+  finishSnapshotMaterializationState,
+  finishRepositoryMaintenanceState,
+  renewRepositoryMaintenanceState,
+  renewSnapshotMaterializationState,
+  type BeginRepositoryDeletionResult,
+  type BeginRepositoryMaintenanceResult,
+  type BeginSnapshotMaterializationResult,
+} from "./repositoryLifecycle";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -105,6 +117,12 @@ export class RepoDurableObject extends DurableObject {
 
   async alarm(): Promise<void> {
     this.logger.debug("alarm:start", {});
+
+    if (await this.ctx.storage.get<boolean>("repositoryDeleting")) {
+      await this.ctx.storage.deleteAlarm();
+      this.logger.info("alarm:repository-deleted-tombstone-preserved", {});
+      return;
+    }
 
     await clearExpiredLeases(this.ctx, this.logger);
 
@@ -180,12 +198,10 @@ export class RepoDurableObject extends DurableObject {
   }
 
   public async beginReceive() {
-    await this.ensureAccessAndAlarm();
     return await beginReceiveLease(this.ctx, this.logger);
   }
 
   public async abortReceive(token: string): Promise<boolean> {
-    await this.ensureAccessAndAlarm();
     return await abortReceiveLease(this.ctx, token);
   }
 
@@ -239,7 +255,6 @@ export class RepoDurableObject extends DurableObject {
     stagedPackKey?: string | undefined;
     ingestionReceipt?: IngestionReceipt | undefined;
   }) {
-    await this.ensureAccessAndAlarm();
     return await reconcileReceiveState(this.ctx, args);
   }
 
@@ -257,7 +272,6 @@ export class RepoDurableObject extends DurableObject {
     ingestionReceipt?: IngestionReceipt | undefined;
     acceptedWrites?: AcceptedWriteFact[] | undefined;
   }) {
-    await this.ensureAccessAndAlarm();
     return await finalizeReceiveState({
       ctx: this.ctx,
       env: this.env,
@@ -271,7 +285,6 @@ export class RepoDurableObject extends DurableObject {
   }
 
   public async beginCompaction(): Promise<BeginCompactionResult> {
-    await this.ensureAccessAndAlarm();
     return await beginCompactionState({
       ctx: this.ctx,
       env: this.env,
@@ -281,7 +294,6 @@ export class RepoDurableObject extends DurableObject {
   }
 
   public async abortCompaction(token: string): Promise<boolean> {
-    await this.ensureAccessAndAlarm();
     return await abortCompactionLease(this.ctx, token);
   }
 
@@ -297,7 +309,6 @@ export class RepoDurableObject extends DurableObject {
       objectCount: number;
     };
   }): Promise<CommitCompactionResult> {
-    await this.ensureAccessAndAlarm();
     return await commitCompactionState({
       ctx: this.ctx,
       env: this.env,
@@ -381,6 +392,36 @@ export class RepoDurableObject extends DurableObject {
   // also enumerates R2 - that would be the forbidden Worker -> DO -> R2 hop.
   public async clearRepositoryStorage(): Promise<{ deletedDO: boolean }> {
     return await clearRepositoryStorage(this.ctx, this.env);
+  }
+
+  public async beginSnapshotMaterialization(
+    prefix: string
+  ): Promise<BeginSnapshotMaterializationResult> {
+    return await beginSnapshotMaterializationState(this.ctx, prefix);
+  }
+
+  public async renewSnapshotMaterialization(token: string): Promise<boolean> {
+    return await renewSnapshotMaterializationState(this.ctx, token);
+  }
+
+  public async finishSnapshotMaterialization(token: string): Promise<boolean> {
+    return await finishSnapshotMaterializationState(this.ctx, token);
+  }
+
+  public async beginRepositoryDeletion(): Promise<BeginRepositoryDeletionResult> {
+    return await beginRepositoryDeletionState(this.ctx);
+  }
+
+  public async beginRepositoryMaintenance(): Promise<BeginRepositoryMaintenanceResult> {
+    return await beginRepositoryMaintenanceState(this.ctx);
+  }
+
+  public async renewRepositoryMaintenance(token: string): Promise<boolean> {
+    return await renewRepositoryMaintenanceState(this.ctx, token);
+  }
+
+  public async finishRepositoryMaintenance(token: string): Promise<boolean> {
+    return await finishRepositoryMaintenanceState(this.ctx, token);
   }
 
   public async removePack(packKey: string): Promise<RemovePackResult> {

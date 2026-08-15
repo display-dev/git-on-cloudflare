@@ -19,6 +19,14 @@ export type RepoLease = {
   expiresAt: number;
 };
 
+export type SnapshotMaterializationLease = RepoLease & {
+  prefix: string;
+};
+
+export type RepositoryMaintenanceLease = RepoLease & {
+  operation: "pack-ref-backfill";
+};
+
 export type IngestionReceipt = {
   keyHash: string;
   fingerprint: string;
@@ -73,6 +81,10 @@ export type RepoStateSchema = {
   receiveOutcomeIndex: string[] | undefined;
   ingestionReceiptIndex: string[] | undefined;
   compactLease: RepoLease | undefined;
+  snapshotMaterializationLeases: SnapshotMaterializationLease[] | undefined;
+  repositoryMaintenanceLeases: RepositoryMaintenanceLease[] | undefined;
+  snapshotPrefixes: string[] | undefined;
+  repositoryDeleting: boolean | undefined;
   compactionWantedAt: number | undefined;
   lastAccessMs: number;
 } & Record<ObjKey, Uint8Array | ArrayBuffer> &
