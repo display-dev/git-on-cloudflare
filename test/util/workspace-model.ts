@@ -915,6 +915,7 @@ export class WorkspaceProbeModel {
       candidate.basePackIds = new Set(checkpointCommit.requiredPackIds);
       for (const packId of candidate.basePackIds) this.packs.get(packId)?.pins.add(candidate.id);
       candidate.baseFiles = cloneFiles(checkpointCommit.files);
+      candidate.files = cloneFiles(checkpointCommit.files);
       candidate.generations = new Map([
         [
           candidate.baseGeneration,

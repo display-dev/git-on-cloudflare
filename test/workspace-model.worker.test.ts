@@ -587,18 +587,41 @@ describe("Investigation 7 workspace model", () => {
       expectedRevision: 0,
       operation: { id: "op-1", actor: "other", path: "other.txt", bytes: encoder.encode("other") },
     });
+    const unrelatedBranch = model.branchFromOperation({
+      workspaceId: unrelated.workspaceId,
+      operationId: "op-1",
+      requestId: "unrelated-request",
+    });
     await model.checkpoint({
       workspaceId: workspace.workspaceId,
       expectedRevision: 1,
       committedAtSeconds: 1_786_742_400,
       message: "retained base",
     });
-    expect(model.workspaceStorageState().branchRequests).toBe(1);
+    await model.appendOperation({
+      workspaceId: workspace.workspaceId,
+      expectedRevision: 1,
+      operation: {
+        id: "discarded-tail",
+        actor: "agent",
+        path: "discarded.txt",
+        bytes: encoder.encode("discarded"),
+      },
+    });
+    expect(model.workspaceStorageState().branchRequests).toBe(2);
     model.purgeOperationHistory(workspace.workspaceId);
     expect(model.operationCount(workspace.workspaceId)).toBe(0);
     expect(model.operationCount(prePurgeBranch)).toBe(0);
     expect(model.operationCount(unrelated.workspaceId)).toBe(1);
-    expect(model.workspaceStorageState().branchRequests).toBe(0);
+    expect(model.workspaceStorageState().branchRequests).toBe(1);
+    expect(model.projectFiles(workspace.workspaceId).has("discarded.txt")).toBe(false);
+    expect(
+      model.branchFromOperation({
+        workspaceId: unrelated.workspaceId,
+        operationId: "op-1",
+        requestId: "unrelated-request",
+      })
+    ).toBe(unrelatedBranch);
     expect(() =>
       model.branchFromOperation({
         workspaceId: workspace.workspaceId,
@@ -606,6 +629,9 @@ describe("Investigation 7 workspace model", () => {
         requestId: "pre-purge",
       })
     ).toThrow("Branch operation is unavailable");
+    expect(() =>
+      model.replayAtOperation({ workspaceId: workspace.workspaceId, operationId: "op-1" })
+    ).toThrow("Replay operation is unavailable");
     await model.appendOperation({
       workspaceId: workspace.workspaceId,
       expectedRevision: 0,
