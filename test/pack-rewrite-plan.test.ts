@@ -4,6 +4,12 @@ import { createLogger } from "@/worker/common";
 import { buildOutputOrder, compactDeadSlots } from "@/worker/git/pack/rewrite/plan";
 import { allocateSelectionTable } from "@/worker/git/pack/rewrite/shared";
 
+test("selection table preserves pack slots beyond 255", () => {
+  const table = allocateSelectionTable(1);
+  table.packSlots[0] = 256;
+  assert.strictEqual(table.packSlots[0], 256);
+});
+
 test("compactDeadSlots preserves base slots for live rows that move", () => {
   const table = allocateSelectionTable(4);
   table.count = 4;

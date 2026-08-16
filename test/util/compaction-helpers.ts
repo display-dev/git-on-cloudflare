@@ -14,7 +14,8 @@ export async function compactOnce(repoId: string): Promise<QueueRunResult> {
 
 export async function deleteSupersededOnce(
   repoId: string,
-  packKeys: string[]
+  packKeys: string[],
+  removeCatalogRows = false
 ): Promise<QueueRunResult> {
   const doId = env.REPO_DO.idFromName(repoId).toString();
   return await runQueueMessage({
@@ -22,6 +23,7 @@ export async function deleteSupersededOnce(
     doId,
     repoId,
     packKeys,
+    removeCatalogRows,
   });
 }
 

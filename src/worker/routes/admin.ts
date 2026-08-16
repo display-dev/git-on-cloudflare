@@ -89,6 +89,31 @@ export function registerAdminRoutes(router: AppRouter) {
   router.delete(`/:owner/:repo/admin/compact`, handleCompactionDelete);
   router.post(`/:owner/:repo/admin/compact`, handleCompactionPost);
 
+  router.post(`/:owner/:repo/admin/reachability-gc`, async (c) => {
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const { route, limiter } = gate;
+    const stub = getRepoStub(c.env, route.doName);
+    const log = c.var.logFor({ service: "AdminReachabilityGc", repoId: route.doName });
+    try {
+      await limiter.run("queue:admin-reachability-gc", () =>
+        c.env.REPO_TASKS_QUEUE.send({
+          kind: "reachability-gc",
+          doId: stub.id.toString(),
+          repoId: route.doName,
+        })
+      );
+      log.info("admin:reachability-gc-enqueued", { doId: stub.id.toString() });
+      return json({ status: "queued" }, 202, { "Cache-Control": "no-store" });
+    } catch (error) {
+      log.warn("admin:reachability-gc-enqueue-failed", { error: String(error) });
+      return json({ error: "Maintenance queue unavailable" }, 503, {
+        "Cache-Control": "no-store",
+        "Retry-After": "10",
+      });
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Repo-scoped admin endpoints. Auth model: tessera session + namespace
   // membership, plus same-origin for mutating verbs (`requireRepoAdmin`
@@ -118,7 +143,13 @@ export function registerAdminRoutes(router: AppRouter) {
     if (!refs.success) {
       return new Response("Invalid refs payload\n", { status: 400 });
     }
-    await limiter.run("do:admin-set-refs", () => stub.setRefs(refs.data));
+    const updated = await limiter.run("do:admin-set-refs", () => stub.setRefs(refs.data));
+    if (!updated) {
+      return new Response("Repository is busy\n", {
+        status: 503,
+        headers: { "Cache-Control": "no-store", "Retry-After": "10" },
+      });
+    }
     return new Response("OK\n");
   });
 

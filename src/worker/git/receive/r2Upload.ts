@@ -346,7 +346,10 @@ async function stageMultipartPack(args: {
       await reader.cancel(error);
     } catch {}
     try {
-      await upload.abort();
+      args.countSubrequest("r2:abort-pack-multipart");
+      await args.limiter.run("r2:abort-pack-multipart", async () => {
+        await upload.abort();
+      });
     } catch {}
     try {
       await deletePackArtifact({
@@ -374,7 +377,7 @@ async function deletePackArtifact(args: {
   });
 }
 
-async function deleteStagedPackArtifacts(args: {
+export async function deleteStagedPackArtifacts(args: {
   env: Env;
   packKey: string;
   limiter: Limiter;

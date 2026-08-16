@@ -12,7 +12,7 @@ const SNAPSHOT_MATERIALIZATION_LEASE_TTL_MS = 30 * 60_000;
 // owner may lose the response at expiry. Keep deletion fenced for a further
 // bounded drain window so an already-started upload cannot finish after the
 // final R2 sweep.
-const EXPIRED_WRITER_DRAIN_MS = 5 * 60_000;
+export const EXPIRED_WRITER_DRAIN_MS = 5 * 60_000;
 
 export type BeginSnapshotMaterializationResult =
   | { ok: true; token: string }

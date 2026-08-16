@@ -7,6 +7,7 @@ import {
   type CompactionDeleteQueueMessage,
   type CompactionQueueMessage,
   type RepoQueueMessageHandle,
+  SUPERSEDED_PACK_DELETE_DELAY_SECONDS,
 } from "./types";
 
 import { getRepoStubByDoId } from "@/worker/common";
@@ -26,7 +27,6 @@ import { createQueueTaskContext, logSoftBudgetExhausted, retryQueueMessage } fro
 const COMPACTION_SUBREQUEST_BUDGET = 7_500;
 const COMPACTION_RETRY_DELAY_SECONDS = 30;
 const COMPACTION_CONFLICT_RETRY_DELAY_SECONDS = 10;
-const COMPACTION_DELETE_DELAY_SECONDS = 60;
 
 function countCompactionSubrequest(cacheCtx: CacheContext, log: Logger, op: string, n = 1): void {
   logSoftBudgetExhausted({
@@ -342,7 +342,7 @@ export async function handleCompactionMessage(
             repoId: body.repoId,
             packKeys: commit.supersededPackKeys,
           },
-          { delaySeconds: COMPACTION_DELETE_DELAY_SECONDS }
+          { delaySeconds: SUPERSEDED_PACK_DELETE_DELAY_SECONDS }
         ).catch((error) => {
           log.warn("compaction:delete-enqueue-failed", { error: String(error) });
         })
@@ -393,21 +393,49 @@ export async function handleCompactionDeleteMessage(
     repoId: repoLabel,
     doId: body.doId,
   });
-  const { limiter } = task;
+  const { cacheCtx, limiter } = task;
 
   try {
+    let confirmedPackKeys = body.packKeys;
+    let cleanupStub: DurableObjectStub<RepoDurableObject> | undefined;
+    if (body.removeCatalogRows) {
+      cleanupStub = getRepoStubByDoId(env, body.doId) as DurableObjectStub<RepoDurableObject>;
+      countCompactionSubrequest(cacheCtx, log, "do:claim-superseded-packs");
+      const claim = await limiter.run("do:claim-superseded-packs", async () => {
+        return await cleanupStub!.claimSupersededGcPacks(body.packKeys);
+      });
+      if (claim.status === "retry") {
+        log.warn("compaction:delete-claim-retry", { reason: claim.reason });
+        retryQueueMessage(message, COMPACTION_RETRY_DELAY_SECONDS);
+        return;
+      }
+      confirmedPackKeys = claim.packKeys;
+    }
+
     const keysToDelete: string[] = [];
-    for (const packKey of body.packKeys) {
+    for (const packKey of confirmedPackKeys) {
       // Each superseded pack has three derived immutable artifacts in R2:
       // the pack bytes, the idx, and the logical-reference sidecar.
       keysToDelete.push(packKey, packIndexKey(packKey), packRefsKey(packKey));
     }
 
+    countCompactionSubrequest(cacheCtx, log, "r2:delete-superseded-packs");
     await limiter.run("r2:delete-superseded-packs", async () => {
       await env.REPO_BUCKET.delete(keysToDelete);
     });
+    if (body.removeCatalogRows) {
+      countCompactionSubrequest(cacheCtx, log, "do:remove-superseded-packs");
+      const removal = await limiter.run("do:remove-superseded-packs", async () => {
+        return await cleanupStub!.removeSupersededGcPacks(confirmedPackKeys);
+      });
+      if (removal.status === "retry") {
+        log.warn("compaction:delete-metadata-retry", { reason: removal.reason });
+        retryQueueMessage(message, COMPACTION_RETRY_DELAY_SECONDS);
+        return;
+      }
+    }
     log.info("compaction:delete-complete", {
-      packCount: body.packKeys.length,
+      packCount: confirmedPackKeys.length,
       artifactCount: keysToDelete.length,
     });
     message.ack();

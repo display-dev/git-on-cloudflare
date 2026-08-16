@@ -16,7 +16,7 @@ import {
 import { createPassthroughStream, createRewriteStream } from "./rewrite/stream";
 
 export type PackRewriteResult =
-  | { status: "ok"; stream: ReadableStream<Uint8Array> }
+  | { status: "ok"; stream: ReadableStream<Uint8Array>; addedDeltaBases: number }
   | { status: "failed"; failure: RewriteFailure };
 
 export async function rewritePackResult(
@@ -60,7 +60,7 @@ export async function rewritePackResult(
     return failed("selection-failed", true, { needed: neededOids.length });
   }
 
-  const { table, readerStates } = selection;
+  const { table, readerStates, addedDeltaBases } = selection;
 
   if (canPassthroughSinglePack(snapshot, table)) {
     const readState = await ensurePackReadState(
@@ -80,6 +80,7 @@ export async function rewritePackResult(
 
     return {
       status: "ok",
+      addedDeltaBases,
       stream: createPassthroughStream({
         env,
         snapshotPack: snapshot.packs[0]!,
@@ -107,6 +108,7 @@ export async function rewritePackResult(
 
   return {
     status: "ok",
+    addedDeltaBases,
     stream: createRewriteStream(table, snapshot, readerStates, log, rewriteOptions, () => {
       log.info("rewrite:stream-complete", {
         passthrough: false,

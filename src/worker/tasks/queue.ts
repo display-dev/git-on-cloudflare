@@ -4,12 +4,13 @@ import { handleCompactionDeleteMessage, handleCompactionMessage } from "./compac
 import { handlePackRefBackfillMessage } from "./refBackfill";
 import { handleRouteCacheSyncMessage } from "./routeCacheSync";
 import { handleRepositoryDeleteMessage } from "./repositoryDelete";
+import { handleReachabilityGcMessage } from "./reachabilityGc";
 import { RepoTaskQueueMessageSchema } from "./types";
 
 export type { RepoTaskQueueMessage, RepositoryDeleteMessage, RouteCacheSyncMessage } from "./types";
 
 // The queue carries repo lifecycle work as well as maintenance: compaction,
-// pack-ref backfill, route-cache repair, and repository deletion. Producers
+// pack-ref backfill, reachability GC, route-cache repair, and repository deletion. Producers
 // use the `REPO_TASKS_QUEUE` binding; the physical queue name remains
 // `git-on-cloudflare-repo-maint` for continuity. Schemas live in
 // `./types.ts`; this file dispatches.
@@ -37,6 +38,9 @@ export async function handleRepoTaskQueue(
         break;
       case "compaction-delete":
         await handleCompactionDeleteMessage(message, body, env, ctx);
+        break;
+      case "reachability-gc":
+        await handleReachabilityGcMessage(message, body, env, ctx);
         break;
       case "pack-ref-backfill":
         await handlePackRefBackfillMessage(message, body, env, ctx);

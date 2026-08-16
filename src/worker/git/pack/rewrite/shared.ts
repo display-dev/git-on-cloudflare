@@ -49,7 +49,7 @@ export interface SelectionTable {
   capacity: number;
 
   /* identity — set during resolve */
-  packSlots: Uint8Array;
+  packSlots: Uint32Array;
   entryIndices: Uint32Array;
   offsets: Float64Array;
   nextOffsets: Float64Array;
@@ -79,7 +79,7 @@ export function allocateSelectionTable(capacity: number): SelectionTable {
   return {
     count: 0,
     capacity,
-    packSlots: new Uint8Array(capacity),
+    packSlots: new Uint32Array(capacity),
     entryIndices: new Uint32Array(capacity),
     offsets: new Float64Array(capacity),
     nextOffsets: new Float64Array(capacity),
@@ -114,7 +114,7 @@ export function growSelectionTable(table: SelectionTable): void {
     return arr;
   }
 
-  table.packSlots = grow(table.packSlots, Uint8Array, next);
+  table.packSlots = grow(table.packSlots, Uint32Array, next);
   table.entryIndices = grow(table.entryIndices, Uint32Array, next);
   table.offsets = grow(table.offsets, Float64Array, next);
   table.nextOffsets = grow(table.nextOffsets, Float64Array, next);

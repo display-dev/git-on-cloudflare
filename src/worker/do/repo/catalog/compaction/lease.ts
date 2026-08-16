@@ -94,6 +94,7 @@ export async function beginCompactionState(args: {
     token: crypto.randomUUID(),
     createdAt: now,
     expiresAt: now + COMPACT_LEASE_TTL_MS,
+    operation: "compaction",
   };
   const acquisition = await args.ctx.storage.transaction(async (transaction) => {
     const transactionStore = asTypedStorage<RepoStateSchema>(transaction);

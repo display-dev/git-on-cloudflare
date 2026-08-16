@@ -14,11 +14,24 @@ import {
   type BeginCompactionResult,
   beginCompactionState,
   beginReceiveLease,
+  type BeginReachabilityGcResult,
+  beginReachabilityGcState,
   type ClearCompactionRequestResult,
   clearCompactionRequestState,
   clearExpiredLeases,
   type CommitCompactionResult,
   commitCompactionState,
+  type CommitReachabilityGcResult,
+  commitReachabilityGcState,
+  type RecordReachabilityGcPendingResult,
+  recordReachabilityGcPendingState,
+  type ReconcileReachabilityGcPendingResult,
+  reconcileReachabilityGcPendingState,
+  completeReachabilityGcPendingCleanupState,
+  listSupersededGcPacksState,
+  claimSupersededGcPacksState,
+  type RemoveSupersededGcPacksResult,
+  removeSupersededGcPacksState,
   finalizeReceiveState,
   getIngestionReceiptState,
   reconcileReceiveState,
@@ -161,9 +174,9 @@ export class RepoDurableObject extends DurableObject {
     return await getRefs(this.ctx);
   }
 
-  public async setRefs(refs: { name: string; oid: string }[]): Promise<void> {
+  public async setRefs(refs: { name: string; oid: string }[]): Promise<boolean> {
     await this.ensureAccessAndAlarm();
-    await setRefs(this.ctx, refs);
+    return await setRefs(this.ctx, refs);
   }
 
   public async getHead(): Promise<Head> {
@@ -295,6 +308,90 @@ export class RepoDurableObject extends DurableObject {
 
   public async abortCompaction(token: string): Promise<boolean> {
     return await abortCompactionLease(this.ctx, token);
+  }
+
+  public async beginReachabilityGc(): Promise<BeginReachabilityGcResult> {
+    return await beginReachabilityGcState({ ctx: this.ctx, logger: this.logger });
+  }
+
+  public async commitReachabilityGc(args: {
+    token: string;
+    refsVersion: number;
+    packsetVersion: number;
+    sourcePacks: PackCatalogRow[];
+    stagedPack?: {
+      packKey: string;
+      packBytes: number;
+      idxBytes: number;
+      objectCount: number;
+    };
+  }): Promise<CommitReachabilityGcResult> {
+    return await commitReachabilityGcState({
+      ctx: this.ctx,
+      token: args.token,
+      refsVersion: args.refsVersion,
+      packsetVersion: args.packsetVersion,
+      sourcePacks: args.sourcePacks,
+      stagedPack: args.stagedPack,
+      logger: this.logger,
+    });
+  }
+
+  public async recordReachabilityGcPending(args: {
+    token: string;
+    packKey: string;
+  }): Promise<RecordReachabilityGcPendingResult> {
+    const result = await recordReachabilityGcPendingState({ ctx: this.ctx, ...args });
+    this.logger.info("reachability-gc:pending-record", {
+      status: result.status,
+      reason: result.status === "retry" ? result.reason : undefined,
+    });
+    return result;
+  }
+
+  public async reconcileReachabilityGcPending(): Promise<ReconcileReachabilityGcPendingResult> {
+    const result = await reconcileReachabilityGcPendingState({ ctx: this.ctx });
+    this.logger.info("reachability-gc:pending-reconcile", {
+      status: result.status,
+      retryAfter: result.status === "wait" ? result.retryAfter : undefined,
+    });
+    return result;
+  }
+
+  public async completeReachabilityGcPendingCleanup(args: {
+    token: string;
+    packKey: string;
+  }): Promise<boolean> {
+    return await completeReachabilityGcPendingCleanupState({ ctx: this.ctx, ...args });
+  }
+
+  public async listSupersededGcPacks(): Promise<PackCatalogRow[]> {
+    await this.ensureAccessAndAlarm();
+    const rows = await listSupersededGcPacksState(this.ctx);
+    this.logger.debug("reachability-gc:list-superseded", { packCount: rows.length });
+    return rows;
+  }
+
+  public async claimSupersededGcPacks(packKeys: string[]) {
+    await this.ensureAccessAndAlarm();
+    const result = await claimSupersededGcPacksState({ ctx: this.ctx, packKeys });
+    this.logger.info("reachability-gc:claim-superseded", {
+      status: result.status,
+      packCount: result.status === "claimed" ? result.packKeys.length : packKeys.length,
+      reason: result.status === "retry" ? result.reason : undefined,
+    });
+    return result;
+  }
+
+  public async removeSupersededGcPacks(packKeys: string[]): Promise<RemoveSupersededGcPacksResult> {
+    await this.ensureAccessAndAlarm();
+    const result = await removeSupersededGcPacksState({ ctx: this.ctx, packKeys });
+    this.logger.info("reachability-gc:remove-superseded", {
+      status: result.status,
+      packCount: result.status === "removed" ? result.packKeys.length : packKeys.length,
+      reason: result.status === "retry" ? result.reason : undefined,
+    });
+    return result;
   }
 
   public async commitCompaction(args: {

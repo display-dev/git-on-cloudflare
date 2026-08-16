@@ -28,6 +28,11 @@ const MUTATING_ROUTES: Mutating[] = [
     path: (o, r) => `/${o}/${r}/admin/compact`,
   },
   {
+    label: "reachability GC POST",
+    method: "POST",
+    path: (o, r) => `/${o}/${r}/admin/reachability-gc`,
+  },
+  {
     label: "refs PUT",
     method: "PUT",
     path: (o, r) => `/${o}/${r}/admin/refs`,

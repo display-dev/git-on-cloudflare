@@ -17,6 +17,7 @@ export type RepoLease = {
   token: string;
   createdAt: number;
   expiresAt: number;
+  operation?: "receive" | "compaction" | "reachability-gc" | "pack-ref-backfill";
 };
 
 export type SnapshotMaterializationLease = RepoLease & {
@@ -25,6 +26,13 @@ export type SnapshotMaterializationLease = RepoLease & {
 
 export type RepositoryMaintenanceLease = RepoLease & {
   operation: "pack-ref-backfill";
+};
+
+export type ReachabilityGcPending = {
+  token: string;
+  packKey: string;
+  state: "staged" | "committing" | "cleanup";
+  safeCleanupAt?: number;
 };
 
 export type IngestionReceipt = {
@@ -81,6 +89,7 @@ export type RepoStateSchema = {
   receiveOutcomeIndex: string[] | undefined;
   ingestionReceiptIndex: string[] | undefined;
   compactLease: RepoLease | undefined;
+  reachabilityGcPending: ReachabilityGcPending | undefined;
   snapshotMaterializationLeases: SnapshotMaterializationLease[] | undefined;
   repositoryMaintenanceLeases: RepositoryMaintenanceLease[] | undefined;
   snapshotPrefixes: string[] | undefined;

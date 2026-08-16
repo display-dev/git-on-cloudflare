@@ -3,6 +3,7 @@ import type { Logger } from "@/worker/common/logger";
 import { asTypedStorage } from "../repoState";
 import type { RepoLease, RepoStateSchema } from "../repoState";
 import { getActivePackCatalogSnapshot } from "./state";
+import { activeLeaseOrUndefined } from "./activity";
 import type { BeginReceiveResult } from "./shared";
 import {
   DEFAULT_HEAD,
@@ -39,12 +40,15 @@ export async function beginReceiveLease(
     token: crypto.randomUUID(),
     createdAt: now,
     expiresAt: now + RECEIVE_LEASE_TTL_MS,
+    operation: "receive",
   };
   const acquired = await ctx.storage.transaction(async (transaction) => {
     const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
     if (await transactionStore.get("repositoryDeleting")) return false;
     const existing = await transactionStore.get("receiveLease");
     if (existing && existing.expiresAt > now) return false;
+    const compactLease = activeLeaseOrUndefined(await transactionStore.get("compactLease"), now);
+    if (compactLease?.operation === "reachability-gc") return false;
     if (existing) logger?.debug("lease:expired", { kind: "receive" });
     await transactionStore.put("receiveLease", lease);
     return true;

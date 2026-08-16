@@ -86,7 +86,8 @@ export async function loadPackRefSnapshot(
   env: Env,
   repoId: string,
   snapshot: OrderedPackSnapshot,
-  cacheCtx?: CacheContext
+  cacheCtx?: CacheContext,
+  options?: { scheduleMissingBackfill?: boolean }
 ): Promise<PackRefSnapshotLoadResult> {
   const log = createLogger(env.LOG_LEVEL, { service: "StreamPlan", repoId });
   const packs: PackRefSnapshotEntry[] = [];
@@ -122,14 +123,16 @@ export async function loadPackRefSnapshot(
       reason,
       detail,
     });
-    schedulePackRefBackfill({
-      env,
-      repoId,
-      packKey: pack.packKey,
-      cacheCtx,
-      log,
-      reason,
-    });
+    if (options?.scheduleMissingBackfill !== false) {
+      schedulePackRefBackfill({
+        env,
+        repoId,
+        packKey: pack.packKey,
+        cacheCtx,
+        log,
+        reason,
+      });
+    }
   }
 
   log.info("stream:plan:ref-snapshot", {

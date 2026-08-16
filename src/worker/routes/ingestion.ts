@@ -30,6 +30,7 @@ type ParsedIngestionRequest = {
   idempotencyKey: string;
   committedAtSeconds: number;
   message: string;
+  historyMode: "append" | "epoch";
 };
 
 class IngestionRequestError extends Error {
@@ -129,6 +130,15 @@ async function parseIngestionRequest(request: Request): Promise<ParsedIngestionR
   if (!Number.isSafeInteger(committedAtSeconds) || committedAtSeconds < 0) {
     throw new IngestionRequestError(400, "invalid_commit_timestamp", "Invalid committedAtSeconds");
   }
+  const historyModeValue = form.get("historyMode");
+  if (
+    historyModeValue !== null &&
+    (typeof historyModeValue !== "string" ||
+      (historyModeValue !== "append" && historyModeValue !== "epoch"))
+  ) {
+    throw new IngestionRequestError(400, "invalid_history_mode", "Invalid historyMode");
+  }
+  const historyMode = historyModeValue ?? "append";
 
   const fileParts = form.getAll("files");
   if (fileParts.length === 0 || fileParts.length > MAX_FILES) {
@@ -165,7 +175,15 @@ async function parseIngestionRequest(request: Request): Promise<ParsedIngestionR
     }
   }
 
-  return { files, expectedOid, actor, idempotencyKey, committedAtSeconds, message };
+  return {
+    files,
+    expectedOid,
+    actor,
+    idempotencyKey,
+    committedAtSeconds,
+    message,
+    historyMode,
+  };
 }
 
 async function sha256(value: string): Promise<string> {
@@ -201,7 +219,11 @@ async function handleIngestion(c: AppContext): Promise<Response> {
       log.warn("ingestion:soft-budget-exhausted", { op });
     };
 
-    const parentOid = input.expectedOid === zeroOid() ? null : input.expectedOid;
+    // Epoch ingestion still CASes the current ref through expectedOid, but
+    // intentionally omits the parent so the accepted commit starts a new
+    // history boundary that reachability GC can make physically effective.
+    const parentOid =
+      input.historyMode === "epoch" || input.expectedOid === zeroOid() ? null : input.expectedOid;
     const built = await buildIngestionCommit({
       files: input.files,
       parentOid,
@@ -209,16 +231,19 @@ async function handleIngestion(c: AppContext): Promise<Response> {
       message: input.message,
     });
     const keyHash = await sha256(input.idempotencyKey);
-    const fingerprint = await sha256(
-      JSON.stringify([
-        input.expectedOid,
-        input.actor,
-        input.committedAtSeconds,
-        input.message,
-        built.commitOid,
-        built.treeOid,
-      ])
-    );
+    // Preserve the original append-mode fingerprint exactly so a retry of a
+    // request accepted before historyMode existed still returns its durable
+    // receipt. Epoch is a distinct operation and includes its mode marker.
+    const fingerprintFields = [
+      input.expectedOid,
+      input.actor,
+      input.committedAtSeconds,
+      input.message,
+      built.commitOid,
+      built.treeOid,
+    ];
+    if (input.historyMode === "epoch") fingerprintFields.splice(4, 0, "epoch");
+    const fingerprint = await sha256(JSON.stringify(fingerprintFields));
 
     count("do:get-ingestion-receipt");
     const priorReceipt = await limiter.run("do:get-ingestion-receipt", () =>

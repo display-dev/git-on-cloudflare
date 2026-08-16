@@ -2,6 +2,9 @@ import { z } from "zod";
 
 export { z };
 
+/** Reader drain window before immutable artifacts from a catalog swap are removed. */
+export const SUPERSEDED_PACK_DELETE_DELAY_SECONDS = 60;
+
 export type RepoQueueMessageHandle<Body> = MessageBatch<Body>["messages"][number];
 
 export const CompactionQueueMessageSchema = z.object({
@@ -17,9 +20,18 @@ export const CompactionDeleteQueueMessageSchema = z.object({
   doId: z.string(),
   repoId: z.string().optional(),
   packKeys: z.array(z.string()),
+  removeCatalogRows: z.boolean().optional(),
 });
 
 export type CompactionDeleteQueueMessage = z.infer<typeof CompactionDeleteQueueMessageSchema>;
+
+export const ReachabilityGcQueueMessageSchema = z.object({
+  kind: z.literal("reachability-gc"),
+  doId: z.string(),
+  repoId: z.string(),
+});
+
+export type ReachabilityGcQueueMessage = z.infer<typeof ReachabilityGcQueueMessageSchema>;
 
 export const PackRefBackfillQueueMessageSchema = z.object({
   kind: z.literal("pack-ref-backfill"),
@@ -56,6 +68,7 @@ export type RepositoryDeleteMessage = z.infer<typeof RepositoryDeleteMessageSche
 export const RepoTaskQueueMessageSchema = z.discriminatedUnion("kind", [
   CompactionQueueMessageSchema,
   CompactionDeleteQueueMessageSchema,
+  ReachabilityGcQueueMessageSchema,
   PackRefBackfillQueueMessageSchema,
   RouteCacheSyncMessageSchema,
   RepositoryDeleteMessageSchema,

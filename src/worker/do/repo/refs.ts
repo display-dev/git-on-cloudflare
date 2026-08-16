@@ -8,6 +8,7 @@
 import type { RepoStateSchema, Head, TypedStorage } from "./repoState";
 
 import { asTypedStorage } from "./repoState";
+import { activeLeaseOrUndefined } from "./catalog/activity";
 
 /**
  * Retrieves all refs from storage
@@ -27,11 +28,15 @@ export async function getRefs(ctx: DurableObjectState): Promise<{ name: string; 
 export async function setRefs(
   ctx: DurableObjectState,
   refs: { name: string; oid: string }[]
-): Promise<void> {
-  await ctx.storage.transaction(async (transaction) => {
+): Promise<boolean> {
+  return await ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
-    if (await store.get("repositoryDeleting")) return;
+    if (await store.get("repositoryDeleting")) return false;
+    const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), Date.now());
+    if (compactLease?.operation === "reachability-gc") return false;
     await store.put("refs", refs);
+    await store.put("refsVersion", ((await store.get("refsVersion")) || 0) + 1);
+    return true;
   });
 }
 

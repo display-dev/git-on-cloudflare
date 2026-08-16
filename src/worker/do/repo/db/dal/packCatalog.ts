@@ -5,6 +5,17 @@ import { desc, eq, inArray, sql } from "drizzle-orm";
 import { packCatalog } from "../schema";
 import { SAFE_ROWS_1COL } from "./shared";
 
+let failNextCatalogReplacementForTesting = false;
+
+export const __test = {
+  failNextCatalogReplacement(): void {
+    failNextCatalogReplacementForTesting = true;
+  },
+  reset(): void {
+    failNextCatalogReplacementForTesting = false;
+  },
+};
+
 export async function getPackCatalogCount(db: DrizzleSqliteDODatabase): Promise<number> {
   return await db.$count(packCatalog);
 }
@@ -33,6 +44,18 @@ export async function listActivePackCatalog(
     .from(packCatalog)
     .where(eq(packCatalog.state, "active"))
     .orderBy(desc(packCatalog.seqHi), desc(packCatalog.tier));
+}
+
+export async function listSupersededPackCatalog(
+  db: DrizzleSqliteDODatabase,
+  limit: number
+): Promise<PackCatalogRow[]> {
+  return await db
+    .select()
+    .from(packCatalog)
+    .where(eq(packCatalog.state, "superseded"))
+    .orderBy(desc(packCatalog.seqHi), desc(packCatalog.tier))
+    .limit(limit);
 }
 
 export async function getPackCatalogRow(
@@ -104,4 +127,47 @@ export async function deletePackCatalogRows(
 
 export async function deleteAllPackCatalogRows(db: DrizzleSqliteDODatabase): Promise<void> {
   await db.delete(packCatalog);
+}
+
+/** Atomically activate a rewritten pack and supersede its complete source catalog. */
+export function replaceActivePackCatalog(args: {
+  db: DrizzleSqliteDODatabase;
+  sourcePackKeys: string[];
+  targetPack?: PackCatalogRow;
+}): void {
+  args.db.transaction((transaction) => {
+    if (args.targetPack) {
+      transaction
+        .insert(packCatalog)
+        .values(args.targetPack)
+        .onConflictDoUpdate({
+          target: packCatalog.packKey,
+          set: {
+            kind: args.targetPack.kind,
+            state: args.targetPack.state,
+            tier: args.targetPack.tier,
+            seqLo: args.targetPack.seqLo,
+            seqHi: args.targetPack.seqHi,
+            objectCount: args.targetPack.objectCount,
+            packBytes: args.targetPack.packBytes,
+            idxBytes: args.targetPack.idxBytes,
+            createdAt: args.targetPack.createdAt,
+            supersededBy: args.targetPack.supersededBy,
+          },
+        })
+        .run();
+    }
+    if (failNextCatalogReplacementForTesting) {
+      failNextCatalogReplacementForTesting = false;
+      throw new Error("injected reachability GC catalog replacement failure");
+    }
+    for (let index = 0; index < args.sourcePackKeys.length; index += SAFE_ROWS_1COL) {
+      const batch = args.sourcePackKeys.slice(index, index + SAFE_ROWS_1COL);
+      transaction
+        .update(packCatalog)
+        .set({ state: "superseded", supersededBy: args.targetPack?.packKey ?? null })
+        .where(inArray(packCatalog.packKey, batch))
+        .run();
+    }
+  });
 }
