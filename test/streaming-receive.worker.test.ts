@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { createExecutionContext } from "cloudflare:test";
+import { createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { env, exports as workerExports } from "cloudflare:workers";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
 import { computeOid, encodeGitObject } from "@/worker/git/core/objects";
-import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
+import {
+  handleStreamingReceivePackPOST,
+  type AcceptedWriteContext,
+} from "@/worker/git/receive/streamReceivePack";
+import { SubrequestLimiter } from "@/worker/git/operations/limits";
 import { buildFetchBody } from "./util/fetch-protocol";
 import { buildAppendOnlyDelta, buildPack, zero40 } from "./util/git-pack";
 import { buildTreePayload } from "./util/packed-repo";
@@ -77,6 +81,21 @@ async function listStagedReceivePacks(repoId: string): Promise<string[]> {
   const prefix = r2PackDirPrefix(doPrefix(doId.toString()));
   const listed = await env.REPO_BUCKET.list({ prefix });
   return listed.objects.map((object) => object.key).filter((key) => key.includes("/pack-rx-"));
+}
+
+function withFailingR2Put(sourceEnv: Env): Env {
+  const bucket = new Proxy(sourceEnv.REPO_BUCKET, {
+    get(target, property) {
+      if (property === "put") {
+        return async () => {
+          throw new Error("synthetic r2 put outage");
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { ...sourceEnv, REPO_BUCKET: bucket };
 }
 
 function pushAuthFromUrl(url: string): string | undefined {
@@ -562,6 +581,76 @@ describe("streaming receive-pack", () => {
 
     const activity = await callStubWithRetry(seeded.getStub, (stub) => stub.getRepoActivity());
     expect(activity).toBeNull();
+  });
+
+  it("fails closed on an R2 write outage and accepts the exact receive retry", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-receive-r2-outage");
+    const repoId = `${owner}/${repo}`;
+    await setupRepoForTests(env, owner, repo);
+    const seeded = await seedPackFirstRepo(repoId);
+    const stub = seeded.getStub();
+    const beforeRefs = await stub.listRefs();
+    const beforeCatalog = await stub.getActivePackCatalog();
+    const built = await buildStreamingReceiveBody({
+      parentOid: seeded.nextCommit.oid,
+      nextText: "r2 receive recovery\n",
+      commitMessage: "r2 receive outage regression",
+      capabilities: "report-status ofs-delta agent=test",
+    });
+    const acceptedWriteContext: AcceptedWriteContext = {
+      repositoryId: repoId,
+      actor: "synthetic-test-actor",
+      sourceSurface: "git-push",
+      idempotencyKey: null,
+    };
+    const makeRequest = () =>
+      new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-git-receive-pack-request" },
+        body: toRequestBody(built.body),
+      });
+
+    const failedContext = createExecutionContext();
+    const failed = await handleStreamingReceivePackPOST(
+      withFailingR2Put(env),
+      repoId,
+      makeRequest(),
+      failedContext,
+      {
+        acceptedWriteContext,
+        limiter: new SubrequestLimiter(900),
+      }
+    );
+    await waitOnExecutionContext(failedContext);
+
+    expect(failed.status).toBe(500);
+    expect(await stub.listRefs()).toEqual(beforeRefs);
+    expect(await stub.getActivePackCatalog()).toEqual(beforeCatalog);
+    expect(await stub.getRepoActivity()).toBeNull();
+    expect(await listStagedReceivePacks(repoId)).toEqual([]);
+
+    const retryContext = createExecutionContext();
+    const retry = await handleStreamingReceivePackPOST(env, repoId, makeRequest(), retryContext, {
+      acceptedWriteContext,
+      limiter: new SubrequestLimiter(900),
+    });
+    await waitOnExecutionContext(retryContext);
+
+    expect(retry.status).toBe(200);
+    expect(decodeReportStatus(new Uint8Array(await retry.arrayBuffer()))).toContain(
+      "ok refs/heads/main"
+    );
+    expect((await stub.listRefs()).find((ref) => ref.name === "refs/heads/main")?.oid).toBe(
+      built.commit.oid
+    );
+    expect((await stub.getActivePackCatalog()).length).toBe(beforeCatalog.length + 1);
+
+    const raw = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/raw?oid=${built.blob.oid}&name=README.md`
+    );
+    expect(raw.status).toBe(200);
+    expect(await raw.text()).toBe("r2 receive recovery\n");
   });
 
   it("returns 499 and cleans up when the request aborts during the streaming upload", async () => {
