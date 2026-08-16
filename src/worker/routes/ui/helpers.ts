@@ -70,12 +70,8 @@ export async function loadHeadAndRefsCached(
   repoId: string
 ): Promise<{ head: HeadInfo | undefined; refs: Ref[] } | null> {
   const loader = async (): Promise<{ head: HeadInfo | undefined; refs: Ref[] } | null> => {
-    try {
-      const res = await getHeadAndRefs(env, repoId, cacheCtx);
-      return { head: res.head, refs: res.refs };
-    } catch {
-      return null;
-    }
+    const res = await getHeadAndRefs(env, repoId, cacheCtx);
+    return { head: res.head, refs: res.refs };
   };
   const cacheKeyRefs = buildCacheKeyFrom(cacheCtx.req, "/_cache/refs", { repo: repoId });
   return cacheOrLoadJSONForRequest<{ head: HeadInfo | undefined; refs: Ref[] }>(

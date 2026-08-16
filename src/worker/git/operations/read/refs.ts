@@ -17,8 +17,11 @@ export async function getHeadAndRefs(
     const limiter = getLimiter(cacheCtx);
     return await limiter.run("do:get-head-and-refs", () => stub.getHeadAndRefs());
   } catch (e) {
-    logger.debug("getHeadAndRefs:error", { error: String(e) });
-    return { head: undefined, refs: [] };
+    // A DO outage is not an unborn repository. Propagate the failure so
+    // callers can fail closed instead of advertising an authoritative empty
+    // ref set that could mislead a fetch or path lookup.
+    logger.warn("get-head-and-refs:failed", { error: String(e) });
+    throw e;
   }
 }
 

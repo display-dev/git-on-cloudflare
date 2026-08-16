@@ -99,7 +99,7 @@ async function decodeUploadPackBody(request: Request): Promise<Uint8Array | Resp
  * Handles Git upload-pack (fetch) POST requests.
  * Supports both protocol v2 and legacy protocol based on Git-Protocol header.
  */
-async function handleUploadPackPOST(
+export async function handleUploadPackPOST(
   env: Env,
   route: RepositoryRoute,
   request: Request,
@@ -119,21 +119,37 @@ async function handleUploadPackPOST(
 
   if (command === "ls-refs") {
     const loader = async (): Promise<{ head: HeadInfo | undefined; refs: Ref[] } | null> => {
-      try {
-        const result = await getHeadAndRefs(env, route.doName, cacheCtx);
-        return { head: result.head, refs: result.refs };
-      } catch {
-        return null;
-      }
+      const result = await getHeadAndRefs(env, route.doName, cacheCtx);
+      return { head: result.head, refs: result.refs };
     };
     const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", { repo: route.doName });
-    const refsData = await cacheOrLoadJSONForRequest<{ head: HeadInfo | undefined; refs: Ref[] }>(
-      cacheCtx,
-      cacheKeyRefs,
-      loader,
-      60
-    );
-    const { head, refs } = refsData || { refs: [] };
+    let refsData: { head: HeadInfo | undefined; refs: Ref[] } | null;
+    try {
+      refsData = await cacheOrLoadJSONForRequest<{
+        head: HeadInfo | undefined;
+        refs: Ref[];
+      }>(cacheCtx, cacheKeyRefs, loader, 60);
+    } catch {
+      return new Response("Repository metadata unavailable\n", {
+        status: 503,
+        headers: {
+          "Cache-Control": "no-store",
+          "Content-Type": "text/plain; charset=utf-8",
+          "Retry-After": "5",
+        },
+      });
+    }
+    if (!refsData) {
+      return new Response("Repository metadata unavailable\n", {
+        status: 503,
+        headers: {
+          "Cache-Control": "no-store",
+          "Content-Type": "text/plain; charset=utf-8",
+          "Retry-After": "5",
+        },
+      });
+    }
+    const { head, refs } = refsData;
 
     // Parse ls-refs arguments (reuse already-read body to avoid double-read of the stream)
     const { args } = parseV2Command(body);
