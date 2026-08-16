@@ -27,6 +27,7 @@ export type WorkspaceCheckpoint = {
   packId: string;
   packBytes: number;
   fileCount: number;
+  revision: number;
 };
 
 export type WorkspaceMetrics = {
@@ -145,6 +146,12 @@ type CloneRecord = {
   repositoryId: string;
 };
 
+type ConversationPayloadRecord = {
+  lineageId: string;
+  operationId: string;
+  bytes: Uint8Array;
+};
+
 const encoder = new TextEncoder();
 
 function cloneBytes(bytes: Uint8Array): Uint8Array {
@@ -213,6 +220,7 @@ export class WorkspaceProbeModel {
   private readonly promotions = new Map<string, PromotionRecord>();
   private readonly branchRequests = new Map<string, BranchRequestRecord>();
   private readonly clones = new Map<string, CloneRecord>();
+  private readonly conversationPayloads = new Map<string, ConversationPayloadRecord>();
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -220,6 +228,19 @@ export class WorkspaceProbeModel {
     const id = `${prefix}_${this.nextId.toString(16).padStart(8, "0")}`;
     this.nextId += 1;
     return id;
+  }
+
+  private pruneConversationPayloads(lineageId: string): void {
+    const referencedOperationIds = new Set<string>();
+    for (const workspace of this.workspaces.values()) {
+      if (workspace.deleted || workspace.lineageId !== lineageId) continue;
+      for (const operation of workspace.operations) referencedOperationIds.add(operation.id);
+    }
+    for (const [key, payload] of this.conversationPayloads) {
+      if (payload.lineageId === lineageId && !referencedOperationIds.has(payload.operationId)) {
+        this.conversationPayloads.delete(key);
+      }
+    }
   }
 
   createRepository(args: {
@@ -460,13 +481,20 @@ export class WorkspaceProbeModel {
     workspaceId: string;
     expectedRevision: number;
     operation: WorkspaceOperation;
+    conversationPayload?: Uint8Array;
     interruptAfterAppend?: boolean;
   }): Promise<{ revision: number; replayed: boolean }> {
     const workspace = assertLiveWorkspace(this.workspaces.get(args.workspaceId));
     if (workspace.strategy !== "operation-backed") {
       throw new Error("Operations require an operation-backed workspace");
     }
-    const fingerprint = await operationFingerprint(args.operation);
+    if (args.conversationPayload && (!args.operation.conversationId || !args.operation.messageId)) {
+      throw new Error("Conversation payload requires conversation and message IDs");
+    }
+    const payloadDigest = args.conversationPayload ? await sha256(args.conversationPayload) : null;
+    const fingerprint = await sha256(
+      `${await operationFingerprint(args.operation)}:${payloadDigest ?? "no-payload"}`
+    );
     const existing = workspace.operationById.get(args.operation.id);
     if (existing) {
       if (existing.fingerprint !== fingerprint) throw new Error("Operation ID was reused");
@@ -487,6 +515,13 @@ export class WorkspaceProbeModel {
     else workspace.files.set(stored.path, cloneBytes(stored.bytes));
     workspace.metrics.metadataWrites += 1;
     workspace.metrics.operationRecords += 1;
+    if (args.conversationPayload) {
+      this.conversationPayloads.set(`${workspace.lineageId}:${stored.id}`, {
+        lineageId: workspace.lineageId,
+        operationId: stored.id,
+        bytes: cloneBytes(args.conversationPayload),
+      });
+    }
     if (args.interruptAfterAppend) throw new Error("Synthetic append interruption");
     return { revision: stored.revision, replayed: false };
   }
@@ -682,6 +717,7 @@ export class WorkspaceProbeModel {
       packId,
       packBytes: built.pack.byteLength,
       fileCount: files.length,
+      revision: revisionAtStart,
     };
     workspace.checkpointPackIds.add(packId);
     const requiredPackIds = new Set([...workspace.basePackIds, ...workspace.checkpointPackIds]);
@@ -901,11 +937,28 @@ export class WorkspaceProbeModel {
         throw new Error("Every linked workspace requires a checkpoint before provenance purge");
       }
     }
+    const purgedPayloadOperationIds = new Set<string>();
+    const retainedPayloadOperationIds = new Set<string>();
     for (const candidate of lineage) {
       const repository = assertLiveRepository(this.repositories.get(candidate.repositoryId));
       const checkpoint = candidate.checkpoint!;
       const checkpointCommit = repository.commits.get(checkpoint.commitOid);
       if (!checkpointCommit) throw new Error("Checkpoint commit is unavailable");
+      const allowedTail = candidate.operations
+        .filter((operation) => operation.revision > checkpoint.revision)
+        .map((operation, index) => ({
+          ...operation,
+          bytes: operation.bytes === null ? null : cloneBytes(operation.bytes),
+          revision: index + 1,
+          generation: candidate.baseGeneration + 1,
+        }));
+      const purgedOperationIds = new Set(
+        candidate.operations
+          .filter((operation) => operation.revision <= checkpoint.revision)
+          .map((operation) => operation.id)
+      );
+      for (const operation of allowedTail) retainedPayloadOperationIds.add(operation.id);
+      for (const operationId of purgedOperationIds) purgedPayloadOperationIds.add(operationId);
       for (const packId of candidate.basePackIds) {
         this.packs.get(packId)?.pins.delete(candidate.id);
       }
@@ -916,6 +969,10 @@ export class WorkspaceProbeModel {
       for (const packId of candidate.basePackIds) this.packs.get(packId)?.pins.add(candidate.id);
       candidate.baseFiles = cloneFiles(checkpointCommit.files);
       candidate.files = cloneFiles(checkpointCommit.files);
+      for (const operation of allowedTail) {
+        if (operation.bytes === null) candidate.files.delete(operation.path);
+        else candidate.files.set(operation.path, cloneBytes(operation.bytes));
+      }
       candidate.generations = new Map([
         [
           candidate.baseGeneration,
@@ -926,10 +983,17 @@ export class WorkspaceProbeModel {
           },
         ],
       ]);
-      candidate.operations = [];
-      candidate.operationById.clear();
-      candidate.revision = 0;
+      candidate.operations = allowedTail;
+      candidate.operationById = new Map(allowedTail.map((operation) => [operation.id, operation]));
+      candidate.revision = allowedTail.length;
+      candidate.checkpoint = { ...checkpoint, revision: 0 };
     }
+    for (const operationId of purgedPayloadOperationIds) {
+      if (!retainedPayloadOperationIds.has(operationId)) {
+        this.conversationPayloads.delete(`${workspace.lineageId}:${operationId}`);
+      }
+    }
+    this.pruneConversationPayloads(workspace.lineageId);
     for (const [requestId, request] of this.branchRequests) {
       if (request.lineageId === workspace.lineageId) this.branchRequests.delete(requestId);
     }
@@ -937,6 +1001,17 @@ export class WorkspaceProbeModel {
 
   operationCount(workspaceId: string): number {
     return assertLiveWorkspace(this.workspaces.get(workspaceId)).operations.length;
+  }
+
+  conversationPayload(workspaceId: string, operationId: string): Uint8Array | null {
+    const workspace = assertLiveWorkspace(this.workspaces.get(workspaceId));
+    if (!workspace.operationById.has(operationId)) return null;
+    const payload = this.conversationPayloads.get(`${workspace.lineageId}:${operationId}`);
+    return payload ? cloneBytes(payload.bytes) : null;
+  }
+
+  conversationPayloadCount(): number {
+    return this.conversationPayloads.size;
   }
 
   deleteWorkspace(workspaceId: string): void {
@@ -959,6 +1034,7 @@ export class WorkspaceProbeModel {
     workspace.basePackIds.clear();
     workspace.deleted = true;
     this.workspaces.delete(workspace.id);
+    this.pruneConversationPayloads(workspace.lineageId);
     this.collectUnreachablePacks();
   }
 

@@ -564,7 +564,15 @@ describe("Investigation 7 workspace model", () => {
     await model.appendOperation({
       workspaceId: workspace.workspaceId,
       expectedRevision: 0,
-      operation: { id: "op-1", actor: "agent", path: "edit.txt", bytes: encoder.encode("edit") },
+      operation: {
+        id: "op-1",
+        actor: "agent",
+        conversationId: "conversation-selected",
+        messageId: "message-selected",
+        path: "edit.txt",
+        bytes: encoder.encode("edit"),
+      },
+      conversationPayload: encoder.encode("selected private conversation payload"),
     });
     const prePurgeBranch = model.branchFromOperation({
       workspaceId: workspace.workspaceId,
@@ -585,7 +593,15 @@ describe("Investigation 7 workspace model", () => {
     await model.appendOperation({
       workspaceId: unrelated.workspaceId,
       expectedRevision: 0,
-      operation: { id: "op-1", actor: "other", path: "other.txt", bytes: encoder.encode("other") },
+      operation: {
+        id: "op-1",
+        actor: "other",
+        conversationId: "conversation-unrelated",
+        messageId: "message-unrelated",
+        path: "other.txt",
+        bytes: encoder.encode("other"),
+      },
+      conversationPayload: encoder.encode("unrelated conversation payload"),
     });
     const unrelatedBranch = model.branchFromOperation({
       workspaceId: unrelated.workspaceId,
@@ -602,19 +618,50 @@ describe("Investigation 7 workspace model", () => {
       workspaceId: workspace.workspaceId,
       expectedRevision: 1,
       operation: {
-        id: "discarded-tail",
+        id: "allowed-tail",
         actor: "agent",
-        path: "discarded.txt",
-        bytes: encoder.encode("discarded"),
+        conversationId: "conversation-tail",
+        messageId: "message-tail",
+        path: "tail.txt",
+        bytes: encoder.encode("tail"),
       },
+      conversationPayload: encoder.encode("allowed tail conversation payload"),
     });
     expect(model.workspaceStorageState().branchRequests).toBe(2);
     model.purgeOperationHistory(workspace.workspaceId);
-    expect(model.operationCount(workspace.workspaceId)).toBe(0);
+    expect(model.operationCount(workspace.workspaceId)).toBe(1);
     expect(model.operationCount(prePurgeBranch)).toBe(0);
     expect(model.operationCount(unrelated.workspaceId)).toBe(1);
     expect(model.workspaceStorageState().branchRequests).toBe(1);
-    expect(model.projectFiles(workspace.workspaceId).has("discarded.txt")).toBe(false);
+    expect(model.projectFiles(workspace.workspaceId).get("tail.txt")).toEqual(
+      encoder.encode("tail")
+    );
+    expect(
+      model.replayAtOperation({
+        workspaceId: workspace.workspaceId,
+        operationId: "allowed-tail",
+      })
+    ).toEqual(model.projectFiles(workspace.workspaceId));
+    expect(model.conversationPayload(workspace.workspaceId, "op-1")).toBeNull();
+    expect(model.conversationPayload(prePurgeBranch, "op-1")).toBeNull();
+    expect(model.conversationPayload(workspace.workspaceId, "allowed-tail")).toEqual(
+      encoder.encode("allowed tail conversation payload")
+    );
+    expect(model.conversationPayload(unrelated.workspaceId, "op-1")).toEqual(
+      encoder.encode("unrelated conversation payload")
+    );
+    expect(model.conversationPayloadCount()).toBe(2);
+    model.purgeOperationHistory(workspace.workspaceId);
+    expect(model.operationCount(workspace.workspaceId)).toBe(1);
+    expect(
+      model.replayAtOperation({
+        workspaceId: workspace.workspaceId,
+        operationId: "allowed-tail",
+      })
+    ).toEqual(model.projectFiles(workspace.workspaceId));
+    expect(model.conversationPayload(workspace.workspaceId, "allowed-tail")).toEqual(
+      encoder.encode("allowed tail conversation payload")
+    );
     expect(
       model.branchFromOperation({
         workspaceId: unrelated.workspaceId,
@@ -634,8 +681,8 @@ describe("Investigation 7 workspace model", () => {
     ).toThrow("Replay operation is unavailable");
     await model.appendOperation({
       workspaceId: workspace.workspaceId,
-      expectedRevision: 0,
-      operation: { id: "op-2", actor: "agent", path: "tail.txt", bytes: encoder.encode("tail") },
+      expectedRevision: 1,
+      operation: { id: "op-2", actor: "agent", path: "next.txt", bytes: encoder.encode("next") },
     });
     const branch = model.branchFromOperation({
       workspaceId: workspace.workspaceId,
@@ -645,10 +692,17 @@ describe("Investigation 7 workspace model", () => {
     expect(Array.from(model.projectFiles(branch).keys()).sort()).toEqual([
       "base.txt",
       "edit.txt",
+      "next.txt",
       "tail.txt",
     ]);
+    model.deleteWorkspace(branch);
     const target = model.createRepository({ namespace: "team", name: "retained-target" });
     model.deleteWorkspace(workspace.workspaceId);
+    expect(model.conversationPayloadCount()).toBe(1);
+    expect(model.conversationPayload(prePurgeBranch, "allowed-tail")).toBeNull();
+    expect(model.conversationPayload(unrelated.workspaceId, "op-1")).toEqual(
+      encoder.encode("unrelated conversation payload")
+    );
     const promotion = model.beginPromotion({
       workspaceId: prePurgeBranch,
       targetRepositoryId: target.repositoryId,
