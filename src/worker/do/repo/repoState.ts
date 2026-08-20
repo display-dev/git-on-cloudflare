@@ -1,15 +1,18 @@
 // Typed schema for Repo Durable Object storage
 // Provides a light wrapper to get strong typing on storage keys/values in tests and code.
 
-import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
+import type { AcceptedWriteContext, AcceptedWriteFact } from "@/worker/git/acceptedWrite";
+import type { NativeReceiveOperation } from "@/worker/git/nativeReceive/types";
 
 export type ObjKey = `obj:${string}`;
 export type ReceiveOutcomeKey = `receiveOutcome:${string}`;
+export type ReceiveFinalizeIntentKey = `receiveFinalizeIntent:${string}`;
 export type IngestionReceiptKey = `ingestionReceipt:${string}`;
 export type AcceptedWriteJournalKey = `acceptedWrite:${string}`;
 export type AcceptedWriteHeadKey = `acceptedWriteHead:${string}`;
 export type MaterializedSnapshotKey = `materializedSnapshot:${string}`;
 export type SnapshotCurrentKey = `snapshotCurrent:${string}`;
+export type NativeReceiveOperationKey = `nativeReceiveOperation:${string}`;
 
 export type Ref = { name: string; oid: string };
 export type Head = { target: string; oid?: string; unborn?: boolean };
@@ -51,6 +54,27 @@ export type ReceiveCommitOutcome = {
   shouldQueueCompaction: boolean;
 };
 
+export type ReceiveFinalizeIntent = {
+  token: string;
+  commands: Array<{ oldOid: string; newOid: string; ref: string }>;
+  expectedRefsVersion: number;
+  nextHead: Head;
+  nextRefsVersion: number;
+  stagedPack?: {
+    packKey: string;
+    packBytes: number;
+    idxBytes: number;
+    objectCount: number;
+  };
+  packSequence?: number;
+  nextPacksetVersion?: number;
+  ingestionReceipt?: IngestionReceipt;
+  acceptedWriteContext?: AcceptedWriteContext;
+  recoveryAttempts?: number;
+  recoveryEscalated?: boolean;
+  createdAt: number;
+};
+
 export type AcceptedWriteJournalEntry = {
   id: string;
   sequence: number;
@@ -87,6 +111,7 @@ export type RepoStateSchema = {
   nextPackSeq: number;
   receiveLease: RepoLease | undefined;
   receiveOutcomeIndex: string[] | undefined;
+  nativeReceiveOperationIndex: string[] | undefined;
   ingestionReceiptIndex: string[] | undefined;
   compactLease: RepoLease | undefined;
   reachabilityGcPending: ReachabilityGcPending | undefined;
@@ -98,6 +123,8 @@ export type RepoStateSchema = {
   lastAccessMs: number;
 } & Record<ObjKey, Uint8Array | ArrayBuffer> &
   Record<ReceiveOutcomeKey, ReceiveCommitOutcome> &
+  Record<ReceiveFinalizeIntentKey, ReceiveFinalizeIntent> &
+  Record<NativeReceiveOperationKey, NativeReceiveOperation> &
   Record<IngestionReceiptKey, IngestionReceipt> &
   Record<AcceptedWriteJournalKey, AcceptedWriteJournalEntry> &
   Record<AcceptedWriteHeadKey, AcceptedWriteHead> &
@@ -132,6 +159,14 @@ export function objKey(oid: string): ObjKey {
 
 export function receiveOutcomeKey(token: string): ReceiveOutcomeKey {
   return `receiveOutcome:${token}`;
+}
+
+export function receiveFinalizeIntentKey(token: string): ReceiveFinalizeIntentKey {
+  return `receiveFinalizeIntent:${token}` as ReceiveFinalizeIntentKey;
+}
+
+export function nativeReceiveOperationKey(operationId: string): NativeReceiveOperationKey {
+  return `nativeReceiveOperation:${operationId}` as NativeReceiveOperationKey;
 }
 
 export function ingestionReceiptKey(keyHash: string): IngestionReceiptKey {

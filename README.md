@@ -2,7 +2,7 @@
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zllovesuki/git-on-cloudflare)
 
-**A Git Smart HTTP v2 server running entirely on Cloudflare Workers** — no VMs, no containers, just Durable Objects and R2.
+**A Git Smart HTTP v2 server on Cloudflare Workers, Durable Objects, R2, and an optional repository-owned Container for bounded native Git processing.**
 
 Host unlimited private Git repositories at the edge with <50ms response times globally. Full Git compatibility, modern web UI, and usage-based pricing that actually makes sense.
 
@@ -17,6 +17,8 @@ Host unlimited private Git repositories at the edge with <50ms response times gl
 - **Two-tier caching** reducing latency from 200ms to <50ms for hot paths
 - **Streaming pack assembly** from R2 with range reads for efficient clones
 - **Streaming push pipeline** with atomic pack ingress and queue-driven compaction
+- **Durable native receive/import** behind an explicit rollout flag, with one
+  repository Durable Object owning the Container lifecycle and final outcome
 - **Modern web UI** with Tailwind CSS v4, React SSR, and focused client islands
 - **Interactive merge commit exploration** - expand merge commits to see side branch history
 - **Safer raw views**: `text/plain` for `/raw` by default and same‑origin Referer check for `/rawpath` to prevent hotlinking
@@ -50,6 +52,8 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 - **Durable Objects** provide linearizable consistency for refs/HEAD without coordination
 - **R2 storage** for pack files and objects with range-read support for streaming
 - **Workers** handle the Git protocol, pack negotiation, smart HTTP transport, and React server rendering
+- **Repository Containers** optionally run native `index-pack`, connectivity,
+  `fsck`, and pack-index work; RepoDO remains the only ref/catalog authority
 - **Two-tier caching**: UI responses (60s-1hr TTL), Git objects (1 year, immutable)
 
 ### Performance Characteristics
@@ -65,6 +69,8 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 
 - Complete Git pack protocol v2 with `ls-refs` and `fetch` commands
 - Streaming receive writes packs directly to R2 with atomic metadata commit
+- Native receive/import stages immutable input in R2, survives request loss via
+  Queue and alarm recovery, and reconciles ambiguous finalization before cleanup
 - Tessera OIDC browser sessions and personal access tokens for Git pushes
 - Modern web UI with Tailwind CSS v4, React page components, and worker-side SSR
 - SQLite-backed metadata inside Durable Objects using `drizzle-orm/durable-sqlite`
@@ -125,6 +131,7 @@ Environment variables:
 ```bash
 REPO_DO_IDLE_MINUTES=30      # Cleanup idle repos after 30 min
 LOG_LEVEL=info               # debug|info|warn|error
+NATIVE_RECEIVE_CONTAINER=0   # explicit gate for repository-owned native Git processing
 SESSION_SECRET=...           # Browser session sealing secret
 TESSERA_OIDC_ISSUER=...      # tessera issuer URL
 TESSERA_OIDC_CLIENT_ID=...   # tessera client id
@@ -145,7 +152,9 @@ See `.dev.vars.example` and `wrangler.jsonc` for the complete configuration.
 
 ## Limitations
 
-- 30s CPU limit per request on fetch and receive paths
+- 300s configured CPU limit per request on fetch and receive paths
+- Native receive/import uses a bounded standard-4 Container scratch envelope;
+  this is an internal rollout seam, not a repository quota
 - HTTP(S) only, no SSH protocol support
 - No server-side hooks yet
 - Thin-pack is not advertised; clients receive thick packs (side-band-64k, ofs-delta)

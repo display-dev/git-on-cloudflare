@@ -8,7 +8,7 @@ import {
   isRepositorySnapshotPrefix,
   snapshotRepositoryPrefix,
 } from "@/worker/git/snapshot/materialize";
-import { doPrefix } from "@/worker/keys";
+import { doPrefix, repositoryImportPrefix } from "@/worker/keys";
 import { createQueueTaskContext, retryQueueMessage } from "./context";
 import type { BeginRepositoryDeletionResult } from "@/worker/do/repo/repositoryLifecycle";
 
@@ -118,7 +118,10 @@ export async function handleRepositoryDeleteMessage(
   // snapshot for this repository. The DO id is derived synchronously from
   // `doName`; no DO subrequest is consumed here.
   const doId = env.REPO_DO.idFromName(body.doName).toString();
-  const prefixes = [{ surface: "git", prefix: doPrefix(doId) }];
+  const prefixes = [
+    { surface: "git", prefix: doPrefix(doId) },
+    { surface: "import", prefix: repositoryImportPrefix(body.doName) },
+  ];
   const snapshotPrefix = snapshotRepositoryPrefix(env, body.repositoryId);
   const snapshotPrefixes = new Set(deletion.snapshotPrefixes);
   if (snapshotPrefix) snapshotPrefixes.add(snapshotPrefix);

@@ -1,7 +1,11 @@
 import type { Logger } from "@/worker/common/logger";
+import { isNativeReceiveTerminal } from "@/worker/git/nativeReceive/types";
+import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits";
+import { doPrefix, nativeReceiveInputPackKey } from "@/worker/keys";
 
-import { asTypedStorage } from "../repoState";
+import { asTypedStorage, nativeReceiveOperationKey, receiveFinalizeIntentKey } from "../repoState";
 import type { RepoLease, RepoStateSchema } from "../repoState";
+import { scheduleAlarmIfSooner } from "../scheduler";
 import { getActivePackCatalogSnapshot } from "./state";
 import { activeLeaseOrUndefined } from "./activity";
 import type { BeginReceiveResult } from "./shared";
@@ -14,14 +18,47 @@ import {
 
 export async function clearExpiredLeases(
   ctx: DurableObjectState,
+  env: Env,
   logger?: Logger,
   now: number = Date.now()
 ): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const receiveLease = await store.get("receiveLease");
   if (receiveLease && receiveLease.expiresAt <= now) {
-    await store.delete("receiveLease");
-    logger?.debug("lease:expired", { kind: "receive" });
+    const intent = await store.get(receiveFinalizeIntentKey(receiveLease.token));
+    if (intent) {
+      await store.put("receiveLease", {
+        ...receiveLease,
+        expiresAt: now + RECEIVE_LEASE_TTL_MS,
+      });
+      logger?.debug("lease:recovery-pending", { kind: "receive" });
+    } else {
+      const nativeOperation = await store.get(nativeReceiveOperationKey(receiveLease.token));
+      if (!nativeOperation) {
+        const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
+        try {
+          await limiter.run("r2:delete-orphan-native-receive-input", async () => {
+            await env.REPO_BUCKET.delete(
+              nativeReceiveInputPackKey(doPrefix(ctx.id.toString()), receiveLease.token)
+            );
+          });
+          logger?.info("lease:orphan-input-cleaned", { kind: "receive" });
+        } catch {
+          await store.put("receiveLease", {
+            ...receiveLease,
+            expiresAt: now + RECEIVE_LEASE_TTL_MS,
+          });
+          logger?.warn("lease:orphan-input-cleanup-failed", {
+            kind: "receive",
+            retryable: true,
+          });
+          await scheduleAlarmIfSooner(ctx, env, now + 1_000, now);
+          return;
+        }
+      }
+      await store.delete("receiveLease");
+      logger?.debug("lease:expired", { kind: "receive" });
+    }
   }
 
   const compactLease = await store.get("compactLease");
@@ -45,8 +82,20 @@ export async function beginReceiveLease(
   const acquired = await ctx.storage.transaction(async (transaction) => {
     const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
     if (await transactionStore.get("repositoryDeleting")) return false;
+    const nativeOperationIds = (await transactionStore.get("nativeReceiveOperationIndex")) ?? [];
+    for (const operationId of nativeOperationIds) {
+      const operation = await transactionStore.get(nativeReceiveOperationKey(operationId));
+      if (operation && !isNativeReceiveTerminal(operation.state)) return false;
+    }
     const existing = await transactionStore.get("receiveLease");
     if (existing && existing.expiresAt > now) return false;
+    if (existing && (await transactionStore.get(receiveFinalizeIntentKey(existing.token)))) {
+      await transactionStore.put("receiveLease", {
+        ...existing,
+        expiresAt: now + RECEIVE_LEASE_TTL_MS,
+      });
+      return false;
+    }
     const compactLease = activeLeaseOrUndefined(await transactionStore.get("compactLease"), now);
     if (compactLease?.operation === "reachability-gc") return false;
     if (existing) logger?.debug("lease:expired", { kind: "receive" });

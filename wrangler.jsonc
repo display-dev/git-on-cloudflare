@@ -28,6 +28,15 @@
       }
     ]
   },
+  "containers": [
+    {
+      "name": "repository-native-git",
+      "class_name": "RepoDurableObject",
+      "image": "./container/Dockerfile",
+      "max_instances": 500,
+      "instance_type": "standard-4"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",
@@ -97,6 +106,9 @@
     "REPO_DO_IDLE_MINUTES": "30",
     // Logging level: debug|info|warn|error
     "LOG_LEVEL": "info",
+    // Native receive remains an explicit rollout gate. The Container image and
+    // Durable Object methods can deploy before traffic is moved to the path.
+    "NATIVE_RECEIVE_CONTAINER": "0",
     // tessera OIDC issuer (production). Override via .dev.vars for local dev.
     // Client id and secret are runtime concerns and live in .dev.vars / `wrangler secret put`.
     "TESSERA_OIDC_ISSUER": "https://auth.limic.dev"

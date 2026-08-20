@@ -2,6 +2,7 @@ import { createLogger } from "@/worker/common";
 
 import { handleCompactionDeleteMessage, handleCompactionMessage } from "./compaction";
 import { handlePackRefBackfillMessage } from "./refBackfill";
+import { handleNativeReceiveMessage } from "./nativeReceive";
 import { handleRouteCacheSyncMessage } from "./routeCacheSync";
 import { handleRepositoryDeleteMessage } from "./repositoryDelete";
 import { handleReachabilityGcMessage } from "./reachabilityGc";
@@ -44,6 +45,9 @@ export async function handleRepoTaskQueue(
         break;
       case "pack-ref-backfill":
         await handlePackRefBackfillMessage(message, body, env, ctx);
+        break;
+      case "native-receive":
+        await handleNativeReceiveMessage(message, body, env, ctx);
         break;
       case "route-cache-sync":
         await handleRouteCacheSyncMessage(message, body, env, ctx);

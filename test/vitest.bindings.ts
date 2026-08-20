@@ -8,6 +8,7 @@ export const BASE_TEST_BINDINGS = {
 
   // Logging level lowered for tests to reduce noise
   LOG_LEVEL: "warn",
+  NATIVE_RECEIVE_CONTAINER: "0",
 
   // Hermetic browser session sealing secret for worker tests.
   SESSION_SECRET: "test-goc-session-secret",

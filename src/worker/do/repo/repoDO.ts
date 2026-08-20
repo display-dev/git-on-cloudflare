@@ -2,6 +2,13 @@ import type { Head, IngestionReceipt } from "./repoState";
 import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 import type { RepoActivity } from "@/worker/common";
 import type { PackCatalogRow } from "./db/schema";
+import {
+  nativeReceiveOperationView,
+  type EnqueueNativeReceiveResult,
+  type MatchNativeReceiveOperationResult,
+  type NativeReceiveOperation,
+  type NativeReceiveOperationView,
+} from "@/worker/git/nativeReceive/types";
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -35,6 +42,7 @@ import {
   finalizeReceiveState,
   getIngestionReceiptState,
   reconcileReceiveState,
+  resumeReceiveFinalizeFromAlarm,
   type PreviewCompactionResult,
   previewCompactionState,
   type RequestCompactionResult,
@@ -82,6 +90,14 @@ import {
   type BeginRepositoryMaintenanceResult,
   type BeginSnapshotMaterializationResult,
 } from "./repositoryLifecycle";
+import {
+  enqueueNativeReceiveState,
+  getNativeReceiveOperationState,
+  matchNativeReceiveOperationState,
+  resumeNativeReceiveFromAlarm,
+  runNativeReceiveOperationState,
+  stopNativeReceiveContainerState,
+} from "./nativeReceive";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -137,7 +153,27 @@ export class RepoDurableObject extends DurableObject {
       return;
     }
 
-    await clearExpiredLeases(this.ctx, this.logger);
+    if (
+      await resumeNativeReceiveFromAlarm({
+        ctx: this.ctx,
+        env: this.env,
+        logger: this.logger,
+      })
+    ) {
+      return;
+    }
+
+    if (
+      await resumeReceiveFinalizeFromAlarm({
+        ctx: this.ctx,
+        env: this.env,
+        logger: this.logger,
+      })
+    ) {
+      return;
+    }
+
+    await clearExpiredLeases(this.ctx, this.env, this.logger);
 
     if (
       await rearmCompactionQueueFromAlarm({ ctx: this.ctx, env: this.env, logger: this.logger })
@@ -184,9 +220,9 @@ export class RepoDurableObject extends DurableObject {
     return await resolveHead(this.ctx);
   }
 
-  public async setHead(head: Head): Promise<void> {
+  public async setHead(head: Head): Promise<boolean> {
     await this.ensureAccessAndAlarm();
-    await setHead(this.ctx, head);
+    return await setHead(this.ctx, head);
   }
 
   public async getHeadAndRefs(): Promise<{ head: Head; refs: { name: string; oid: string }[] }> {
@@ -216,6 +252,44 @@ export class RepoDurableObject extends DurableObject {
 
   public async abortReceive(token: string): Promise<boolean> {
     return await abortReceiveLease(this.ctx, token);
+  }
+
+  public async enqueueNativeReceive(
+    operation: NativeReceiveOperation
+  ): Promise<EnqueueNativeReceiveResult> {
+    return await enqueueNativeReceiveState({
+      ctx: this.ctx,
+      env: this.env,
+      operation,
+      logger: this.logger,
+    });
+  }
+
+  public async getNativeReceiveOperation(
+    operationId: string
+  ): Promise<NativeReceiveOperationView | null> {
+    await this.ensureAccessAndAlarm();
+    const operation = await getNativeReceiveOperationState(this.ctx, operationId);
+    return operation ? nativeReceiveOperationView(operation) : null;
+  }
+
+  public async matchNativeReceiveOperation(
+    operationId: string,
+    fingerprint: string
+  ): Promise<MatchNativeReceiveOperationResult> {
+    await this.ensureAccessAndAlarm();
+    return await matchNativeReceiveOperationState(this.ctx, operationId, fingerprint);
+  }
+
+  public async runNativeReceiveOperation(
+    operationId: string
+  ): Promise<NativeReceiveOperationView | null> {
+    return await runNativeReceiveOperationState({
+      ctx: this.ctx,
+      env: this.env,
+      operationId,
+      logger: this.logger,
+    });
   }
 
   public async getIngestionReceipt(keyHash: string): Promise<IngestionReceipt | null> {
@@ -268,7 +342,7 @@ export class RepoDurableObject extends DurableObject {
     stagedPackKey?: string | undefined;
     ingestionReceipt?: IngestionReceipt | undefined;
   }) {
-    return await reconcileReceiveState(this.ctx, args);
+    return await reconcileReceiveState(this.ctx, this.env, args);
   }
 
   public async finalizeReceive(args: {
@@ -506,7 +580,18 @@ export class RepoDurableObject extends DurableObject {
   }
 
   public async beginRepositoryDeletion(): Promise<BeginRepositoryDeletionResult> {
-    return await beginRepositoryDeletionState(this.ctx);
+    const result = await beginRepositoryDeletionState(this.ctx);
+    try {
+      // The tombstone is already durable, so no new native operation can
+      // start. Stop any current process before the deletion consumer sweeps R2;
+      // the receive lease keeps deletion non-ready until the writer drains.
+      await stopNativeReceiveContainerState(this.ctx);
+      this.logger.info("repository-delete:container-stopped", {});
+      return result;
+    } catch (error) {
+      this.logger.warn("repository-delete:container-stop-failed", { error: String(error) });
+      return { ...result, ready: false };
+    }
   }
 
   public async beginRepositoryMaintenance(): Promise<BeginRepositoryMaintenanceResult> {

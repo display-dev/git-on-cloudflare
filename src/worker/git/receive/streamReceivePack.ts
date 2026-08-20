@@ -7,15 +7,18 @@ import type { ReceiveStatus } from "@/worker/git/operations/validation";
 import type { ReceiveCommand } from "@/worker/git/operations/validation";
 import {
   acceptedWriteFactsForCommands,
+  type AcceptedWriteContext,
   type AcceptedWriteFact,
-  type AcceptedWriteSource,
 } from "@/worker/git/acceptedWrite";
+export type { AcceptedWriteContext } from "@/worker/git/acceptedWrite";
 
-import { clientAbortedResponse, createLogger, getRepoStub } from "@/worker/common";
+import { clientAbortedResponse, createLogger, getRepoStub, isZeroOid } from "@/worker/common";
 import { countSubrequest, type Limiter } from "@/worker/git/operations/limits";
 import { isValidRefName, validateReceiveCommands } from "@/worker/git/operations/validation";
 import { logOnce } from "@/worker/git/object-store/support";
-import { executeReceivePipeline, ReceivePipelineHttpError } from "./pipeline";
+import { executeReceivePipeline } from "./pipeline";
+import { executeNativeReceivePipeline } from "./nativePipeline";
+import { NativeReceiveIndeterminateError, ReceivePipelineHttpError } from "./pipelineTypes";
 import { readPktSectionStream } from "./pktSectionStream";
 import {
   parseReceiveRequest,
@@ -45,13 +48,6 @@ export type RepoStateChangeHandler = (change: {
   acceptedWrites: AcceptedWriteFact[];
 }) => Promise<void> | void;
 
-export type AcceptedWriteContext = {
-  repositoryId: string;
-  actor: string;
-  sourceSurface: AcceptedWriteSource;
-  idempotencyKey: string | null;
-};
-
 function countReceiveSubrequest(cacheCtx: CacheContext, log: Logger, op: string, n = 1) {
   if (countSubrequest(cacheCtx, n)) return;
   logOnce(cacheCtx, `receive-soft-budget:${op}`, () => {
@@ -67,6 +63,12 @@ function selectReceiveResponseMode(
   capabilities: ReceiveNegotiatedCapabilities
 ): ReceiveResponseMode {
   return capabilities.sideBand64k ? "side-band-64k" : "plain";
+}
+
+function useNativeReceive(env: Env, commands: ReceiveCommand[]): boolean {
+  return (
+    env.NATIVE_RECEIVE_CONTAINER === "1" && commands.some((command) => !isZeroOid(command.newOid))
+  );
 }
 
 function scheduleRepoStateChange(
@@ -158,6 +160,10 @@ function createSidebandReceiveResponse(args: {
       const onProgress = args.capabilities.quiet
         ? undefined
         : (message: string) => writer.progress(message);
+      const heartbeat =
+        onProgress && useNativeReceive(args.env, args.commands)
+          ? setInterval(() => onProgress("Native Git processing is still active\n"), 15_000)
+          : undefined;
       let closed = false;
       const close = () => {
         if (closed) return;
@@ -166,7 +172,10 @@ function createSidebandReceiveResponse(args: {
       };
 
       try {
-        const result = await executeReceivePipeline({
+        const executePipeline = useNativeReceive(args.env, args.commands)
+          ? executeNativeReceivePipeline
+          : executeReceivePipeline;
+        const result = await executePipeline({
           env: args.env,
           repoId: args.repoId,
           request: args.request,
@@ -205,6 +214,13 @@ function createSidebandReceiveResponse(args: {
           return;
         }
 
+        if (error instanceof NativeReceiveIndeterminateError) {
+          args.log.warn("native-receive:response-indeterminate", { error: error.message });
+          logReceiveEnd(args.log, 200, { reason: "native-receive-indeterminate" });
+          close();
+          return;
+        }
+
         args.log.error("receive:error", { error: String(error) });
         writer.reportStatus(
           buildReceiveUnpackFailureReport(
@@ -214,6 +230,7 @@ function createSidebandReceiveResponse(args: {
         );
         logReceiveEnd(args.log, 200, { reason: "sideband-unpack-error" });
       } finally {
+        if (heartbeat !== undefined) clearInterval(heartbeat);
         close();
       }
     },
@@ -352,7 +369,10 @@ export async function handleStreamingReceivePackPOST(
     }
 
     pipelineStarted = true;
-    const result = await executeReceivePipeline({
+    const executePipeline = useNativeReceive(env, parsedRequest.commands)
+      ? executeNativeReceivePipeline
+      : executeReceivePipeline;
+    const result = await executePipeline({
       env,
       repoId,
       request,
@@ -405,6 +425,19 @@ export async function handleStreamingReceivePackPOST(
     }
 
     log.error("receive:error", { error: String(error) });
+
+    if (error instanceof NativeReceiveIndeterminateError) {
+      const response = new Response(`${error.message}\n`, {
+        status: 503,
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store",
+          "Retry-After": "5",
+        },
+      });
+      logReceiveEnd(log, response.status, { reason: "native-receive-indeterminate" });
+      return response;
+    }
 
     if (error instanceof ReceivePipelineHttpError) {
       const response = new Response(`${error.message}\n`, {

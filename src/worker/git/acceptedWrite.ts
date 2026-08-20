@@ -1,7 +1,7 @@
 import type { Logger } from "@/worker/common/logger";
 import type { ReceiveCommand } from "@/worker/git/operations/validation";
 
-export type AcceptedWriteSource = "git-push" | "ingestion";
+export type AcceptedWriteSource = "git-push" | "ingestion" | "import";
 
 export type AcceptedWriteFact = {
   repositoryId: string;
@@ -12,6 +12,11 @@ export type AcceptedWriteFact = {
   sourceSurface: AcceptedWriteSource;
   idempotencyKey: string | null;
 };
+
+export type AcceptedWriteContext = Pick<
+  AcceptedWriteFact,
+  "repositoryId" | "actor" | "sourceSurface" | "idempotencyKey"
+>;
 
 export function acceptedWriteFactsForCommands(args: {
   repositoryId: string;
@@ -42,13 +47,12 @@ export function acceptedWriteFactsForCommands(args: {
   return Array.from(factsByRef.values()).filter((fact) => fact.beforeSha !== fact.afterSha);
 }
 
-/**
- * Investigation 4's candidate-owned emission boundary. Durable delivery and
- * reconciliation are intentionally left to Investigation 6; this structured
- * fact is emitted only after the repository Durable Object commits ref CAS.
- */
+/** Structured terminal log projection emitted only after RepoDO commits ref CAS. */
 export function emitAcceptedWriteFacts(log: Logger, facts: AcceptedWriteFact[]): void {
   for (const fact of facts) {
-    log.info("accepted-write:emitted", { acceptedWrite: fact });
+    log.info("accepted-write:emitted", {
+      sourceSurface: fact.sourceSurface,
+      idempotent: fact.idempotencyKey !== null,
+    });
   }
 }

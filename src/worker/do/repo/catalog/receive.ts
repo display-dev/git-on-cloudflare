@@ -1,7 +1,18 @@
 import type { Logger } from "@/worker/common/logger";
-import type { IngestionReceipt, ReceiveCommitOutcome, RepoStateSchema } from "../repoState";
+import type {
+  IngestionReceipt,
+  ReceiveCommitOutcome,
+  ReceiveFinalizeIntent,
+  RepoStateSchema,
+  TypedStorage,
+} from "../repoState";
 
-import { asTypedStorage, ingestionReceiptKey, receiveOutcomeKey } from "../repoState";
+import {
+  asTypedStorage,
+  ingestionReceiptKey,
+  receiveFinalizeIntentKey,
+  receiveOutcomeKey,
+} from "../repoState";
 import {
   applyReceiveCommands,
   isValidRefName,
@@ -10,16 +21,20 @@ import {
   validateReceiveCommands,
 } from "@/worker/git/operations/validation";
 import { getDb, listActivePackCatalog, upsertPackCatalogRow } from "../db";
-import {
-  DEFAULT_HEAD,
-  RECEIVE_LEASE_TTL_MS,
-  bumpPacksetVersion,
-  ensureRepoMetadataDefaults,
-} from "./shared";
+import { DEFAULT_HEAD, RECEIVE_LEASE_TTL_MS, ensureRepoMetadataDefaults } from "./shared";
 import { catalogNeedsCompaction, scheduleCompactionWake } from "./compaction/plan";
 import { acceptedWritesMatchCommands, recordAcceptedWrites } from "../acceptedWrites";
-import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
+import {
+  acceptedWriteFactsForCommands,
+  type AcceptedWriteContext,
+  type AcceptedWriteFact,
+} from "@/worker/git/acceptedWrite";
 import { snapshotEventProbeEnabled } from "@/worker/git/snapshot/config";
+import {
+  RECOVERY_ESCALATION_ATTEMPTS,
+  recoveryRetryDelayMs,
+  scheduleAlarmIfSooner,
+} from "../scheduler";
 
 export type FinalizeReceiveResult =
   | {
@@ -49,6 +64,46 @@ const MAX_RECEIVE_OUTCOMES = 128;
 let skipNextReceiptStoreForTesting = false;
 let failNextAfterOutcomeStoreForTesting = false;
 let failNextOutcomeIndexStoreForTesting = false;
+let failNextAfterCatalogActivationForTesting = false;
+let failNextAfterCatalogUpsertForTesting = false;
+let catalogUpsertFailureCountForTesting = 0;
+let catalogActivationFailureCountForTesting = 0;
+let outcomeStoreFailureCountForTesting = 0;
+
+function acceptedWriteContextForFacts(
+  facts: AcceptedWriteFact[] | undefined
+): AcceptedWriteContext | undefined {
+  const first = facts?.[0];
+  if (!first) return undefined;
+  const context: AcceptedWriteContext = {
+    repositoryId: first.repositoryId,
+    actor: first.actor,
+    sourceSurface: first.sourceSurface,
+    idempotencyKey: first.idempotencyKey,
+  };
+  if (
+    !facts.every(
+      (fact) =>
+        fact.repositoryId === context.repositoryId &&
+        fact.actor === context.actor &&
+        fact.sourceSurface === context.sourceSurface &&
+        fact.idempotencyKey === context.idempotencyKey
+    )
+  ) {
+    throw new Error("accepted-write facts do not share one receive context");
+  }
+  return context;
+}
+
+function acceptedWriteFactsForIntent(
+  intent: Pick<ReceiveFinalizeIntent, "commands" | "acceptedWriteContext">
+): AcceptedWriteFact[] | undefined {
+  if (!intent.acceptedWriteContext) return undefined;
+  return acceptedWriteFactsForCommands({
+    ...intent.acceptedWriteContext,
+    commands: intent.commands,
+  });
+}
 
 export const __test = {
   skipNextReceiptStore(): void {
@@ -60,10 +115,32 @@ export const __test = {
   failNextOutcomeIndexStore(): void {
     failNextOutcomeIndexStoreForTesting = true;
   },
+  failNextAfterCatalogActivation(): void {
+    failNextAfterCatalogActivationForTesting = true;
+  },
+  failNextAfterCatalogUpsert(): void {
+    failNextAfterCatalogUpsertForTesting = true;
+  },
+  consumedFailureCounts(): {
+    catalogUpsert: number;
+    catalogActivation: number;
+    outcomeStore: number;
+  } {
+    return {
+      catalogUpsert: catalogUpsertFailureCountForTesting,
+      catalogActivation: catalogActivationFailureCountForTesting,
+      outcomeStore: outcomeStoreFailureCountForTesting,
+    };
+  },
   reset(): void {
     skipNextReceiptStoreForTesting = false;
     failNextAfterOutcomeStoreForTesting = false;
     failNextOutcomeIndexStoreForTesting = false;
+    failNextAfterCatalogActivationForTesting = false;
+    failNextAfterCatalogUpsertForTesting = false;
+    catalogUpsertFailureCountForTesting = 0;
+    catalogActivationFailureCountForTesting = 0;
+    outcomeStoreFailureCountForTesting = 0;
   },
 };
 
@@ -116,7 +193,7 @@ async function storeIngestionReceipt(
 }
 
 async function clearMatchingReceiveLease(
-  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
+  store: TypedStorage<RepoStateSchema>,
   token: string
 ): Promise<void> {
   const lease = await store.get("receiveLease");
@@ -155,6 +232,7 @@ export async function getIngestionReceiptState(
 
 export async function reconcileReceiveState(
   ctx: DurableObjectState,
+  env: Env,
   args: {
     token: string;
     commands: ReceiveCommand[];
@@ -164,12 +242,17 @@ export async function reconcileReceiveState(
 ): Promise<ReconcileReceiveResult> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const outcome = await store.get(receiveOutcomeKey(args.token));
-  if (!(await holdReceiveCompletionFence(ctx, args.token, Boolean(outcome)))) {
+  const intent = await store.get(receiveFinalizeIntentKey(args.token));
+  if (!(await holdReceiveCompletionFence(ctx, args.token, Boolean(intent || outcome)))) {
     return { status: "unknown" };
   }
   if (outcome) {
     await storeReceiveOutcome(ctx.storage, outcome);
     if (args.ingestionReceipt) await storeIngestionReceipt(ctx.storage, args.ingestionReceipt);
+    if (outcome.shouldQueueCompaction) {
+      await store.put("compactionWantedAt", Date.now());
+      await scheduleCompactionWake(ctx, env);
+    }
     await clearMatchingReceiveLease(store, args.token);
     return {
       status: "committed",
@@ -181,6 +264,22 @@ export async function reconcileReceiveState(
         shouldQueueCompaction: outcome.shouldQueueCompaction,
       },
     };
+  }
+
+  if (intent) {
+    const finalized = await finalizeReceiveState({
+      ctx,
+      env,
+      token: intent.token,
+      commands: intent.commands,
+      stagedPack: intent.stagedPack,
+      ingestionReceipt: intent.ingestionReceipt,
+      acceptedWrites: acceptedWriteFactsForIntent(intent),
+    });
+    if (finalized.status === "committed") {
+      return { status: "committed", result: finalized };
+    }
+    return finalized.status === "ref_conflict" ? { status: "aborted" } : { status: "unknown" };
   }
 
   const lease = await store.get("receiveLease");
@@ -223,6 +322,57 @@ export async function reconcileReceiveState(
   return { status: "aborted" };
 }
 
+export async function resumeReceiveFinalizeFromAlarm(args: {
+  ctx: DurableObjectState;
+  env: Env;
+  logger: Logger;
+}): Promise<boolean> {
+  const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
+  const lease = await store.get("receiveLease");
+  if (!lease) return false;
+  const intent = await store.get(receiveFinalizeIntentKey(lease.token));
+  if (!intent) return false;
+  try {
+    await finalizeReceiveState({
+      ctx: args.ctx,
+      env: args.env,
+      token: intent.token,
+      commands: intent.commands,
+      stagedPack: intent.stagedPack,
+      ingestionReceipt: intent.ingestionReceipt,
+      acceptedWrites: acceptedWriteFactsForIntent(intent),
+      logger: args.logger,
+    });
+  } catch {
+    const recovery = await args.ctx.storage.transaction(async (transaction) => {
+      const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+      const current = await transactionStore.get(receiveFinalizeIntentKey(intent.token));
+      if (!current) return null;
+      const attempts = (current.recoveryAttempts ?? 0) + 1;
+      const escalate = attempts >= RECOVERY_ESCALATION_ATTEMPTS && !current.recoveryEscalated;
+      await transactionStore.put(receiveFinalizeIntentKey(intent.token), {
+        ...current,
+        recoveryAttempts: attempts,
+        recoveryEscalated: current.recoveryEscalated || escalate,
+      });
+      return { attempts, escalate };
+    });
+    if (!recovery) return true;
+    const fields = { attempts: recovery.attempts, retryable: true };
+    if (recovery.escalate) {
+      args.logger.error("receive:finalize-recovery-escalated", fields);
+    } else {
+      args.logger.warn("receive:finalize-recovery-failed", fields);
+    }
+    await scheduleAlarmIfSooner(
+      args.ctx,
+      args.env,
+      Date.now() + recoveryRetryDelayMs(recovery.attempts)
+    );
+  }
+  return true;
+}
+
 function resolveHeadAfterReceive(args: {
   storedHead:
     | {
@@ -259,7 +409,10 @@ export async function finalizeReceiveState(args: {
   logger?: Logger;
 }): Promise<FinalizeReceiveResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
-  if (!(await holdReceiveCompletionFence(args.ctx, args.token, false))) {
+  const intentKey = receiveFinalizeIntentKey(args.token);
+  let intent = await store.get(intentKey);
+  const priorOutcome = await store.get(receiveOutcomeKey(args.token));
+  if (!(await holdReceiveCompletionFence(args.ctx, args.token, Boolean(intent || priorOutcome)))) {
     return {
       status: "lease_mismatch",
       message: "Receive lease is no longer active for this request.",
@@ -267,12 +420,16 @@ export async function finalizeReceiveState(args: {
   }
   await ensureRepoMetadataDefaults(store);
 
-  const priorOutcome = await store.get(receiveOutcomeKey(args.token));
   if (priorOutcome) {
     await storeReceiveOutcome(args.ctx.storage, priorOutcome);
     if (args.ingestionReceipt) {
       await storeIngestionReceipt(args.ctx.storage, args.ingestionReceipt);
     }
+    if (priorOutcome.shouldQueueCompaction) {
+      await store.put("compactionWantedAt", Date.now());
+      await scheduleCompactionWake(args.ctx, args.env);
+    }
+    await store.delete(intentKey);
     await clearMatchingReceiveLease(store, args.token);
     return {
       status: "committed",
@@ -283,115 +440,201 @@ export async function finalizeReceiveState(args: {
     };
   }
 
-  const lease = await store.get("receiveLease");
-  if (!lease || lease.token !== args.token || lease.expiresAt <= Date.now()) {
-    if (lease?.token === args.token) await store.delete("receiveLease");
-    return {
-      status: "lease_mismatch",
-      message: "Receive lease is no longer active for this request.",
-    };
-  }
+  if (!intent) {
+    const lease = await store.get("receiveLease");
+    if (!lease || lease.token !== args.token || lease.expiresAt <= Date.now()) {
+      if (lease?.token === args.token) await store.delete("receiveLease");
+      return {
+        status: "lease_mismatch",
+        message: "Receive lease is no longer active for this request.",
+      };
+    }
 
-  const currentRefs = (await store.get("refs")) || [];
-  const invalidStatuses = args.commands
-    .filter((command) => !isValidRefName(command.ref))
-    .map((command) => ({ ref: command.ref, ok: false, msg: "invalid" satisfies string }));
-  if (invalidStatuses.length > 0) {
-    await store.delete("receiveLease");
-    args.logger?.warn("receive:finalize-invalid-ref", {
-      invalidCount: invalidStatuses.length,
+    const currentRefs = (await store.get("refs")) || [];
+    const invalidStatuses = args.commands
+      .filter((command) => !isValidRefName(command.ref))
+      .map((command) => ({ ref: command.ref, ok: false, msg: "invalid" satisfies string }));
+    if (invalidStatuses.length > 0) {
+      await store.delete("receiveLease");
+      args.logger?.warn("receive:finalize-invalid-ref", {
+        invalidCount: invalidStatuses.length,
+      });
+      return {
+        status: "ref_conflict",
+        statuses: invalidStatuses,
+        message: "Receive finalization rejected invalid refs.",
+      };
+    }
+
+    const statuses = validateReceiveCommands(currentRefs, args.commands);
+    if (!statuses.every((status) => status.ok)) {
+      await store.delete("receiveLease");
+      args.logger?.warn("receive:finalize-ref-conflict", {
+        conflictCount: statuses.filter((status) => !status.ok).length,
+      });
+      return {
+        status: "ref_conflict",
+        statuses,
+        message: "Ref expectations changed before the receive could be committed.",
+      };
+    }
+    if (args.acceptedWrites && !acceptedWritesMatchCommands(args.commands, args.acceptedWrites)) {
+      throw new Error("accepted-write facts do not match receive commands");
+    }
+    const nextRefs = applyReceiveCommands(currentRefs, args.commands);
+    const expectedRefsVersion = (await store.get("refsVersion")) || 0;
+    const nextIntent: ReceiveFinalizeIntent = {
+      token: args.token,
+      commands: args.commands,
+      expectedRefsVersion,
+      nextHead: resolveHeadAfterReceive({ storedHead: await store.get("head"), refs: nextRefs }),
+      nextRefsVersion: expectedRefsVersion + 1,
+      stagedPack: args.stagedPack,
+      packSequence: args.stagedPack ? (await store.get("nextPackSeq")) || 1 : undefined,
+      nextPacksetVersion: args.stagedPack
+        ? ((await store.get("packsetVersion")) || 0) + 1
+        : undefined,
+      ingestionReceipt: args.ingestionReceipt,
+      acceptedWriteContext: acceptedWriteContextForFacts(args.acceptedWrites),
+      createdAt: Date.now(),
+    };
+    intent = nextIntent;
+    await args.ctx.storage.transaction(async (transaction) => {
+      const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+      await transactionStore.put(intentKey, nextIntent);
+      const recoveryAt = Date.now() + 1_000;
+      const currentAlarm = await transaction.getAlarm();
+      if (currentAlarm === null || currentAlarm > recoveryAt) {
+        await transaction.setAlarm(recoveryAt);
+      }
     });
-    return {
-      status: "ref_conflict",
-      statuses: invalidStatuses,
-      message: "Receive finalization rejected invalid refs.",
-    };
-  }
-
-  const statuses = validateReceiveCommands(currentRefs, args.commands);
-  if (!statuses.every((status) => status.ok)) {
-    await store.delete("receiveLease");
-    args.logger?.warn("receive:finalize-ref-conflict", {
-      conflictCount: statuses.filter((status) => !status.ok).length,
-    });
-    return {
-      status: "ref_conflict",
-      statuses,
-      message: "Ref expectations changed before the receive could be committed.",
-    };
-  }
-
-  const nextRefs = applyReceiveCommands(currentRefs, args.commands);
-  const storedHead = await store.get("head");
-  const nextHead = resolveHeadAfterReceive({ storedHead, refs: nextRefs });
-  const nextRefsVersion = ((await store.get("refsVersion")) || 0) + 1;
-  if (args.acceptedWrites && !acceptedWritesMatchCommands(args.commands, args.acceptedWrites)) {
-    throw new Error("accepted-write facts do not match receive commands");
+  } else if (
+    JSON.stringify(intent.commands) !== JSON.stringify(args.commands) ||
+    JSON.stringify(intent.stagedPack) !== JSON.stringify(args.stagedPack) ||
+    JSON.stringify(intent.acceptedWriteContext) !==
+      JSON.stringify(acceptedWriteContextForFacts(args.acceptedWrites))
+  ) {
+    throw new Error("FUBAR: receive finalize retry does not match durable intent");
   }
 
   let shouldQueueCompaction = false;
-  if (args.stagedPack) {
-    const nextPackSeq = (await store.get("nextPackSeq")) || 1;
+  if (intent.stagedPack) {
     const db = getDb(args.ctx.storage);
-    await upsertPackCatalogRow(db, {
-      packKey: args.stagedPack.packKey,
-      kind: "receive",
-      state: "active",
-      tier: 0,
-      seqLo: nextPackSeq,
-      seqHi: nextPackSeq,
-      objectCount: args.stagedPack.objectCount,
-      packBytes: args.stagedPack.packBytes,
-      idxBytes: args.stagedPack.idxBytes,
-      createdAt: Date.now(),
-      supersededBy: null,
-    });
-    await store.put("nextPackSeq", nextPackSeq + 1);
-    const activeCatalog = await listActivePackCatalog(db);
-    await bumpPacksetVersion(store);
-    shouldQueueCompaction = catalogNeedsCompaction(activeCatalog);
-    if (shouldQueueCompaction) {
-      await store.put("compactionWantedAt", Date.now());
-      await scheduleCompactionWake(args.ctx, args.env);
+    let activeCatalog = await listActivePackCatalog(db);
+    const existingPack = activeCatalog.find((pack) => pack.packKey === intent.stagedPack?.packKey);
+    if (
+      existingPack &&
+      (existingPack.packBytes !== intent.stagedPack.packBytes ||
+        existingPack.idxBytes !== intent.stagedPack.idxBytes ||
+        existingPack.objectCount !== intent.stagedPack.objectCount ||
+        existingPack.seqLo !== intent.packSequence ||
+        existingPack.seqHi !== intent.packSequence)
+    ) {
+      throw new Error("FUBAR: active receive pack metadata does not match finalize intent");
     }
+    const alreadyActive = Boolean(existingPack);
+    if (!alreadyActive) {
+      if (intent.packSequence === undefined || intent.nextPacksetVersion === undefined) {
+        throw new Error("FUBAR: receive finalize intent is missing pack sequence state");
+      }
+      await upsertPackCatalogRow(db, {
+        packKey: intent.stagedPack.packKey,
+        kind: "receive",
+        state: "active",
+        tier: 0,
+        seqLo: intent.packSequence,
+        seqHi: intent.packSequence,
+        objectCount: intent.stagedPack.objectCount,
+        packBytes: intent.stagedPack.packBytes,
+        idxBytes: intent.stagedPack.idxBytes,
+        createdAt: Date.now(),
+        supersededBy: null,
+      });
+      if (failNextAfterCatalogUpsertForTesting) {
+        failNextAfterCatalogUpsertForTesting = false;
+        catalogUpsertFailureCountForTesting++;
+        throw new Error("injected post-catalog-upsert receive failure");
+      }
+      activeCatalog = await listActivePackCatalog(db);
+    }
+    if (intent.packSequence === undefined || intent.nextPacksetVersion === undefined) {
+      throw new Error("FUBAR: receive finalize intent is missing pack sequence state");
+    }
+    const currentNextPackSeq = (await store.get("nextPackSeq")) || 1;
+    if (currentNextPackSeq <= intent.packSequence) {
+      await store.put("nextPackSeq", intent.packSequence + 1);
+    }
+    const currentPacksetVersion = (await store.get("packsetVersion")) || 0;
+    if (currentPacksetVersion < intent.nextPacksetVersion) {
+      await store.put("packsetVersion", intent.nextPacksetVersion);
+    }
+    if (failNextAfterCatalogActivationForTesting) {
+      failNextAfterCatalogActivationForTesting = false;
+      catalogActivationFailureCountForTesting++;
+      throw new Error("injected post-catalog receive failure");
+    }
+    shouldQueueCompaction = catalogNeedsCompaction(activeCatalog);
   }
 
-  const committed: ReceiveCommitOutcome = {
-    token: args.token,
-    statuses,
-    changed: args.commands.length > 0,
-    empty: nextRefs.length === 0,
-    shouldQueueCompaction,
-  };
-
+  let committedRefs: Array<{ name: string; oid: string }> = [];
+  const acceptedWrites = acceptedWriteFactsForIntent(intent);
+  const statuses = intent.commands.map((command) => ({ ref: command.ref, ok: true }));
   await args.ctx.storage.transaction(async (transaction) => {
     const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
-    await transactionStore.put("refs", nextRefs);
-    await transactionStore.put("head", nextHead);
-    await transactionStore.put("refsVersion", nextRefsVersion);
-    if (args.acceptedWrites) {
+    const currentRefs = (await transactionStore.get("refs")) ?? [];
+    const currentRefsVersion = (await transactionStore.get("refsVersion")) || 0;
+    const appliedRefs = applyReceiveCommands(currentRefs, intent.commands);
+    if (currentRefsVersion === intent.expectedRefsVersion) {
+      committedRefs = appliedRefs;
+    } else if (
+      currentRefsVersion === intent.nextRefsVersion &&
+      JSON.stringify(appliedRefs) === JSON.stringify(currentRefs)
+    ) {
+      committedRefs = currentRefs;
+    } else {
+      throw new Error("FUBAR: receive refs diverged from durable finalize intent");
+    }
+    await transactionStore.put("refs", committedRefs);
+    await transactionStore.put("head", intent.nextHead);
+    await transactionStore.put("refsVersion", intent.nextRefsVersion);
+    if (acceptedWrites) {
       await recordAcceptedWrites(
         transactionStore,
-        nextRefsVersion,
-        args.acceptedWrites,
-        Date.now(),
+        intent.nextRefsVersion,
+        acceptedWrites,
+        intent.createdAt,
         snapshotEventProbeEnabled(args.env)
       );
     }
   });
+  const committed: ReceiveCommitOutcome = {
+    token: args.token,
+    statuses,
+    changed: intent.commands.length > 0,
+    empty: committedRefs.length === 0,
+    shouldQueueCompaction,
+  };
   await storeReceiveOutcome(args.ctx.storage, committed);
   if (failNextAfterOutcomeStoreForTesting) {
     failNextAfterOutcomeStoreForTesting = false;
+    outcomeStoreFailureCountForTesting++;
     throw new Error("injected post-outcome finalize failure");
   }
-  if (args.ingestionReceipt) await storeIngestionReceipt(args.ctx.storage, args.ingestionReceipt);
+  if (intent.ingestionReceipt) {
+    await storeIngestionReceipt(args.ctx.storage, intent.ingestionReceipt);
+  }
+  if (shouldQueueCompaction) {
+    await store.put("compactionWantedAt", Date.now());
+    await scheduleCompactionWake(args.ctx, args.env);
+  }
+  await store.delete(intentKey);
   await store.delete("receiveLease");
 
   args.logger?.info("receive:finalize-committed", {
-    commandCount: args.commands.length,
-    refCount: nextRefs.length,
-    empty: nextRefs.length === 0,
-    stagedPackKey: args.stagedPack?.packKey,
+    commandCount: intent.commands.length,
+    refCount: committedRefs.length,
+    empty: committedRefs.length === 0,
+    stagedPack: intent.stagedPack !== undefined,
     shouldQueueCompaction,
   });
 

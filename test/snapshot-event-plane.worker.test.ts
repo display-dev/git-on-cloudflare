@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { zeroOid } from "@/worker/common";
-import type { SnapshotProjectionResult } from "@/worker/do/repo/acceptedWrites";
+import type {
+  SnapshotProjectionResult,
+  SnapshotReconcilePlan,
+} from "@/worker/do/repo/acceptedWrites";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
 import { setupRepoForTests } from "./util/repoSeed";
 import { decodeReportStatus, pushStreamingUpdate } from "./util/streaming-helpers";
@@ -23,7 +26,7 @@ type JournalEntry = {
 
 type EventState = {
   entries: JournalEntry[];
-  plan: { status: string; afterSha?: string; sequence?: number };
+  plan: SnapshotReconcilePlan;
   projection: {
     snapshotCount: number;
     current?: { commitSha: string; sequence: number };
@@ -150,8 +153,13 @@ describe("snapshot event plane", () => {
     let plannedSequence = 0;
     await withEnvOverrides(env, { SNAPSHOT_EVENT_PROBE: "1" }, async () => {
       const state = await eventState(owner, repo);
-      expect(state.plan).toMatchObject({ status: "head_only", afterSha: first });
-      plannedSequence = state.plan.sequence!;
+      expect(state.plan).toMatchObject({
+        status: "head_only",
+        afterSha: first,
+        sequence: 1,
+      });
+      if (state.plan.status !== "head_only") throw new Error("expected a head-only plan");
+      plannedSequence = state.plan.sequence;
     });
 
     const second = (await pushStreamingUpdate(owner, repo, first, "two\n")).commitOid;
@@ -168,7 +176,11 @@ describe("snapshot event plane", () => {
 
     await withEnvOverrides(env, { SNAPSHOT_EVENT_PROBE: "1" }, async () => {
       let state = await eventState(owner, repo);
-      expect(state.plan).toMatchObject({ status: "head_only", afterSha: first, sequence: 3 });
+      expect(state.plan).toMatchObject({
+        status: "head_only",
+        afterSha: first,
+        sequence: 3,
+      });
       expect((await eventRequest(owner, repo, { action: "reconcile" })).status).toBe(200);
       state = await eventState(owner, repo);
       expect(state.projection.current).toMatchObject({ commitSha: first, sequence: 3 });

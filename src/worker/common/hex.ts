@@ -45,3 +45,8 @@ export function isValidOid(oid: string): boolean {
 export function zeroOid(): string {
   return "0".repeat(40);
 }
+
+/** Return true when the value is Git's all-zero object ID sentinel. */
+export function isZeroOid(oid: string): boolean {
+  return oid === zeroOid();
+}

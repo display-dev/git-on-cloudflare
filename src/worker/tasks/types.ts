@@ -42,6 +42,14 @@ export const PackRefBackfillQueueMessageSchema = z.object({
 
 export type PackRefBackfillQueueMessage = z.infer<typeof PackRefBackfillQueueMessageSchema>;
 
+export const NativeReceiveQueueMessageSchema = z.object({
+  kind: z.literal("native-receive"),
+  doId: z.string(),
+  operationId: z.string(),
+});
+
+export type NativeReceiveQueueMessage = z.infer<typeof NativeReceiveQueueMessageSchema>;
+
 export const RouteCacheSyncMessageSchema = z.object({
   kind: z.literal("route-cache-sync"),
   repositoryId: z.string(),
@@ -70,6 +78,7 @@ export const RepoTaskQueueMessageSchema = z.discriminatedUnion("kind", [
   CompactionDeleteQueueMessageSchema,
   ReachabilityGcQueueMessageSchema,
   PackRefBackfillQueueMessageSchema,
+  NativeReceiveQueueMessageSchema,
   RouteCacheSyncMessageSchema,
   RepositoryDeleteMessageSchema,
 ]);

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { registerGitRoutes } from "./routes/git";
 import { registerIngestionRoutes } from "./routes/ingestion";
+import { registerNativeImportRoutes } from "./routes/nativeImport";
 import { registerSnapshotRoutes } from "./routes/snapshot";
 import { registerReadBenchmarkRoutes } from "./routes/readBenchmark";
 import { registerEventProbeRoutes } from "./routes/eventProbe";
@@ -17,6 +18,7 @@ const app = new Hono<AppBindings>({ strict: false });
 app.use("*", requestServicesMiddleware);
 // Disabled-by-default internal ingestion path must precede owner/repo routes.
 registerIngestionRoutes(app);
+registerNativeImportRoutes(app);
 registerSnapshotRoutes(app);
 registerReadBenchmarkRoutes(app);
 registerEventProbeRoutes(app);
@@ -84,3 +86,4 @@ export default {
 };
 
 export { RepoDurableObject } from "./do/repo/repoDO";
+export { RepositoryContainerBridge } from "./git/nativeReceive/bridge";

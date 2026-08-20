@@ -5,6 +5,13 @@ import { createLogger } from "@/worker/common";
 import { activeLeaseOrUndefined } from "./catalog/activity";
 import { COMPACTION_REARM_DELAY_MS } from "./catalog/shared";
 
+export const RECOVERY_ESCALATION_ATTEMPTS = 5;
+
+export function recoveryRetryDelayMs(attempts: number): number {
+  const exponent = Math.max(0, Math.min(attempts - 1, RECOVERY_ESCALATION_ATTEMPTS));
+  return Math.min(30_000, 2 ** exponent * 1_000);
+}
+
 /**
  * Plan the next alarm time purely from existing DO state and repo config.
  * Priority: compaction wake/retry, then idle cleanup.

@@ -176,7 +176,13 @@ export function registerAdminRoutes(router: AppRouter) {
     if (!head.success) {
       return new Response("Invalid head payload\n", { status: 400 });
     }
-    await limiter.run("do:admin-set-head", () => stub.setHead(head.data));
+    const updated = await limiter.run("do:admin-set-head", () => stub.setHead(head.data));
+    if (!updated) {
+      return new Response("Repository is busy\n", {
+        status: 503,
+        headers: { "Cache-Control": "no-store", "Retry-After": "10" },
+      });
+    }
     return new Response("OK\n");
   });
 

@@ -19,6 +19,7 @@ import {
 import { doPrefix, r2PackKey } from "@/worker/keys";
 import { deleteStagedPack, stagePackToR2, type StagedPackUpload } from "./r2Upload";
 import { buildReceiveReportStatus, isReceiveAbort, throwIfReceiveAborted } from "./support";
+import { ReceivePipelineHttpError, type ReceivePipelineResult } from "./pipelineTypes";
 
 type RepoStub = DurableObjectStub<RepoDurableObject>;
 
@@ -34,26 +35,6 @@ export const __test = {
     afterFinalizeResponseForTesting = undefined;
   },
 };
-
-export type ReceivePipelineResult = {
-  reportStatusBody: Uint8Array;
-  changed: boolean;
-  empty: boolean;
-  packKey?: string;
-  packBytes?: number;
-};
-
-export class ReceivePipelineHttpError extends Error {
-  readonly status: number;
-  readonly reason: string;
-
-  constructor(status: number, reason: string, message: string) {
-    super(message);
-    this.name = "ReceivePipelineHttpError";
-    this.status = status;
-    this.reason = reason;
-  }
-}
 
 type ReceiveCleanupAttempt = "inline" | "retry";
 

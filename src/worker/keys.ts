@@ -32,6 +32,29 @@ export function r2PackDirPrefix(prefix: string): string {
   return `${prefix}/objects/pack/`;
 }
 
+// The raw client pack is immutable staging input. Native processing writes a
+// separate self-contained pack so a retry can safely replace only its own
+// derived artifacts without ever mutating an active catalog entry.
+export function nativeReceiveInputPackKey(prefix: string, operationId: string): string {
+  return r2PackKey(prefix, `pack-native-input-${operationId}.pack`);
+}
+
+export function nativeReceiveOutputPackKey(
+  prefix: string,
+  operationId: string,
+  fingerprint: string
+): string {
+  return r2PackKey(prefix, `pack-native-${operationId}-${fingerprint}.pack`);
+}
+
+export function repositoryImportPackKey(repositoryId: string, operationId: string): string {
+  return `${repositoryImportPrefix(repositoryId)}${operationId}.pack`;
+}
+
+export function repositoryImportPrefix(repositoryId: string): string {
+  return `imports/${encodeURIComponent(repositoryId)}/`;
+}
+
 // Return true if the key ends with .pack
 export function isPackKey(key: string): boolean {
   return key.endsWith(".pack");

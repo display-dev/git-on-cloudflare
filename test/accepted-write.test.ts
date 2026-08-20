@@ -42,11 +42,15 @@ describe("accepted-write facts", () => {
     });
     emitAcceptedWriteFacts(logger, [...ingestion, ...protocol]);
     expect(info).toHaveBeenNthCalledWith(1, "accepted-write:emitted", {
-      acceptedWrite: ingestion[0],
+      sourceSurface: "ingestion",
+      idempotent: true,
     });
     expect(info).toHaveBeenNthCalledWith(2, "accepted-write:emitted", {
-      acceptedWrite: protocol[0],
+      sourceSurface: "git-push",
+      idempotent: false,
     });
+    expect(JSON.stringify(info.mock.calls)).not.toContain("repo_1");
+    expect(JSON.stringify(info.mock.calls)).not.toContain("request_1");
   });
 
   it("emits only the authoritative transition for repeated refs and drops no-ops", () => {

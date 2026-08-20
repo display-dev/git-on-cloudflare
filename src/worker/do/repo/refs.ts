@@ -7,8 +7,27 @@
 
 import type { RepoStateSchema, Head, TypedStorage } from "./repoState";
 
-import { asTypedStorage } from "./repoState";
+import { asTypedStorage, nativeReceiveOperationKey, receiveFinalizeIntentKey } from "./repoState";
 import { activeLeaseOrUndefined } from "./catalog/activity";
+import { isNativeReceiveTerminal } from "@/worker/git/nativeReceive/types";
+
+async function hasActiveReceiveMutation(store: TypedStorage<RepoStateSchema>): Promise<boolean> {
+  const receiveLease = await store.get("receiveLease");
+  if (receiveLease?.expiresAt && receiveLease.expiresAt > Date.now()) return true;
+  if (
+    receiveLease &&
+    (await store.get(receiveFinalizeIntentKey(receiveLease.token))) !== undefined
+  ) {
+    return true;
+  }
+  const operationIds = (await store.get("nativeReceiveOperationIndex")) ?? [];
+  for (const operationId of operationIds) {
+    const operation = await store.get(nativeReceiveOperationKey(operationId));
+    if (operation && !isNativeReceiveTerminal(operation.state)) return true;
+  }
+  if (receiveLease) await store.delete("receiveLease");
+  return false;
+}
 
 /**
  * Retrieves all refs from storage
@@ -32,6 +51,7 @@ export async function setRefs(
   return await ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
     if (await store.get("repositoryDeleting")) return false;
+    if (await hasActiveReceiveMutation(store)) return false;
     const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), Date.now());
     if (compactLease?.operation === "reachability-gc") return false;
     await store.put("refs", refs);
@@ -71,11 +91,13 @@ export async function resolveHead(ctx: DurableObjectState): Promise<Head> {
  * @param ctx - Durable Object state context
  * @param head - New HEAD value
  */
-export async function setHead(ctx: DurableObjectState, head: Head): Promise<void> {
-  await ctx.storage.transaction(async (transaction) => {
+export async function setHead(ctx: DurableObjectState, head: Head): Promise<boolean> {
+  return await ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
-    if (await store.get("repositoryDeleting")) return;
+    if (await store.get("repositoryDeleting")) return false;
+    if (await hasActiveReceiveMutation(store)) return false;
     await store.put("head", head);
+    return true;
   });
 }
 

@@ -7,7 +7,7 @@ import { findPatGrantForRepo, insertPatWithGrants } from "@/worker/db/d1/dal";
 import { routeCacheKey } from "@/worker/repositories/routeCache";
 import { findRepositoryById } from "@/worker/db/d1/dal/repositories";
 import { generatePatPlaintext, hashPatPlaintext } from "@/worker/auth/pat";
-import { doPrefix } from "@/worker/keys";
+import { doPrefix, repositoryImportPackKey } from "@/worker/keys";
 import { snapshotObjectKey, snapshotRepositoryPrefix } from "@/worker/git/snapshot/materialize";
 import type { RepositoryDeleteMessage } from "@/worker/tasks/queue";
 import { getDb as getRepoDb, getPackCatalogCount, upsertPackCatalogRow } from "@/worker/do/repo/db";
@@ -25,7 +25,9 @@ function uniqueNs(): string {
   return `rd-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function seedDeletable(): Promise<SeededRepo & { patId: string; snapshotKey: string }> {
+async function seedDeletable(): Promise<
+  SeededRepo & { patId: string; snapshotKey: string; importKey: string }
+> {
   const s = await seedRepo(env, {
     namespaceSlug: uniqueNs(),
     repoSlug: "site",
@@ -62,6 +64,8 @@ async function seedDeletable(): Promise<SeededRepo & { patId: string; snapshotKe
   });
   if (!snapshotKey) throw new Error("snapshot prefix must be configured for deletion test");
   await env.REPO_BUCKET.put(snapshotKey, "synthetic snapshot");
+  const importKey = repositoryImportPackKey(s.doName, "synthetic-delete-probe");
+  await env.REPO_BUCKET.put(importKey, "synthetic import");
   const stub = getRepoStub(env, s.doName);
   await stub.setRefs([{ name: "refs/heads/main", oid: "1".repeat(40) }]);
   await runDOWithRetry(
@@ -82,7 +86,7 @@ async function seedDeletable(): Promise<SeededRepo & { patId: string; snapshotKe
       });
     }
   );
-  return { ...s, patId, snapshotKey };
+  return { ...s, patId, snapshotKey, importKey };
 }
 
 async function packCatalogCount(doName: string): Promise<number> {
@@ -129,6 +133,7 @@ describe("repository-delete consumer", () => {
     expect(await env.ROUTES.get(routeCacheKey(s.namespaceSlug, s.repoSlug))).toBeNull();
     expect(await r2HasObjectsForDoName(s.doName)).toBe(false);
     expect(await env.REPO_BUCKET.head(s.snapshotKey)).toBeNull();
+    expect(await env.REPO_BUCKET.head(s.importKey)).toBeNull();
     expect(await stub.listRefs()).toEqual([]);
     expect(await packCatalogCount(s.doName)).toBe(0);
   });
@@ -179,14 +184,16 @@ describe("repository-delete consumer", () => {
   it("snapshot-prefix outage retries after Git objects are gone and replay finishes deletion", async () => {
     const s = await seedDeletable();
     const message = deleteMessage(s);
-    let listCalls = 0;
+    const snapshotPrefix = snapshotRepositoryPrefix(env, s.repositoryId);
+    if (!snapshotPrefix) throw new Error("snapshot prefix must be configured for deletion test");
     const failingEnv: Env = {
       ...env,
       REPO_BUCKET: {
         ...env.REPO_BUCKET,
         async list(options?: R2ListOptions) {
-          listCalls++;
-          if (listCalls === 2) throw new Error("simulated snapshot list outage");
+          if (options?.prefix === snapshotPrefix) {
+            throw new Error("simulated snapshot list outage");
+          }
           return await env.REPO_BUCKET.list(options);
         },
         async delete(keys: string | string[]) {
@@ -199,6 +206,7 @@ describe("repository-delete consumer", () => {
     expect(result.retried).toBe(true);
     expect(result.acked).toBe(false);
     expect(await r2HasObjectsForDoName(s.doName)).toBe(false);
+    expect(await env.REPO_BUCKET.head(s.importKey)).toBeNull();
     expect(await env.REPO_BUCKET.head(s.snapshotKey)).not.toBeNull();
     expect(await getRepoStub(env, s.doName).listRefs()).toHaveLength(1);
 
