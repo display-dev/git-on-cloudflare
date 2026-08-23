@@ -8,9 +8,11 @@ import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
 import { clearExpiredLeases } from "@/worker/do/repo/catalog/leases";
 import { RECOVERY_ESCALATION_ATTEMPTS, recoveryRetryDelayMs } from "@/worker/do/repo/scheduler";
 import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
+import { nativeReceiveOperationKey } from "@/worker/do/repo/repoState";
 import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db";
 import {
   isNativeReceiveTerminal,
+  type NativeReceiveOperation,
   type NativeReceiveOperationView,
 } from "@/worker/git/nativeReceive/types";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
@@ -131,6 +133,114 @@ async function runOperationToTerminal(
 }
 
 describe("durable native receive and import", () => {
+  it("rejects a queryable operation id when the selected path has no durable ledger", async () => {
+    const owner = "o";
+    const fallbackRepo = uniqueRepoId("native-id-fallback");
+    const fallbackSeeded = await setupRepoForTests(env, owner, fallbackRepo);
+    const createBody = concatChunks([
+      pktLine(
+        `${zeroOid()} ${nativeFixture.commitOid} refs/heads/main\0 report-status agent=test\n`
+      ),
+      flushPkt(),
+      decodeBase64(nativeFixture.pack),
+    ]);
+    const fallback = await handleStreamingReceivePackPOST(
+      { ...env, NATIVE_RECEIVE_CONTAINER: "0" },
+      fallbackSeeded.doName,
+      new Request(`https://example.com/${owner}/${fallbackRepo}/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-request",
+          "X-Display-Operation-ID": "fallback-operation",
+        },
+        body: toRequestBody(createBody),
+      }),
+      createExecutionContext(),
+      { limiter: new SubrequestLimiter(900) }
+    );
+    expect(fallback.status).toBe(409);
+    expect(await getRepoStub(env, fallbackSeeded.doName).getRepoActivity()).toBeNull();
+
+    const deleteRepo = uniqueRepoId("native-id-delete");
+    const deleteSeeded = await setupRepoForTests(env, owner, deleteRepo);
+    const deleteStub = getRepoStub(env, deleteSeeded.doName);
+    expect(await deleteStub.setRefs([{ name: "refs/heads/main", oid: targetOID }])).toBe(true);
+    const deleteBody = concatChunks([
+      pktLine(`${targetOID} ${zeroOid()} refs/heads/main\0 report-status agent=test\n`),
+      flushPkt(),
+    ]);
+    const deletion = await handleStreamingReceivePackPOST(
+      { ...env, NATIVE_RECEIVE_CONTAINER: "1" },
+      deleteSeeded.doName,
+      new Request(`https://example.com/${owner}/${deleteRepo}/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-request",
+          "X-Display-Operation-ID": "delete-operation",
+        },
+        body: toRequestBody(deleteBody),
+      }),
+      createExecutionContext(),
+      { limiter: new SubrequestLimiter(900) }
+    );
+    expect(deletion.status).toBe(409);
+    expect(await deleteStub.getRepoActivity()).toBeNull();
+  });
+
+  it("rejects a blank queryable operation id before creating receive state", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("native-id-blank");
+    const seeded = await setupRepoForTests(env, owner, repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const createBody = concatChunks([
+      pktLine(
+        `${zeroOid()} ${nativeFixture.commitOid} refs/heads/main\0 report-status agent=test\n`
+      ),
+      flushPkt(),
+      decodeBase64(nativeFixture.pack),
+    ]);
+
+    const response = await handleStreamingReceivePackPOST(
+      { ...env, NATIVE_RECEIVE_CONTAINER: "1" },
+      seeded.doName,
+      new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-request",
+          "X-Display-Operation-ID": "   ",
+        },
+        body: toRequestBody(createBody),
+      }),
+      createExecutionContext(),
+      { limiter: new SubrequestLimiter(900) }
+    );
+
+    expect(response.status).toBe(400);
+    expect(await stub.getRepoActivity()).toBeNull();
+    const stored = await env.REPO_BUCKET.list({ prefix: `${doPrefix(stub.id.toString())}/` });
+    expect(stored.objects).toHaveLength(0);
+  });
+
+  it("prevents caching an operation query before its durable record exists", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("native-query-missing");
+    await setupRepoForTests(env, owner, repo);
+
+    const response = await workerExports.default.fetch(
+      `https://example.com/_internal/receives/${owner}/${repo}/not-yet-present`,
+      { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+    );
+    expect(response.status).toBe(404);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+
+    const invalidOperation = await workerExports.default.fetch(
+      `https://example.com/_internal/receives/${owner}/${repo}/invalid.operation`,
+      { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+    );
+    expect(invalidOperation.status).toBe(404);
+    expect(invalidOperation.headers.get("Cache-Control")).toBe("no-store");
+  });
+
   it("backs repeated finalization recovery away from a one-hertz retry loop", () => {
     expect(
       Array.from({ length: RECOVERY_ESCALATION_ATTEMPTS + 2 }, (_, index) =>
@@ -301,7 +411,10 @@ describe("durable native receive and import", () => {
       seeded.doName,
       new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-git-receive-pack-request" },
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-request",
+          "X-Display-Operation-ID": "native-smart-http-operation",
+        },
         body: toRequestBody(body),
       }),
       createExecutionContext(),
@@ -311,7 +424,40 @@ describe("durable native receive and import", () => {
     expect(decodeReportStatus(new Uint8Array(await response.arrayBuffer()))).toContain(
       "ok refs/heads/main"
     );
-    expect((await getRepoStub(env, seeded.doName).listRefs())[0]?.oid).toBe(commit.oid);
+    const stub = getRepoStub(env, seeded.doName);
+    expect((await stub.listRefs())[0]?.oid).toBe(commit.oid);
+
+    const nextCommitPayload = new TextEncoder().encode(
+      `tree ${tree.oid}\nparent ${commit.oid}\nauthor ${author}\ncommitter ${author}\n\nnext\n`
+    );
+    const nextCommit = await encodeGitObject("commit", nextCommitPayload);
+    const nextPack = await buildPack([{ type: "commit", payload: nextCommitPayload }]);
+    const conflictingBody = concatChunks([
+      pktLine(`${commit.oid} ${nextCommit.oid} refs/heads/main\0 report-status agent=test\n`),
+      flushPkt(),
+      nextPack,
+    ]);
+    const conflict = await handleStreamingReceivePackPOST(
+      { ...env, NATIVE_RECEIVE_CONTAINER: "1" },
+      seeded.doName,
+      new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-request",
+          "X-Display-Operation-ID": "native-smart-http-operation",
+        },
+        body: toRequestBody(conflictingBody),
+      }),
+      createExecutionContext(),
+      { limiter: new SubrequestLimiter(900) }
+    );
+    expect(conflict.status).toBe(409);
+    expect(await stub.getRepoActivity()).toBeNull();
+    const stored = await env.REPO_BUCKET.list({ prefix: `${doPrefix(stub.id.toString())}/` });
+    expect(stored.objects.map((object) => object.key)).not.toContainEqual(
+      expect.stringContaining("pack-native-input-")
+    );
+    expect((await stub.listRefs())[0]?.oid).toBe(commit.oid);
   });
 
   it("preserves a staged Smart HTTP input when the enqueue response is lost", async () => {
@@ -360,7 +506,10 @@ describe("durable native receive and import", () => {
       seeded.doName,
       new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-git-receive-pack-request" },
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-request",
+          "X-Display-Operation-ID": "native-lost-enqueue-operation",
+        },
         body: toRequestBody(body),
       }),
       createExecutionContext(),
@@ -369,16 +518,52 @@ describe("durable native receive and import", () => {
     expect(response.status).toBe(503);
 
     const stub = getRepoStub(env, seeded.doName);
-    const operationIds = await runDOWithRetry(
+    const pendingResponse = await workerExports.default.fetch(
+      `https://example.com/_internal/receives/${owner}/${repo}/native-lost-enqueue-operation`,
+      { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+    );
+    expect(pendingResponse.status).toBe(202);
+    expect(await pendingResponse.json()).toMatchObject({
+      id: "native-lost-enqueue-operation",
+      state: "staged",
+    });
+
+    const inputPackKey = await runDOWithRetry(
       () => stub,
       async (_instance, state) => {
-        return (await state.storage.get<string[]>("nativeReceiveOperationIndex")) ?? [];
+        const operation = await state.storage.get<NativeReceiveOperation>(
+          nativeReceiveOperationKey("native-lost-enqueue-operation")
+        );
+        if (!operation) throw new Error("expected durable native operation");
+        await state.storage.put("receiveLease", {
+          token: operation.leaseToken,
+          createdAt: 1,
+          expiresAt: 2,
+        });
+        await clearExpiredLeases(state, env, undefined, 3);
+        const renewed = await state.storage.get<{ token: string; expiresAt: number }>(
+          "receiveLease"
+        );
+        expect(renewed?.token).toBe(operation.leaseToken);
+        expect(renewed?.expiresAt).toBeGreaterThan(3);
+        return operation.inputPackKey;
       }
     );
-    expect(operationIds).toHaveLength(1);
-    const operationId = operationIds[0];
-    if (!operationId) throw new Error("expected durable native operation");
-    expect((await runOperationToTerminal(stub, operationId)).state).toBe("committed");
+    expect(await env.REPO_BUCKET.head(inputPackKey)).toBeTruthy();
+
+    expect((await runOperationToTerminal(stub, "native-lost-enqueue-operation")).state).toBe(
+      "committed"
+    );
+    const committedResponse = await workerExports.default.fetch(
+      `https://example.com/_internal/receives/${owner}/${repo}/native-lost-enqueue-operation`,
+      { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+    );
+    expect(committedResponse.status).toBe(200);
+    expect(await committedResponse.json()).toMatchObject({
+      id: "native-lost-enqueue-operation",
+      state: "committed",
+      result: { changed: true },
+    });
     expect((await stub.listRefs()).find((ref) => ref.name === "refs/heads/main")?.oid).toBe(
       commit.oid
     );

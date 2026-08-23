@@ -124,6 +124,15 @@ export function emitFatal(
   enqueueSidebandPayload(controller, 3, new TextEncoder().encode(`fatal: ${message}\n`));
 }
 
+export function closeSidebandWithFatal(
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  message: string
+): void {
+  emitFatal(controller, message);
+  controller.enqueue(flushPkt());
+  controller.close();
+}
+
 export async function pipePackWithSideband(
   packStream: ReadableStream<Uint8Array>,
   controller: ReadableStreamDefaultController<Uint8Array>,
@@ -160,9 +169,6 @@ export async function pipePackWithSideband(
     controller.enqueue(flushPkt());
   } catch (error) {
     log.error("pipe:error", { error: String(error) });
-    try {
-      emitFatal(controller, String(error));
-    } catch {}
     throw error;
   }
 }

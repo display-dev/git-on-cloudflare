@@ -110,3 +110,7 @@ export function nativeReceiveOperationView(
 export function isNativeReceiveTerminal(state: NativeReceiveOperationState): boolean {
   return state === "committed" || state === "aborted" || state === "failed";
 }
+
+export function isValidNativeReceiveOperationId(value: string): boolean {
+  return /^[A-Za-z0-9_-]{1,100}$/.test(value);
+}

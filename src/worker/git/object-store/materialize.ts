@@ -102,6 +102,8 @@ async function materializeCandidate(
         limiter: options.limiter,
         countSubrequest: options.countSubrequest,
         signal: options.signal,
+        exactLength: true,
+        log: options.log,
       }
     );
     if (!entry) {

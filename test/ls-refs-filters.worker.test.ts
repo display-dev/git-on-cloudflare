@@ -157,3 +157,37 @@ it("ls-refs: peel resolves many annotated tags stored across multiple packs", as
     expect(line?.includes(`peeled:${commitOid}`), `missing peeled attr for ${tagName}`).toBe(true);
   }
 });
+
+it("ls-refs: reads authoritative refs after an accepted update instead of a shared TTL entry", async () => {
+  const owner = "o";
+  const repo = uniqueRepoId("r-lsrefs-fresh");
+  await setupRepoForTests(env, owner, repo);
+  const repoId = `${owner}/${repo}`;
+  const id = env.REPO_DO.idFromName(repoId);
+  const getStub = () => env.REPO_DO.get(id);
+  const { commitOid } = await runDOWithRetry(getStub, (instance) => instance.seedMinimalRepo());
+  const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+  const request = () =>
+    workerExports.default.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        "Git-Protocol": "version=2",
+      },
+      body: toRequestBody(buildLsRefsBody(["ref-prefix refs/heads/"])),
+    });
+
+  const initial = decodePktLinePayloads(new Uint8Array(await (await request()).arrayBuffer()));
+  expect(initial.some((line) => line.startsWith(`${commitOid} refs/heads/main`))).toBe(true);
+
+  const nextOid = "2".repeat(40);
+  expect(
+    await runDOWithRetry(getStub, (instance) =>
+      instance.setRefs([{ name: "refs/heads/main", oid: nextOid }])
+    )
+  ).toBe(true);
+
+  const updated = decodePktLinePayloads(new Uint8Array(await (await request()).arrayBuffer()));
+  expect(updated.some((line) => line.startsWith(`${nextOid} refs/heads/main`))).toBe(true);
+  expect(updated.some((line) => line.startsWith(`${commitOid} refs/heads/main`))).toBe(false);
+});

@@ -54,6 +54,19 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
 - **`POST /:owner/:repo/git-receive-pack`**  
   Push objects. The Worker writes `.pack` and `.idx` to R2 and commits metadata atomically via DO RPCs. One active receive lease at a time; concurrent pushes receive `503 Retry-After: 10`. Requires HTTP Basic credentials where the username matches `:owner` and the password is a PAT with `level: "push"`.
 
+  Display-managed native clients may send `X-Display-Operation-ID` with 1–100
+  letters, digits, `_`, or `-`. The header is accepted only when the Container
+  receive path is enabled and the command set contains a non-delete update. On
+  an ambiguous response, query the outcome before retrying; reusing an ID for a
+  different receive returns `409`.
+
+- **`GET /_internal/receives/:owner/:repo/:operationId`**
+  Bearer-authenticated, no-store reconciliation for a Display-managed native
+  receive. Returns `202` while durable processing is active, `200` for a
+  terminal ledger result, `404` when no operation exists, and `503` when the
+  authoritative Durable Object cannot be queried. Authentication runs before
+  repository lookup.
+
 ## Web UI Routes
 
 - **`GET /`**  

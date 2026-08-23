@@ -204,6 +204,7 @@ class BufferedPackReader {
   private chunkSize: number;
   private limiter: IndexerOptions["limiter"];
   private countSub: IndexerOptions["countSubrequest"];
+  private log: IndexerOptions["log"];
   private signal?: AbortSignal;
 
   /** Current in-memory buffer. */
@@ -220,6 +221,7 @@ class BufferedPackReader {
     this.chunkSize = opts.chunkSize ?? DEFAULT_CHUNK_SIZE;
     this.limiter = opts.limiter;
     this.countSub = opts.countSubrequest;
+    this.log = opts.log;
     this.signal = opts.signal;
   }
 
@@ -253,6 +255,8 @@ class BufferedPackReader {
         limiter: this.limiter,
         countSubrequest: this.countSub,
         signal: this.signal,
+        exactLength: true,
+        log: this.log,
       });
       if (!chunk) throw new Error("scan: unexpected R2 read failure");
 
@@ -471,6 +475,8 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
     limiter: opts.limiter,
     countSubrequest: opts.countSubrequest,
     signal: opts.signal,
+    exactLength: true,
+    log: opts.log,
   });
   if (!trailer || trailer.length !== PACK_TRAILER_BYTES) {
     throw new Error("scan: failed to read pack trailer checksum");

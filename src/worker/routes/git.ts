@@ -13,7 +13,6 @@ import { loadPeeledTagTargets } from "@/worker/git/object-store";
 import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream";
 import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
 import { asBodyInit, gunzip } from "@/worker/common";
-import { buildCacheKeyFrom, cacheOrLoadJSONForRequest } from "@/worker/cache";
 import { markRequestPrivate, responseCacheControl } from "@/worker/cache/policy";
 import { isValidOwnerRepo } from "@/shared/web";
 import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
@@ -122,13 +121,12 @@ export async function handleUploadPackPOST(
       const result = await getHeadAndRefs(env, route.doName, cacheCtx);
       return { head: result.head, refs: result.refs };
     };
-    const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", { repo: route.doName });
     let refsData: { head: HeadInfo | undefined; refs: Ref[] } | null;
     try {
-      refsData = await cacheOrLoadJSONForRequest<{
-        head: HeadInfo | undefined;
-        refs: Ref[];
-      }>(cacheCtx, cacheKeyRefs, loader, 60);
+      // Ref advertisements are authority reads. A shared TTL cache can expose
+      // an accepted write as stale to an immediate fetch, so keep only the
+      // request-local DO/cache context used by getHeadAndRefs itself.
+      refsData = await loader();
     } catch {
       return new Response("Repository metadata unavailable\n", {
         status: 503,

@@ -1,5 +1,8 @@
 import type { Logger } from "@/worker/common/logger";
-import { isNativeReceiveTerminal } from "@/worker/git/nativeReceive/types";
+import {
+  isNativeReceiveTerminal,
+  type NativeReceiveOperation,
+} from "@/worker/git/nativeReceive/types";
 import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits";
 import { doPrefix, nativeReceiveInputPackKey } from "@/worker/keys";
 
@@ -33,8 +36,26 @@ export async function clearExpiredLeases(
       });
       logger?.debug("lease:recovery-pending", { kind: "receive" });
     } else {
-      const nativeOperation = await store.get(nativeReceiveOperationKey(receiveLease.token));
-      if (!nativeOperation) {
+      const nativeOperationIds = (await store.get("nativeReceiveOperationIndex")) ?? [];
+      let nativeOperation: NativeReceiveOperation | undefined;
+      for (const operationId of nativeOperationIds) {
+        const candidate = await store.get(nativeReceiveOperationKey(operationId));
+        if (
+          candidate?.leaseToken === receiveLease.token &&
+          !isNativeReceiveTerminal(candidate.state)
+        ) {
+          nativeOperation = candidate;
+          break;
+        }
+      }
+      if (nativeOperation) {
+        await store.put("receiveLease", {
+          ...receiveLease,
+          expiresAt: now + RECEIVE_LEASE_TTL_MS,
+        });
+        logger?.debug("lease:native-recovery-pending", { kind: "receive" });
+        await scheduleAlarmIfSooner(ctx, env, now + 1_000, now);
+      } else {
         const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
         try {
           await limiter.run("r2:delete-orphan-native-receive-input", async () => {
@@ -55,9 +76,9 @@ export async function clearExpiredLeases(
           await scheduleAlarmIfSooner(ctx, env, now + 1_000, now);
           return;
         }
+        await store.delete("receiveLease");
+        logger?.debug("lease:expired", { kind: "receive" });
       }
-      await store.delete("receiveLease");
-      logger?.debug("lease:expired", { kind: "receive" });
     }
   }
 

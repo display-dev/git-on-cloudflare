@@ -1,7 +1,10 @@
-import { it, expect, describe } from "vitest";
+import { afterEach, it, expect, describe } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/worker/git";
-import { handleFetchV2Streaming } from "@/worker/git/operations/uploadStream";
+import {
+  __test as uploadStreamTest,
+  handleFetchV2Streaming,
+} from "@/worker/git/operations/uploadStream";
 import {
   buildServeUploadPackPlan,
   loadUploadPackSnapshot,
@@ -17,6 +20,8 @@ import { makeTracingLimiter } from "./util/pack-indexer.helpers";
 import { buildAppendOnlyDelta, buildCopyPrefixDelta, buildPack } from "./util/git-pack";
 import { seedPackedRepoState } from "./util/packed-repo";
 import { computeOid, encodeGitObject } from "@/worker/git/core/objects";
+import { readExactPackRangeWithRetry, readPackRange } from "@/worker/git/pack/packMeta";
+import { closeSidebandWithFatal } from "@/worker/git/operations/fetch/sideband";
 
 function buildFetchBody({
   wants,
@@ -36,6 +41,8 @@ function buildFetchBody({
   chunks.push(flushPkt());
   return concatChunks(chunks);
 }
+
+afterEach(() => uploadStreamTest.reset());
 
 /**
  * Find the index of a byte sequence within a Uint8Array
@@ -128,6 +135,139 @@ async function expectRetryThenBackfillRepair(args: {
 }
 
 describe("git fetch streaming (default)", () => {
+  it("retries a transient or short R2 range before returning exact bytes", async () => {
+    let attempts = 0;
+    const expected = new Uint8Array([1, 2, 3]);
+    const result = await readExactPackRangeWithRetry(async () => {
+      attempts++;
+      if (attempts === 1) throw new Error("transient R2 read");
+      if (attempts === 2) return expected.subarray(0, 2);
+      return expected;
+    }, expected.byteLength);
+
+    expect(result).toEqual(expected);
+    expect(attempts).toBe(3);
+  });
+
+  it("retries an exact production R2 range and rejects a persistently short response", async () => {
+    const key = `test/range-${crypto.randomUUID()}.pack`;
+    await env.REPO_BUCKET.put(key, new Uint8Array([1, 2]));
+    let attempts = 0;
+    await expect(
+      readPackRange(env, key, 0, 3, {
+        exactLength: true,
+        countSubrequest: () => {
+          attempts++;
+        },
+      })
+    ).rejects.toThrow("R2 range returned 2 of 3 bytes");
+    expect(attempts).toBe(3);
+    await env.REPO_BUCKET.delete(key);
+  });
+
+  it("finishes an already-started fetch with a Git fatal packet instead of resetting HTTP/2", async () => {
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          closeSidebandWithFatal(controller, "range read exhausted");
+        },
+      })
+    );
+    const lines = decodePktLines(new Uint8Array(await response.arrayBuffer()));
+    const fatal = lines.find((line) => line.type === "line" && line.raw?.[0] === 0x03);
+    if (!fatal || fatal.type !== "line" || !fatal.raw) {
+      throw new Error("expected a sideband fatal packet");
+    }
+    expect(new TextDecoder().decode(fatal.raw.subarray(1))).toContain(
+      "fatal: range read exhausted"
+    );
+    expect(lines.at(-1)).toEqual({ type: "flush" });
+  });
+
+  it("closes an actual post-start assembly failure with one fatal packet and a flush", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("streaming-fatal");
+    await setupRepoForTests(env, owner, repo);
+    const id = env.REPO_DO.idFromName(`${owner}/${repo}`);
+    const { commitOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    uploadStreamTest.setResolvePackStreamResult(async () => ({
+      status: "failed",
+      failure: { reason: "injected-range-exhausted", retryable: true },
+    }));
+
+    const response = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/git-upload-pack`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          "Git-Protocol": "version=2",
+        },
+        body: asBufferSource(buildFetchBody({ wants: [commitOid], done: true })),
+      }
+    );
+    expect(response.status).toBe(200);
+    const lines = decodePktLines(new Uint8Array(await response.arrayBuffer()));
+    const fatalLines = lines.filter((line) => line.type === "line" && line.raw?.[0] === 0x03);
+    expect(fatalLines).toHaveLength(1);
+    const fatal = fatalLines[0];
+    if (!fatal || fatal.type !== "line" || !fatal.raw) {
+      throw new Error("expected a sideband fatal packet");
+    }
+    expect(new TextDecoder().decode(fatal.raw.subarray(1))).toContain(
+      "Unable to assemble pack: injected-range-exhausted"
+    );
+    expect(lines.at(-1)).toEqual({ type: "flush" });
+  });
+
+  it("closes an actual stream failure after pack bytes with one fatal packet and a flush", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("streaming-partial-fatal");
+    await setupRepoForTests(env, owner, repo);
+    const id = env.REPO_DO.idFromName(`${owner}/${repo}`);
+    const { commitOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    uploadStreamTest.setResolvePackStreamResult(async () => ({
+      status: "ok",
+      addedDeltaBases: 0,
+      stream: new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (controller.desiredSize !== null && controller.desiredSize >= 0) {
+            controller.enqueue(new Uint8Array([1, 2, 3]));
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            controller.error(new Error("injected stream truncation"));
+          }
+        },
+      }),
+    }));
+
+    const response = await workerExports.default.fetch(
+      `https://example.com/${owner}/${repo}/git-upload-pack`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-upload-pack-request",
+          "Git-Protocol": "version=2",
+        },
+        body: asBufferSource(buildFetchBody({ wants: [commitOid], done: true })),
+      }
+    );
+    expect(response.status).toBe(200);
+    const lines = decodePktLines(new Uint8Array(await response.arrayBuffer()));
+    const packIndex = lines.findIndex((line) => line.type === "line" && line.raw?.[0] === 0x01);
+    const fatals = lines.filter((line) => line.type === "line" && line.raw?.[0] === 0x03);
+    const fatalIndex = lines.findIndex((line) => line.type === "line" && line.raw?.[0] === 0x03);
+    expect(packIndex).toBeGreaterThanOrEqual(0);
+    expect(fatals).toHaveLength(1);
+    expect(fatalIndex).toBeGreaterThan(packIndex);
+    expect(lines.at(-1)).toEqual({ type: "flush" });
+  });
+
   it("handles fetch with streaming by default", async () => {
     const owner = "o";
     const repo = uniqueRepoId("streaming");

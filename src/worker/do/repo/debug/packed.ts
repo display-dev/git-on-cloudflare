@@ -60,7 +60,9 @@ async function readPackedObjectFromLocation(
   try {
     const entryLength = location.nextOffset - location.offset;
     if (entryLength <= 0) return undefined;
-    const entry = await readPackRange(env, location.pack.packKey, location.offset, entryLength);
+    const entry = await readPackRange(env, location.pack.packKey, location.offset, entryLength, {
+      exactLength: true,
+    });
     if (!entry) return undefined;
 
     const header = readPackHeaderExFromBuf(entry, 0);

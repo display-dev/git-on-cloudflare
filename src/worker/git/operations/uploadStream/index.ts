@@ -16,13 +16,24 @@ import {
 } from "../fetch/plan";
 import { resolvePackStreamResult } from "../fetch/execute";
 import {
+  closeSidebandWithFatal,
   SidebandProgressMux,
   emitProgress,
-  emitFatal,
   pipePackWithSideband,
 } from "../fetch/sideband";
 
 export * from "../fetch/types";
+
+let resolvePackForStream: typeof resolvePackStreamResult = resolvePackStreamResult;
+
+export const __test = {
+  setResolvePackStreamResult(value: typeof resolvePackStreamResult): void {
+    resolvePackForStream = value;
+  },
+  reset(): void {
+    resolvePackForStream = resolvePackStreamResult;
+  },
+};
 
 function fetchPlanRetryResponse(error: FetchPlanRetryError): Response {
   return new Response("Repository fetch planning is not ready, please retry in a few moments.\n", {
@@ -110,7 +121,7 @@ export async function handleFetchV2Streaming(
 
         const progressMux = new SidebandProgressMux();
         const limiter = getLimiter(plan.cacheCtx);
-        const packResult = await resolvePackStreamResult(env, plan, {
+        const packResult = await resolvePackForStream(env, plan, {
           signal: plan.signal,
           limiter,
           countSubrequest: (n?: number) => countSubrequest(plan.cacheCtx, n),
@@ -124,8 +135,10 @@ export async function handleFetchV2Streaming(
             retryable: packResult.failure.retryable,
             details: packResult.failure.details,
           });
-          emitFatal(controller, `Unable to assemble pack: ${packResult.failure.reason}`);
-          controller.close();
+          closeSidebandWithFatal(
+            controller,
+            `Unable to assemble pack: ${packResult.failure.reason}`
+          );
           return;
         }
 
@@ -139,9 +152,13 @@ export async function handleFetchV2Streaming(
       } catch (error) {
         streamLog.error("stream:response:error", { error: String(error) });
         try {
-          emitFatal(controller, String(error));
-        } catch {}
-        controller.error(error);
+          // HTTP headers and possibly pack bytes are already committed.
+          // Closing with a complete band-3 packet gives Git a conclusive
+          // protocol error; controller.error() resets HTTP/2 and hides it.
+          closeSidebandWithFatal(controller, String(error));
+        } catch {
+          controller.close();
+        }
       }
     },
   });

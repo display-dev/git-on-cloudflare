@@ -198,6 +198,7 @@ async function assertBenchmarkBlobSize(
     {
       limiter: c.var.limiter,
       countSubrequest: () => countSubrequest(cacheCtx),
+      exactLength: true,
     }
   );
   const header = headerBytes ? readPackHeaderExFromBuf(headerBytes, 0) : null;

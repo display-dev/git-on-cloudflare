@@ -1,10 +1,49 @@
 import { bytesToHex } from "@/worker/common";
+import type { Logger } from "@/worker/common/logger";
 
 export type PackReadOptions = {
   limiter?: { run<T>(label: string, fn: () => Promise<T>): Promise<T> };
   countSubrequest?: (n?: number) => boolean | void;
   signal?: AbortSignal;
+  log?: Logger;
+  exactLength?: boolean;
 };
+
+const RANGE_READ_ATTEMPTS = 3;
+const RANGE_READ_RETRY_MS = 100;
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export async function readExactPackRangeWithRetry(
+  readAttempt: () => Promise<Uint8Array | undefined>,
+  expectedLength: number,
+  options?: Pick<PackReadOptions, "signal" | "log"> & {
+    retryContext?: () => Promise<Record<string, unknown>>;
+  }
+): Promise<Uint8Array | undefined> {
+  for (let attempt = 1; attempt <= RANGE_READ_ATTEMPTS; attempt++) {
+    if (options?.signal?.aborted) return undefined;
+    try {
+      const bytes = await readAttempt();
+      if (!bytes || bytes.byteLength === expectedLength) return bytes;
+      throw new Error(`R2 range returned ${bytes.byteLength} of ${expectedLength} bytes`);
+    } catch (error) {
+      if (options?.signal?.aborted) return undefined;
+      if (attempt === RANGE_READ_ATTEMPTS) throw error;
+      const context = options?.retryContext ? await options.retryContext() : {};
+      options?.log?.warn("r2:range-read-retry", {
+        attempt,
+        length: expectedLength,
+        ...context,
+        error: String(error),
+      });
+      await delay(RANGE_READ_RETRY_MS * attempt);
+    }
+  }
+  return undefined;
+}
 
 export type PackHeaderEx = {
   type: number;
@@ -38,17 +77,27 @@ export async function readPackRange(
 ): Promise<Uint8Array | undefined> {
   if (options?.signal?.aborted) return undefined;
 
-  const run = async () => {
-    const obj = await env.REPO_BUCKET.get(key, { range: { offset, length } });
-    if (!obj) return undefined;
-    return new Uint8Array(await obj.arrayBuffer());
+  const read = async () => {
+    const run = async () => {
+      const obj = await env.REPO_BUCKET.get(key, { range: { offset, length } });
+      if (!obj) return undefined;
+      return new Uint8Array(await obj.arrayBuffer());
+    };
+    options?.countSubrequest?.();
+    return options?.limiter ? await options.limiter.run("r2:get-range", run) : await run();
   };
 
-  if (options?.limiter) {
-    options.countSubrequest?.();
-    return await options.limiter.run("r2:get-range", run);
-  }
-  return await run();
+  if (!options?.exactLength) return await read();
+  return await readExactPackRangeWithRetry(read, length, {
+    ...options,
+    retryContext: async () => {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+      return {
+        packKeyHash: bytesToHex(new Uint8Array(digest)).slice(0, 12),
+        offset,
+      };
+    },
+  });
 }
 
 /**

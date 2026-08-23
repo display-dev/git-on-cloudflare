@@ -5,10 +5,12 @@ import type { BeginReceiveResult } from "@/worker/do/repo/catalog/shared";
 import { acceptedWriteFactsForCommands } from "@/worker/git/acceptedWrite";
 import { fingerprintNativeReceive } from "@/worker/git/nativeReceive/fingerprint";
 import {
+  isValidNativeReceiveOperationId,
   isNativeReceiveTerminal,
   type EnqueueNativeReceiveResult,
   type MatchNativeReceiveOperationResult,
   type NativeReceiveOperation,
+  type NativeReceiveOperationView,
 } from "@/worker/git/nativeReceive/types";
 import { countSubrequest } from "@/worker/git/operations/limits";
 import { isValidRefName, validateReceiveCommands } from "@/worker/git/operations/validation";
@@ -57,10 +59,6 @@ function noStoreJson(body: unknown, status: number): Response {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 }
 
-function validOperationId(value: string): boolean {
-  return /^[A-Za-z0-9_-]{1,100}$/.test(value);
-}
-
 async function sha256(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", asBufferSource(bytes));
@@ -71,7 +69,11 @@ async function resolveImportContext(c: AppContext) {
   const owner = c.req.param("owner") ?? "";
   const repo = c.req.param("repo") ?? "";
   const operationId = c.req.param("operationId") ?? "";
-  if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo) || !validOperationId(operationId)) {
+  if (
+    !isValidOwnerRepo(owner) ||
+    !isValidOwnerRepo(repo) ||
+    !isValidNativeReceiveOperationId(operationId)
+  ) {
     return null;
   }
   const route = await resolveRepositoryRoute(c.env, owner, repo, {
@@ -86,7 +88,7 @@ async function handlePrepareImport(c: AppContext): Promise<Response> {
   const auth = await authorizeInternalRequest(c);
   if (auth) return auth;
   const resolved = await resolveImportContext(c);
-  if (!resolved) return new Response("Not found\n", { status: 404 });
+  if (!resolved) return noStoreJson({ error: "Not found" }, 404);
   return noStoreJson(
     {
       operationId: resolved.operationId,
@@ -101,7 +103,7 @@ async function handleCommitImport(c: AppContext): Promise<Response> {
   const auth = await authorizeInternalRequest(c);
   if (auth) return auth;
   const resolved = await resolveImportContext(c);
-  if (!resolved) return new Response("Not found\n", { status: 404 });
+  if (!resolved) return noStoreJson({ error: "Not found" }, 404);
 
   const contentLength = Number(c.req.header("Content-Length"));
   if (!Number.isSafeInteger(contentLength) || contentLength <= 0) {
@@ -220,16 +222,31 @@ async function handleCommitImport(c: AppContext): Promise<Response> {
   return noStoreJson(enqueued.operation, 202);
 }
 
-async function handleGetImport(c: AppContext): Promise<Response> {
+async function handleGetNativeOperation(c: AppContext): Promise<Response> {
   const auth = await authorizeInternalRequest(c);
   if (auth) return auth;
   const resolved = await resolveImportContext(c);
-  if (!resolved) return new Response("Not found\n", { status: 404 });
+  if (!resolved) return noStoreJson({ error: "Not found" }, 404);
   const stub = getRepoStub(c.env, resolved.route.doName);
-  const operation = await c.var.limiter.run("do:get-native-import", () =>
-    stub.getNativeReceiveOperation(resolved.operationId)
-  );
-  if (!operation) return new Response("Not found\n", { status: 404 });
+  const log = c.var.logFor({ service: "NativeReceiveQuery" });
+  if (!countSubrequest(c.var.cacheCtx, 1)) {
+    log.warn("native-receive-query:budget-exhausted");
+    return noStoreJson({ error: "Native receive query is temporarily unavailable" }, 503);
+  }
+  let operation: NativeReceiveOperationView | null | undefined;
+  try {
+    operation = await c.var.limiter.run("do:get-native-receive", () =>
+      stub.getNativeReceiveOperation(resolved.operationId)
+    );
+  } catch (error) {
+    log.error("native-receive-query:failed", { error: String(error) });
+    return noStoreJson({ error: "Native receive query is temporarily unavailable" }, 503);
+  }
+  if (!operation) return noStoreJson({ error: "Not found" }, 404);
+  log.info("native-receive-query:resolved", {
+    state: operation.state,
+    terminal: isNativeReceiveTerminal(operation.state),
+  });
   return noStoreJson(operation, isNativeReceiveTerminal(operation.state) ? 200 : 202);
 }
 
@@ -237,5 +254,8 @@ export function registerNativeImportRoutes(router: AppRouter): void {
   const path = "/_internal/imports/:owner/:repo/:operationId";
   router.post(`${path}/prepare`, handlePrepareImport);
   router.post(path, handleCommitImport);
-  router.get(path, handleGetImport);
+  router.get(path, handleGetNativeOperation);
+  // Smart HTTP clients can supply the same operation id through the
+  // X-Display-Operation-ID header, then reconcile a lost response here.
+  router.get("/_internal/receives/:owner/:repo/:operationId", handleGetNativeOperation);
 }

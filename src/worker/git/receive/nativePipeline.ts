@@ -31,6 +31,12 @@ import {
 
 const NATIVE_RECEIVE_WAIT_MS = 30 * 60_000;
 
+function indeterminateMessage(hasStableOperationId: boolean): string {
+  return hasStableOperationId
+    ? "Native receive dispatch may be durable; query the authenticated operation outcome before retrying."
+    : "Native receive dispatch may be durable; retry the identical update to resolve its outcome.";
+}
+
 type RepoStub = DurableObjectStub<RepoDurableObject>;
 
 type ExecuteNativeReceivePipelineArgs = {
@@ -41,6 +47,7 @@ type ExecuteNativeReceivePipelineArgs = {
   bytesConsumed: number;
   stub: RepoStub;
   leaseToken: string;
+  operationId?: string | undefined;
   activeCatalog: PackCatalogRow[];
   commands: ReceiveCommand[];
   acceptedWrites: AcceptedWriteFact[];
@@ -108,9 +115,16 @@ function resultFromOperation(
 export async function executeNativeReceivePipeline(
   args: ExecuteNativeReceivePipelineArgs
 ): Promise<ReceivePipelineResult> {
-  const operationId = args.leaseToken;
+  // Display-managed clients supply a stable id so a disconnected caller can
+  // query the durable result. Plain Git clients retain the lease-token
+  // fallback and existing behavior.
+  const operationId = args.operationId ?? args.leaseToken;
   const prefix = doPrefix(args.stub.id.toString());
-  const inputPackKey = nativeReceiveInputPackKey(prefix, operationId);
+  // Keep pre-enqueue input ownership tied to the receive lease. Alarm cleanup
+  // can then remove an input even if the Worker dies before a durable native
+  // operation record exists; the client operation id is only reconciliation
+  // identity.
+  const inputPackKey = nativeReceiveInputPackKey(prefix, args.leaseToken);
   let enqueued = false;
   let operationFingerprint: string | undefined;
 
@@ -198,7 +212,9 @@ export async function executeNativeReceivePipeline(
     }
 
     throw new NativeReceiveIndeterminateError(
-      "Native Git processing remains durable but its terminal outcome is not yet known."
+      args.operationId
+        ? "Native Git processing remains durable; query the authenticated operation outcome."
+        : "Native Git processing remains durable but its terminal outcome is not yet known."
     );
   } catch (error) {
     if (!enqueued && operationFingerprint) {
@@ -209,10 +225,10 @@ export async function executeNativeReceivePipeline(
           "do:match-native-receive-after-enqueue-error",
           () => args.stub.matchNativeReceiveOperation(operationId, fingerprint)
         );
-        // A matching or conflicting durable record makes local deletion
-        // unsafe. The operation id is the receive lease token, so either state
-        // must be reconciled by an identical retry rather than guessed here.
-        enqueued = matched.status !== "not_found";
+        // Only an exact durable match owns this staged input. A conflict is a
+        // conclusive rejection of the current receive: abort its lease, delete
+        // its lease-owned input, and preserve the original 409 response.
+        enqueued = matched.status === "match";
       } catch {
         // A failed reconciliation RPC is itself ambiguous. Preserve the staged
         // input and lease so an identical retry can resolve authoritative DO
@@ -242,9 +258,7 @@ export async function executeNativeReceivePipeline(
       error: String(error),
     });
     if (enqueued && !(error instanceof NativeReceiveIndeterminateError)) {
-      throw new NativeReceiveIndeterminateError(
-        "Native receive dispatch may be durable; retry the identical update to resolve its outcome."
-      );
+      throw new NativeReceiveIndeterminateError(indeterminateMessage(Boolean(args.operationId)));
     }
     throw error;
   }

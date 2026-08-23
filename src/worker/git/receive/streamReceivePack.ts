@@ -18,6 +18,7 @@ import { isValidRefName, validateReceiveCommands } from "@/worker/git/operations
 import { logOnce } from "@/worker/git/object-store/support";
 import { executeReceivePipeline } from "./pipeline";
 import { executeNativeReceivePipeline } from "./nativePipeline";
+import { isValidNativeReceiveOperationId } from "@/worker/git/nativeReceive/types";
 import { NativeReceiveIndeterminateError, ReceivePipelineHttpError } from "./pipelineTypes";
 import { readPktSectionStream } from "./pktSectionStream";
 import {
@@ -39,6 +40,7 @@ import {
 } from "./support";
 
 const RECEIVE_SUBREQUEST_BUDGET = 5_000;
+const NATIVE_RECEIVE_OPERATION_HEADER = "X-Display-Operation-ID";
 
 type RepoStub = DurableObjectStub<RepoDurableObject>;
 export type RepoStateChangeHandler = (change: {
@@ -146,6 +148,7 @@ function createSidebandReceiveResponse(args: {
   cacheCtx: CacheContext;
   limiter: Limiter;
   leaseToken: string;
+  operationId?: string | undefined;
   activeCatalog: PackCatalogRow[];
   commands: ParsedReceiveRequest["commands"];
   acceptedWrites: AcceptedWriteFact[];
@@ -184,6 +187,7 @@ function createSidebandReceiveResponse(args: {
           bytesConsumed: args.bytesConsumed,
           stub: args.stub,
           leaseToken: args.leaseToken,
+          operationId: args.operationId,
           activeCatalog: args.activeCatalog,
           commands: args.commands,
           acceptedWrites: args.acceptedWrites,
@@ -282,6 +286,19 @@ export async function handleStreamingReceivePackPOST(
   const limiter = options?.limiter ?? cacheCtx.memo?.limiter;
   if (!limiter) throw new Error("receive request limiter is required");
 
+  const requestedOperationIdHeader = request.headers.get(NATIVE_RECEIVE_OPERATION_HEADER);
+  const requestedOperationId = requestedOperationIdHeader?.trim();
+  if (
+    requestedOperationIdHeader !== null &&
+    !isValidNativeReceiveOperationId(requestedOperationId ?? "")
+  ) {
+    logReceiveEnd(log, 400, { reason: "invalid-native-operation-id" });
+    return new Response("Invalid native receive operation id.\n", {
+      status: 400,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+    });
+  }
+
   countReceiveSubrequest(cacheCtx, log, "do:begin-receive");
   const begin = await limiter.run<BeginReceiveResult>(
     "do:begin-receive",
@@ -312,6 +329,21 @@ export async function handleStreamingReceivePackPOST(
         })
       : [];
     const responseMode = selectReceiveResponseMode(parsedRequest.capabilities);
+
+    if (requestedOperationId && !useNativeReceive(env, parsedRequest.commands)) {
+      countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
+      await limiter
+        .run("do:abort-receive", () => stub.abortReceive(begin.lease.token))
+        .catch(() => {});
+      logReceiveEnd(log, 409, { reason: "native-operation-id-unavailable" });
+      return new Response(
+        "A durable operation id requires a native receive with at least one non-delete update.\n",
+        {
+          status: 409,
+          headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+        }
+      );
+    }
 
     const invalidCommand = parsedRequest.commands.find((command) => !isValidRefName(command.ref));
     if (invalidCommand) {
@@ -358,6 +390,7 @@ export async function handleStreamingReceivePackPOST(
         cacheCtx,
         limiter,
         leaseToken: begin.lease.token,
+        operationId: requestedOperationId,
         activeCatalog: begin.activeCatalog,
         commands: parsedRequest.commands,
         acceptedWrites,
@@ -381,6 +414,7 @@ export async function handleStreamingReceivePackPOST(
       bytesConsumed,
       stub,
       leaseToken: begin.lease.token,
+      operationId: requestedOperationId,
       activeCatalog: begin.activeCatalog,
       commands: parsedRequest.commands,
       acceptedWrites,

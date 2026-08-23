@@ -359,6 +359,8 @@ async function loadWholePack(
   return await readPackRange(env, pack.packKey, 0, pack.packBytes, {
     limiter: getRequiredLimiter(options),
     signal: options?.signal,
+    log,
+    exactLength: true,
     countSubrequest: (n?: number) =>
       countRewriteSubrequest(
         log,

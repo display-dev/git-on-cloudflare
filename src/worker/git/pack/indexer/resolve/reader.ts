@@ -57,6 +57,8 @@ export class SequentialReader {
         limiter: this.limiter,
         countSubrequest: this.countSub,
         signal: this.signal,
+        exactLength: true,
+        log: this.log,
       });
       if (!data) {
         this.throwIfAborted("reader:read-range");
@@ -76,6 +78,8 @@ export class SequentialReader {
       limiter: this.limiter,
       countSubrequest: this.countSub,
       signal: this.signal,
+      exactLength: true,
+      log: this.log,
     });
     if (!data) {
       this.throwIfAborted("reader:read-range");
@@ -105,6 +109,8 @@ export class SequentialReader {
         limiter: this.limiter,
         countSubrequest: this.countSub,
         signal: this.signal,
+        exactLength: true,
+        log: this.log,
       });
       if (!data) {
         this.throwIfAborted("reader:read-window");
@@ -128,6 +134,8 @@ export class SequentialReader {
       limiter: this.limiter,
       countSubrequest: this.countSub,
       signal: this.signal,
+      exactLength: true,
+      log: this.log,
     });
     if (!chunk) {
       this.throwIfAborted("reader:preload");
