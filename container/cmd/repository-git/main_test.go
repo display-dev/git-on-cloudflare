@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -44,6 +46,30 @@ func TestBridgeFailureIsRetryable(t *testing.T) {
 	}
 }
 
+func TestProcessHandlerRejectsConcurrentOperationAsRetryable(t *testing.T) {
+	if !acquireProcessSlot() {
+		t.Fatal("processor slot unexpectedly occupied")
+	}
+	defer releaseProcessSlot()
+	requestBody, err := json.Marshal(processRequest{
+		OperationID:   "concurrent-operation",
+		InputPackKey:  "input.pack",
+		InputBytes:    1,
+		Commands:      []receiveCommand{{OldOID: strings.Repeat("0", 40), NewOID: strings.Repeat("1", 40), Ref: "refs/heads/main"}},
+		OutputPackKey: "output.pack",
+		OutputIdxKey:  "output.idx",
+		OutputRefsKey: "output.refs",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	processHandler(recorder, httptest.NewRequest(http.MethodPost, "/process", bytes.NewReader(requestBody)))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected concurrent processing to return 503, got %d", recorder.Code)
+	}
+}
+
 func TestProcessErrorCategoryDoesNotExposeGitErrorDetails(t *testing.T) {
 	privateDetail := "fatal: object deadbeefdeadbeefdeadbeefdeadbeefdeadbeef is missing"
 	if category := processErrorCategory(errors.New(privateDetail)); category != "rejected" {
@@ -57,6 +83,7 @@ func TestProcessErrorCategoryDoesNotExposeGitErrorDetails(t *testing.T) {
 type memoryBridge struct {
 	mu      sync.Mutex
 	objects map[string][]byte
+	gets    map[string]int
 }
 
 func (bridge *memoryBridge) handler(writer http.ResponseWriter, request *http.Request) {
@@ -77,6 +104,9 @@ func (bridge *memoryBridge) handler(writer http.ResponseWriter, request *http.Re
 			return
 		}
 		writer.Header().Set("Content-Length", strconv.Itoa(len(value)))
+		if bridge.gets != nil {
+			bridge.gets[key]++
+		}
 		_, _ = writer.Write(value)
 	case http.MethodPut:
 		value, readErr := io.ReadAll(request.Body)
@@ -297,4 +327,108 @@ func TestProcessPackFixesThinInputAgainstActiveCatalog(t *testing.T) {
 	gitOutput(t, restored, "update-ref", "refs/heads/main", nextOID)
 	gitOutput(t, restored, "fsck", "--full", "--no-dangling")
 	gitOutput(t, restored, "cat-file", "-e", baseOID+"^{commit}")
+}
+
+func TestProcessPackReusesImmutableActivePackCache(t *testing.T) {
+	source := t.TempDir()
+	gitOutput(t, source, "init", "-q")
+	if err := os.WriteFile(filepath.Join(source, "content.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, source, "add", "content.txt")
+	gitOutput(t, source, "commit", "-q", "-m", "base")
+	baseOID := strings.TrimSpace(string(gitOutput(t, source, "rev-parse", "HEAD")))
+	basePack := gitInput(t, source, baseOID+"\n", "pack-objects", "--stdout", "--revs")
+
+	indexDir := t.TempDir()
+	activePackPath := filepath.Join(indexDir, "active.pack")
+	activeIdxPath := filepath.Join(indexDir, "active.idx")
+	if err := os.WriteFile(activePackPath, basePack, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, indexDir, "index-pack", "-o", activeIdxPath, activePackPath)
+	activeIdx, err := os.ReadFile(activeIdxPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(source, "content.txt"), []byte("base\nnext\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitOutput(t, source, "commit", "-q", "-am", "next")
+	nextOID := strings.TrimSpace(string(gitOutput(t, source, "rev-parse", "HEAD")))
+	thinPack := gitInput(t, source, nextOID+"\n^"+baseOID+"\n", "pack-objects", "--stdout", "--revs", "--thin")
+
+	bridge := &memoryBridge{objects: map[string][]byte{
+		"active.pack": basePack,
+		"active.idx":  activeIdx,
+		"input.pack":  thinPack,
+	}, gets: map[string]int{}}
+	server := httptest.NewServer(http.HandlerFunc(bridge.handler))
+	defer server.Close()
+	client := bridgeClient{client: server.Client(), baseURL: server.URL + "/r2/"}
+	request := processRequest{
+		OperationID:   "cache-first",
+		InputPackKey:  "input.pack",
+		InputBytes:    int64(len(thinPack)),
+		ActivePacks:   []packInput{{PackKey: "active.pack", PackBytes: int64(len(basePack)), IdxBytes: int64(len(activeIdx))}},
+		Commands:      []receiveCommand{{OldOID: baseOID, NewOID: nextOID, Ref: "refs/heads/main"}},
+		OutputPackKey: "output-first.pack",
+		OutputIdxKey:  "output-first.idx",
+		OutputRefsKey: "output-first.refs",
+	}
+	cacheRoot := t.TempDir()
+	first, err := processPackWithBridgeAtCache(context.Background(), request, client, cacheRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.OperationID = "cache-second"
+	request.OutputPackKey = "output-second.pack"
+	request.OutputIdxKey = "output-second.idx"
+	request.OutputRefsKey = "output-second.refs"
+	second, err := processPackWithBridgeAtCache(context.Background(), request, client, cacheRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bridge.gets["active.pack"] != 1 || bridge.gets["active.idx"] != 1 {
+		t.Fatalf("active artifacts were downloaded more than once: %+v", bridge.gets)
+	}
+	expectedActiveBytes := int64(len(basePack) + len(activeIdx))
+	if first.DownloadedBytes != expectedActiveBytes+int64(len(thinPack)) || first.CacheHitBytes != 0 {
+		t.Fatalf("unexpected cold hydration metrics: %+v", first)
+	}
+	if second.DownloadedBytes != int64(len(thinPack)) || second.CacheHitBytes != expectedActiveBytes {
+		t.Fatalf("unexpected warm hydration metrics: %+v", second)
+	}
+
+	activeCachePath := cachePath(cacheRoot, "active.idx", int64(len(activeIdx)))
+	if err := os.WriteFile(activeCachePath, make([]byte, len(activeIdx)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request.OperationID = "cache-corrupt"
+	request.OutputPackKey = "output-corrupt.pack"
+	request.OutputIdxKey = "output-corrupt.idx"
+	request.OutputRefsKey = "output-corrupt.refs"
+	if _, err := processPackWithBridgeAtCache(context.Background(), request, client, cacheRoot); err == nil {
+		t.Fatal("expected same-size corrupt cache entry to fail native validation")
+	} else {
+		var transient transientProcessError
+		if !errors.As(err, &transient) {
+			t.Fatalf("corrupt warm cache must trigger a cold retry, got %v", err)
+		}
+	}
+	if _, err := os.Stat(activeCachePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupt cache entry was not evicted: %v", err)
+	}
+
+	request.OperationID = "cache-recovered"
+	request.OutputPackKey = "output-recovered.pack"
+	request.OutputIdxKey = "output-recovered.idx"
+	request.OutputRefsKey = "output-recovered.refs"
+	if _, err := processPackWithBridgeAtCache(context.Background(), request, client, cacheRoot); err != nil {
+		t.Fatalf("cache did not recover from authoritative bridge bytes: %v", err)
+	}
+	if bridge.gets["active.pack"] != 2 || bridge.gets["active.idx"] != 2 {
+		t.Fatalf("corrupt active artifacts were not re-downloaded exactly once: %+v", bridge.gets)
+	}
 }

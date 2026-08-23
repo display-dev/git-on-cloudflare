@@ -89,6 +89,8 @@ func (bridge *fileBridge) errorSummary() string {
 type scalePack struct {
 	packPath  string
 	idxPath   string
+	packKey   string
+	idxKey    string
 	packBytes int64
 	idxBytes  int64
 }
@@ -111,6 +113,9 @@ type scaleStageResult struct {
 	ObjectCount     uint32 `json:"objectCount"`
 	ScratchBytes    int64  `json:"scratchBytes"`
 	ElapsedMS       int64  `json:"elapsedMs"`
+	HydratedBytes   int64  `json:"hydratedBytes"`
+	DownloadedBytes int64  `json:"downloadedBytes"`
+	CacheHitBytes   int64  `json:"cacheHitBytes"`
 }
 
 func (bridge *fileBridge) register(key string, path string) {
@@ -282,6 +287,7 @@ func runScaleStage(t *testing.T, args struct {
 	oldOID    string
 	newOID    string
 	active    []scalePack
+	cacheRoot string
 }) (scalePack, scaleStageResult) {
 	t.Helper()
 	inputInfo, err := os.Stat(args.inputPath)
@@ -292,7 +298,7 @@ func runScaleStage(t *testing.T, args struct {
 	args.bridge.register(inputKey, args.inputPath)
 	activeInputs := make([]packInput, 0, len(args.active))
 	var activePackBytes int64
-	for index, active := range args.active {
+	for _, active := range args.active {
 		packInfo, packErr := os.Stat(active.packPath)
 		idxInfo, idxErr := os.Stat(active.idxPath)
 		if packErr != nil || idxErr != nil {
@@ -307,8 +313,8 @@ func runScaleStage(t *testing.T, args struct {
 				idxInfo.Size(),
 			)
 		}
-		packKey := fmt.Sprintf("%s-active-%02d.pack", args.name, index)
-		idxKey := strings.TrimSuffix(packKey, ".pack") + ".idx"
+		packKey := active.packKey
+		idxKey := active.idxKey
 		args.bridge.register(packKey, active.packPath)
 		args.bridge.register(idxKey, active.idxPath)
 		activeInputs = append(activeInputs, packInput{
@@ -328,7 +334,7 @@ func runScaleStage(t *testing.T, args struct {
 		OutputRefsKey: strings.TrimSuffix(outputPackKey, ".pack") + ".refs",
 	}
 	started := time.Now()
-	result, err := processPackWithBridge(args.ctx, request, args.client)
+	result, err := processPackWithBridgeAtCache(args.ctx, request, args.client, args.cacheRoot)
 	if err != nil {
 		t.Fatalf("%v; bridge=%s", err, args.bridge.errorSummary())
 	}
@@ -339,12 +345,16 @@ func runScaleStage(t *testing.T, args struct {
 	}
 	elapsedMS := time.Since(started).Milliseconds()
 	return scalePack{
-			packPath: packPath, idxPath: idxPath, packBytes: result.PackBytes, idxBytes: result.IdxBytes,
+			packPath: packPath, idxPath: idxPath,
+			packKey: request.OutputPackKey, idxKey: request.OutputIdxKey,
+			packBytes: result.PackBytes, idxBytes: result.IdxBytes,
 		}, scaleStageResult{
 			InputPackBytes: inputInfo.Size(), ActivePackBytes: activePackBytes,
 			OutputPackBytes: result.PackBytes, OutputIdxBytes: result.IdxBytes,
 			OutputRefsBytes: result.RefsBytes, ObjectCount: result.ObjectCount,
 			ScratchBytes: result.ScratchBytes, ElapsedMS: elapsedMS,
+			HydratedBytes: result.HydratedBytes, DownloadedBytes: result.DownloadedBytes,
+			CacheHitBytes: result.CacheHitBytes,
 		}
 }
 
@@ -377,6 +387,7 @@ func TestRepresentativeRepositoryScaleAndAgentChurn(t *testing.T) {
 
 	bridge := &fileBridge{root: t.TempDir(), objects: make(map[string]string)}
 	client := directFileBridgeClient{bridge: bridge}
+	cacheRoot := t.TempDir()
 	stageMetrics := make(map[string]scaleStageResult)
 	baseInput := filepath.Join(t.TempDir(), "base.pack")
 	gitToFile(t, repository, baseInput, "", "pack-objects", "--stdout", "--all")
@@ -390,7 +401,8 @@ func TestRepresentativeRepositoryScaleAndAgentChurn(t *testing.T) {
 		oldOID    string
 		newOID    string
 		active    []scalePack
-	}{ctx, bridge, client, "base", baseInput, strings.Repeat("0", 40), baseOID, nil})
+		cacheRoot string
+	}{ctx, bridge, client, "base", baseInput, strings.Repeat("0", 40), baseOID, nil, cacheRoot})
 
 	firstChurn := churnCommits / 2
 	for index := 0; index < firstChurn; index++ {
@@ -420,7 +432,8 @@ func TestRepresentativeRepositoryScaleAndAgentChurn(t *testing.T) {
 		oldOID    string
 		newOID    string
 		active    []scalePack
-	}{ctx, bridge, client, "churn-one", churnInput, baseOID, churnOID, []scalePack{basePack}})
+		cacheRoot string
+	}{ctx, bridge, client, "churn-one", churnInput, baseOID, churnOID, []scalePack{basePack}, cacheRoot})
 
 	generateBinaryRange(t, repository, baseFiles, growthFiles)
 	gitOutput(t, repository, "add", ".")
@@ -438,7 +451,8 @@ func TestRepresentativeRepositoryScaleAndAgentChurn(t *testing.T) {
 		oldOID    string
 		newOID    string
 		active    []scalePack
-	}{ctx, bridge, client, "growth", growthInput, churnOID, growthOID, []scalePack{basePack, churnPack}})
+		cacheRoot string
+	}{ctx, bridge, client, "growth", growthInput, churnOID, growthOID, []scalePack{basePack, churnPack}, cacheRoot})
 
 	for index := firstChurn; index < churnCommits; index++ {
 		path := filepath.Join(repository, fmt.Sprintf("docs/section-%03d/page-%04d.md", index%100, index%1000))
@@ -467,7 +481,8 @@ func TestRepresentativeRepositoryScaleAndAgentChurn(t *testing.T) {
 		oldOID    string
 		newOID    string
 		active    []scalePack
-	}{ctx, bridge, client, "churn-three", finalInput, growthOID, finalOID, []scalePack{basePack, churnPack, growthPack}})
+		cacheRoot string
+	}{ctx, bridge, client, "churn-three", finalInput, growthOID, finalOID, []scalePack{basePack, churnPack, growthPack}, cacheRoot})
 
 	allPacks := []scalePack{basePack, churnPack, growthPack, finalPack}
 	restored := t.TempDir()

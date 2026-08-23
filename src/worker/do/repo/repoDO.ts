@@ -50,6 +50,9 @@ import {
   rearmCompactionQueueFromAlarm,
   getActivePackCatalogSnapshot,
   getRepoActivitySnapshot,
+  getPendingGenerationPublicationState,
+  ensureGenerationPublicationPendingState,
+  completeGenerationPublicationState,
 } from "./catalog";
 import { getRefs, setRefs, resolveHead, setHead, getHeadAndRefs } from "./refs";
 import { handleIdleAndMaintenance } from "./maintenance";
@@ -81,16 +84,21 @@ import {
 import {
   beginRepositoryDeletionState,
   beginRepositoryMaintenanceState,
+  beginRepositoryReadState,
   beginSnapshotMaterializationState,
   finishSnapshotMaterializationState,
   finishRepositoryMaintenanceState,
+  finishRepositoryReadState,
   renewRepositoryMaintenanceState,
+  renewRepositoryReadState,
   renewSnapshotMaterializationState,
   type BeginRepositoryDeletionResult,
   type BeginRepositoryMaintenanceResult,
+  type BeginRepositoryReadResult,
   type BeginSnapshotMaterializationResult,
 } from "./repositoryLifecycle";
 import {
+  canDeleteSupersededGenerationState,
   enqueueNativeReceiveState,
   getNativeReceiveOperationState,
   matchNativeReceiveOperationState,
@@ -290,6 +298,24 @@ export class RepoDurableObject extends DurableObject {
       operationId,
       logger: this.logger,
     });
+  }
+
+  public async canDeleteSupersededGeneration(
+    generation?: number
+  ): Promise<{ safe: boolean; retryAfterSeconds?: number }> {
+    return await canDeleteSupersededGenerationState(this.ctx, generation);
+  }
+
+  public async getPendingGenerationPublication() {
+    return await getPendingGenerationPublicationState(this.ctx);
+  }
+
+  public async ensureGenerationPublicationPending() {
+    return await ensureGenerationPublicationPendingState(this.ctx);
+  }
+
+  public async completeGenerationPublication(generation: number): Promise<boolean> {
+    return await completeGenerationPublicationState(this.ctx, generation);
   }
 
   public async getIngestionReceipt(keyHash: string): Promise<IngestionReceipt | null> {
@@ -594,8 +620,10 @@ export class RepoDurableObject extends DurableObject {
     }
   }
 
-  public async beginRepositoryMaintenance(): Promise<BeginRepositoryMaintenanceResult> {
-    return await beginRepositoryMaintenanceState(this.ctx);
+  public async beginRepositoryMaintenance(
+    operation?: "pack-ref-backfill" | "generation-publication"
+  ): Promise<BeginRepositoryMaintenanceResult> {
+    return await beginRepositoryMaintenanceState(this.ctx, operation);
   }
 
   public async renewRepositoryMaintenance(token: string): Promise<boolean> {
@@ -604,6 +632,18 @@ export class RepoDurableObject extends DurableObject {
 
   public async finishRepositoryMaintenance(token: string): Promise<boolean> {
     return await finishRepositoryMaintenanceState(this.ctx, token);
+  }
+
+  public async beginRepositoryRead(): Promise<BeginRepositoryReadResult> {
+    return await beginRepositoryReadState(this.ctx);
+  }
+
+  public async renewRepositoryRead(token: string): Promise<boolean> {
+    return await renewRepositoryReadState(this.ctx, token);
+  }
+
+  public async finishRepositoryRead(token: string): Promise<void> {
+    await finishRepositoryReadState(this.ctx, token);
   }
 
   public async removePack(packKey: string): Promise<RemovePackResult> {

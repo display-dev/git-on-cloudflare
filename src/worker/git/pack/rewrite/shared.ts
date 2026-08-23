@@ -13,7 +13,9 @@ import { SequentialReader } from "@/worker/git/pack/indexer/resolve/reader";
 import { readPackHeaderExFromBuf, readPackRange } from "../packMeta";
 
 export const HEADER_READ_BYTES = 128;
-export const DEFAULT_CHUNK_SIZE = 4_194_304;
+// Keep a full 3 GB rewrite safely below the Workers subrequest ceiling while
+// bounding each active pack's retained read window.
+export const DEFAULT_CHUNK_SIZE = 6 * 1024 * 1024;
 export const WHOLE_PACK_MAX_BYTES = 8 * 1024 * 1024;
 export const WHOLE_PACK_TOTAL_BUDGET = 32 * 1024 * 1024;
 export const HEADER_STABILITY_CAP = 16;

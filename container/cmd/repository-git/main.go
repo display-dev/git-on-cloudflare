@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -34,11 +35,13 @@ const (
 	packRefHeaderBytes  = 4 + 4 + 4 + 8 + 20 + 20
 	objectIDBytes       = 20
 	containerHTTPClient = 30 * time.Minute
+	persistentCacheRoot = "/tmp/repository-git-cache"
 )
 
 var (
 	objectIDPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	refNamePattern  = regexp.MustCompile(`^refs/[^\x00-\x20~^:?*\\\[]+$`)
+	processSlot     = make(chan struct{}, 1)
 )
 
 type packInput struct {
@@ -65,14 +68,17 @@ type processRequest struct {
 }
 
 type processResponse struct {
-	OperationID  string `json:"operationId"`
-	PackBytes    int64  `json:"packBytes"`
-	IdxBytes     int64  `json:"idxBytes"`
-	RefsBytes    int64  `json:"refsBytes"`
-	ObjectCount  uint32 `json:"objectCount"`
-	PackSHA1     string `json:"packSha1"`
-	ElapsedMS    int64  `json:"elapsedMs"`
-	ScratchBytes int64  `json:"scratchBytes"`
+	OperationID     string `json:"operationId"`
+	PackBytes       int64  `json:"packBytes"`
+	IdxBytes        int64  `json:"idxBytes"`
+	RefsBytes       int64  `json:"refsBytes"`
+	ObjectCount     uint32 `json:"objectCount"`
+	PackSHA1        string `json:"packSha1"`
+	ElapsedMS       int64  `json:"elapsedMs"`
+	ScratchBytes    int64  `json:"scratchBytes"`
+	HydratedBytes   int64  `json:"hydratedBytes"`
+	DownloadedBytes int64  `json:"downloadedBytes"`
+	CacheHitBytes   int64  `json:"cacheHitBytes"`
 }
 
 type errorResponse struct {
@@ -140,6 +146,11 @@ func processHandler(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if !acquireProcessSlot() {
+		writeProcessError(writer, transientFailure("repository processor busy", errors.New("another operation is active")))
+		return
+	}
+	defer releaseProcessSlot()
 
 	startedAt := time.Now()
 	result, err := processPack(request.Context(), input)
@@ -155,6 +166,19 @@ func processHandler(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(writer).Encode(result)
+}
+
+func acquireProcessSlot() bool {
+	select {
+	case processSlot <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func releaseProcessSlot() {
+	<-processSlot
 }
 
 func processErrorCategory(err error) string {
@@ -223,10 +247,194 @@ func processPack(ctx context.Context, input processRequest) (processResponse, er
 		},
 		baseURL: bridgeBaseURL,
 	}
-	return processPackWithBridge(ctx, input, client)
+	return processPackWithBridgeAtCache(ctx, input, client, persistentCacheRoot)
 }
 
 func processPackWithBridge(ctx context.Context, input processRequest, client objectBridge) (processResponse, error) {
+	cacheRoot, err := os.MkdirTemp("", "repository-git-cache-test-")
+	if err != nil {
+		return processResponse{}, err
+	}
+	defer os.RemoveAll(cacheRoot)
+	return processPackWithBridgeAtCache(ctx, input, client, cacheRoot)
+}
+
+type hydrationMetrics struct {
+	hydratedBytes   int64
+	downloadedBytes int64
+	cacheHitBytes   int64
+	cacheHitPaths   []string
+}
+
+func cachePath(cacheRoot string, key string, expectedBytes int64) string {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d", key, expectedBytes)))
+	return filepath.Join(cacheRoot, hex.EncodeToString(digest[:]))
+}
+
+func ensureCachedArtifact(ctx context.Context, client objectBridge, cacheRoot string, key string, expectedBytes int64) (string, bool, error) {
+	if err := os.MkdirAll(cacheRoot, 0o700); err != nil {
+		return "", false, err
+	}
+	path := cachePath(cacheRoot, key, expectedBytes)
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Size() == expectedBytes {
+		return path, true, nil
+	} else if err == nil {
+		if removeErr := os.Remove(path); removeErr != nil {
+			return "", false, removeErr
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", false, err
+	}
+	temporary, err := os.CreateTemp(cacheRoot, ".hydrate-")
+	if err != nil {
+		return "", false, err
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return "", false, err
+	}
+	if err := os.Remove(temporaryPath); err != nil {
+		return "", false, err
+	}
+	defer os.Remove(temporaryPath)
+	if err := client.download(ctx, key, temporaryPath, expectedBytes); err != nil {
+		return "", false, err
+	}
+	if err := os.Chmod(temporaryPath, 0o600); err != nil {
+		return "", false, err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return "", false, err
+	}
+	return path, false, nil
+}
+
+func linkOrCopy(source string, destination string) error {
+	if err := os.Link(source, destination); err == nil {
+		return nil
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(output, input)
+	closeErr := output.Close()
+	if copyErr != nil {
+		_ = os.Remove(destination)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(destination)
+		return closeErr
+	}
+	return nil
+}
+
+func hydrateArtifact(ctx context.Context, client objectBridge, cacheRoot string, key string, expectedBytes int64, destination string, metrics *hydrationMetrics) error {
+	cachedPath, hit, err := ensureCachedArtifact(ctx, client, cacheRoot, key, expectedBytes)
+	if err != nil {
+		if downloadErr := client.download(ctx, key, destination, expectedBytes); downloadErr != nil {
+			return downloadErr
+		}
+		metrics.hydratedBytes += expectedBytes
+		metrics.downloadedBytes += expectedBytes
+		return nil
+	}
+	metrics.hydratedBytes += expectedBytes
+	if hit {
+		metrics.cacheHitBytes += expectedBytes
+		metrics.cacheHitPaths = append(metrics.cacheHitPaths, cachedPath)
+	} else {
+		metrics.downloadedBytes += expectedBytes
+	}
+	return linkOrCopy(cachedPath, destination)
+}
+
+func evictCacheHits(metrics hydrationMetrics) {
+	for _, path := range metrics.cacheHitPaths {
+		_ = os.Remove(path)
+	}
+}
+
+func failAfterHydration(metrics hydrationMetrics, stage string, err error) error {
+	if metrics.cacheHitBytes == 0 {
+		return err
+	}
+	evictCacheHits(metrics)
+	return transientFailure(stage, err)
+}
+
+func retainOutputInCache(cacheRoot string, key string, expectedBytes int64, source string) error {
+	if err := os.MkdirAll(cacheRoot, 0o700); err != nil {
+		return err
+	}
+	destination := cachePath(cacheRoot, key, expectedBytes)
+	if info, err := os.Stat(destination); err == nil && info.Mode().IsRegular() && info.Size() == expectedBytes {
+		return nil
+	} else if err == nil {
+		if removeErr := os.Remove(destination); removeErr != nil {
+			return removeErr
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	temporary, err := os.CreateTemp(cacheRoot, ".publish-")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	defer os.Remove(temporaryPath)
+	if err := linkOrCopy(source, temporaryPath+"-linked"); err != nil {
+		return err
+	}
+	linkedPath := temporaryPath + "-linked"
+	defer os.Remove(linkedPath)
+	if err := os.Rename(linkedPath, destination); err != nil {
+		return err
+	}
+	return nil
+}
+
+func pruneArtifactCache(cacheRoot string, activePacks []packInput) error {
+	if err := os.MkdirAll(cacheRoot, 0o700); err != nil {
+		return err
+	}
+	retained := make(map[string]struct{}, len(activePacks)*2)
+	for _, pack := range activePacks {
+		retained[filepath.Base(cachePath(cacheRoot, pack.PackKey, pack.PackBytes))] = struct{}{}
+		indexKey := strings.TrimSuffix(pack.PackKey, ".pack") + ".idx"
+		retained[filepath.Base(cachePath(cacheRoot, indexKey, pack.IdxBytes))] = struct{}{}
+	}
+	entries, err := os.ReadDir(cacheRoot)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if _, keep := retained[entry.Name()]; keep {
+			continue
+		}
+		if err := os.Remove(filepath.Join(cacheRoot, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func processPackWithBridgeAtCache(ctx context.Context, input processRequest, client objectBridge, cacheRoot string) (processResponse, error) {
+	_ = pruneArtifactCache(cacheRoot, input.ActivePacks)
 	workDir, err := os.MkdirTemp("", "repository-git-")
 	if err != nil {
 		return processResponse{}, err
@@ -238,12 +446,13 @@ func processPackWithBridge(ctx context.Context, input processRequest, client obj
 		return processResponse{}, err
 	}
 	packDir := filepath.Join(repoDir, "objects", "pack")
+	metrics := hydrationMetrics{}
 	for index, pack := range input.ActivePacks {
 		base := filepath.Join(packDir, fmt.Sprintf("pack-active-%04d", index))
-		if err := client.download(ctx, pack.PackKey, base+".pack", pack.PackBytes); err != nil {
+		if err := hydrateArtifact(ctx, client, cacheRoot, pack.PackKey, pack.PackBytes, base+".pack", &metrics); err != nil {
 			return processResponse{}, transientFailure("download active pack", err)
 		}
-		if err := client.download(ctx, strings.TrimSuffix(pack.PackKey, ".pack")+".idx", base+".idx", pack.IdxBytes); err != nil {
+		if err := hydrateArtifact(ctx, client, cacheRoot, strings.TrimSuffix(pack.PackKey, ".pack")+".idx", pack.IdxBytes, base+".idx", &metrics); err != nil {
 			return processResponse{}, transientFailure("download active index", err)
 		}
 	}
@@ -252,41 +461,42 @@ func processPackWithBridge(ctx context.Context, input processRequest, client obj
 	if err := client.download(ctx, input.InputPackKey, inputPath, input.InputBytes); err != nil {
 		return processResponse{}, transientFailure("download input pack", err)
 	}
+	metrics.downloadedBytes += input.InputBytes
 	existingPacks, err := listPackFiles(packDir)
 	if err != nil {
-		return processResponse{}, err
+		return processResponse{}, failAfterHydration(metrics, "inspect hydrated packs", err)
 	}
 	if err := indexPack(ctx, repoDir, inputPath); err != nil {
-		return processResponse{}, err
+		return processResponse{}, failAfterHydration(metrics, "index input against hydrated packs", err)
 	}
 
 	packPath, idxPath, err := findProducedPack(packDir, existingPacks)
 	if err != nil {
-		return processResponse{}, err
+		return processResponse{}, failAfterHydration(metrics, "locate indexed pack", err)
 	}
 	if err := verifyConnectivity(ctx, repoDir, input.Commands); err != nil {
-		return processResponse{}, err
+		return processResponse{}, failAfterHydration(metrics, "verify hydrated connectivity", err)
 	}
 	if err := runGit(ctx, repoDir, "verify-pack", "-s", idxPath); err != nil {
-		return processResponse{}, err
+		return processResponse{}, failAfterHydration(metrics, "verify indexed pack", err)
 	}
 
 	packBytes, err := fileSize(packPath)
 	if err != nil {
-		return processResponse{}, err
+		return processResponse{}, failAfterHydration(metrics, "inspect output pack", err)
 	}
 	idxBytes, err := fileSize(idxPath)
 	if err != nil {
-		return processResponse{}, err
+		return processResponse{}, failAfterHydration(metrics, "inspect output index", err)
 	}
 	refsPath := filepath.Join(workDir, "output.refs")
 	objectCount, packSHA1, err := buildPackReferenceIndex(ctx, repoDir, packPath, idxPath, refsPath)
 	if err != nil {
-		return processResponse{}, err
+		return processResponse{}, failAfterHydration(metrics, "build output reference index", err)
 	}
 	refsBytes, err := fileSize(refsPath)
 	if err != nil {
-		return processResponse{}, err
+		return processResponse{}, failAfterHydration(metrics, "inspect output reference index", err)
 	}
 
 	if err := client.upload(ctx, input.OutputPackKey, packPath, packBytes); err != nil {
@@ -298,19 +508,21 @@ func processPackWithBridge(ctx context.Context, input processRequest, client obj
 	if err := client.upload(ctx, input.OutputRefsKey, refsPath, refsBytes); err != nil {
 		return processResponse{}, transientFailure("upload output refs", err)
 	}
-	scratchBytes, err := directoryBytes(workDir)
-	if err != nil {
-		return processResponse{}, err
-	}
+	_ = retainOutputInCache(cacheRoot, input.OutputPackKey, packBytes, packPath)
+	_ = retainOutputInCache(cacheRoot, input.OutputIdxKey, idxBytes, idxPath)
+	scratchBytes, _ := directoryBytes(workDir)
 
 	return processResponse{
-		OperationID:  input.OperationID,
-		PackBytes:    packBytes,
-		IdxBytes:     idxBytes,
-		RefsBytes:    refsBytes,
-		ObjectCount:  objectCount,
-		PackSHA1:     packSHA1,
-		ScratchBytes: scratchBytes,
+		OperationID:     input.OperationID,
+		PackBytes:       packBytes,
+		IdxBytes:        idxBytes,
+		RefsBytes:       refsBytes,
+		ObjectCount:     objectCount,
+		PackSHA1:        packSHA1,
+		ScratchBytes:    scratchBytes,
+		HydratedBytes:   metrics.hydratedBytes,
+		DownloadedBytes: metrics.downloadedBytes,
+		CacheHitBytes:   metrics.cacheHitBytes,
 	}, nil
 }
 

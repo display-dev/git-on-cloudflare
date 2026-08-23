@@ -22,7 +22,7 @@ import {
   ReachabilityGcSubrequestBudget,
 } from "@/worker/tasks/reachabilityGc";
 
-import { deleteSupersededOnce } from "./util/compaction-helpers";
+import { compactOnce, deleteSupersededOnce } from "./util/compaction-helpers";
 import { createQueueSendResponse, runQueueMessage } from "./util/queue";
 import {
   buildAppendOnlyDelta,
@@ -167,6 +167,7 @@ describe("candidate-native repository maintenance", () => {
       }
     });
     const stub = getRepoStub(env, repoId);
+    expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
     const firstPage = await stub.listSupersededGcPacks();
     expect(firstPage).toHaveLength(250);
     expect(

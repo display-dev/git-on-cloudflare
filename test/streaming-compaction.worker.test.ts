@@ -4,7 +4,14 @@ import { getRepoStub } from "@/worker/common";
 import { bytesToHex } from "@/worker/common/hex";
 import { encodeGitObject } from "@/worker/git/core/objects";
 import { concatChunks, decodePktLines } from "@/worker/git";
-import { packIndexKey, packRefsKey } from "@/worker/keys";
+import {
+  doPrefix,
+  packIndexKey,
+  packRefsKey,
+  r2PackKey,
+  repositoryGenerationIndexKey,
+  repositoryGenerationManifestKey,
+} from "@/worker/keys";
 import { buildFetchBody } from "./util/fetch-protocol";
 import {
   deleteLooseObjectCopies,
@@ -48,6 +55,126 @@ async function getDebugState(
 }
 
 describe("streaming compaction", () => {
+  it("defers superseded artifact deletion while an older native generation reader is active", async () => {
+    const repoId = `o/${uniqueRepoId("native-reader-fence")}`;
+    await setupRepoForTests(env, "o", repoId.slice(2));
+    const stub = getRepoStub(env, repoId);
+    const generationPrefix = doPrefix(stub.id.toString());
+    const packKey = r2PackKey(generationPrefix, "reader-fence.pack");
+    await env.REPO_BUCKET.put(packKey, new Uint8Array([1]));
+    await env.REPO_BUCKET.put(packIndexKey(packKey), new Uint8Array([2]));
+    await env.REPO_BUCKET.put(packRefsKey(packKey), new Uint8Array([3]));
+    const generationManifestKey = repositoryGenerationManifestKey(generationPrefix, 5);
+    await env.REPO_BUCKET.put(
+      generationManifestKey,
+      JSON.stringify({ schemaVersion: 1, generation: 5, packs: [] })
+    );
+    await env.REPO_BUCKET.put(
+      repositoryGenerationIndexKey(generationPrefix),
+      JSON.stringify({
+        schemaVersion: 1,
+        generation: 5,
+        manifestKey: generationManifestKey,
+        updatedAt: Date.now(),
+      })
+    );
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        await state.storage.put("nativeCatalogReaderLease", {
+          token: "active-container",
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 60_000,
+          operation: "native-reader",
+          generation: 4,
+        });
+      }
+    );
+
+    const foreignPackKey = r2PackKey(doPrefix("foreign-do"), "reader-fence.pack");
+    await env.REPO_BUCKET.put(foreignPackKey, new Uint8Array([4]));
+    expect(await deleteSupersededOnce(repoId, [foreignPackKey])).toEqual({
+      acked: true,
+      retried: false,
+    });
+    expect(await env.REPO_BUCKET.head(foreignPackKey)).not.toBeNull();
+
+    const legacyDeferred = await deleteSupersededOnce(repoId, [packKey]);
+    expect(legacyDeferred).toEqual({ acked: false, retried: true });
+    expect(await env.REPO_BUCKET.head(packKey)).not.toBeNull();
+
+    const deferred = await deleteSupersededOnce(repoId, [packKey], false, 5);
+    expect(deferred).toEqual({ acked: false, retried: true });
+    expect(await env.REPO_BUCKET.head(packKey)).not.toBeNull();
+
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => await state.storage.delete("nativeCatalogReaderLease")
+    );
+    const fetchReader = await stub.beginRepositoryRead();
+    expect(fetchReader.ok).toBe(true);
+    const fetchDeferred = await deleteSupersededOnce(repoId, [packKey], false, 5);
+    expect(fetchDeferred).toEqual({ acked: false, retried: true });
+    if (fetchReader.ok) await stub.finishRepositoryRead(fetchReader.token);
+    const unpublished = await deleteSupersededOnce(repoId, [packKey], false, 6);
+    expect(unpublished).toEqual({ acked: false, retried: true });
+    expect(await env.REPO_BUCKET.head(packKey)).not.toBeNull();
+    const deleted = await deleteSupersededOnce(repoId, [packKey], false, 5);
+    expect(deleted).toEqual({ acked: true, retried: false });
+    expect(await env.REPO_BUCKET.head(packKey)).toBeNull();
+  });
+
+  it("does not delete a superseded row until the published manifest excludes its pack", async () => {
+    const repoId = `o/${uniqueRepoId("published-generation-fence")}`;
+    await setupRepoForTests(env, "o", repoId.slice(2));
+    const stub = getRepoStub(env, repoId);
+    const packKey = `${doPrefix(stub.id.toString())}/objects/pack/pending.pack`;
+    await env.REPO_BUCKET.put(packKey, new Uint8Array([1]));
+    await env.REPO_BUCKET.put(packIndexKey(packKey), new Uint8Array([2]));
+    await env.REPO_BUCKET.put(packRefsKey(packKey), new Uint8Array([3]));
+
+    const prefix = doPrefix(stub.id.toString());
+    const generationFiveManifest = repositoryGenerationManifestKey(prefix, 5);
+    await env.REPO_BUCKET.put(
+      generationFiveManifest,
+      JSON.stringify({ schemaVersion: 1, generation: 5, packs: [{ packKey }] })
+    );
+    await env.REPO_BUCKET.put(
+      repositoryGenerationIndexKey(prefix),
+      JSON.stringify({
+        schemaVersion: 1,
+        generation: 5,
+        manifestKey: generationFiveManifest,
+        updatedAt: Date.now(),
+      })
+    );
+    expect(await deleteSupersededOnce(repoId, [packKey], false, 5)).toEqual({
+      acked: false,
+      retried: true,
+    });
+    expect(await env.REPO_BUCKET.head(packKey)).not.toBeNull();
+
+    const generationSixManifest = repositoryGenerationManifestKey(prefix, 6);
+    await env.REPO_BUCKET.put(
+      generationSixManifest,
+      JSON.stringify({ schemaVersion: 1, generation: 6, packs: [] })
+    );
+    await env.REPO_BUCKET.put(
+      repositoryGenerationIndexKey(prefix),
+      JSON.stringify({
+        schemaVersion: 1,
+        generation: 6,
+        manifestKey: generationSixManifest,
+        updatedAt: Date.now(),
+      })
+    );
+    expect(await deleteSupersededOnce(repoId, [packKey], false, 5)).toEqual({
+      acked: true,
+      retried: false,
+    });
+    expect(await env.REPO_BUCKET.head(packKey)).toBeNull();
+  });
+
   it("previews and requests real compaction work only after streaming overflow exists", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-admin");
@@ -282,8 +409,16 @@ describe("streaming compaction", () => {
     const compacted = await compactOnce(repoId);
     expect(compacted.acked).toBe(true);
     expect(compacted.retried).toBe(false);
-
     const stateAfterCompaction = await getDebugState(owner, repo, seededRepo.cookieHeader);
+    const generationIndexKey = repositoryGenerationIndexKey(doPrefix(stub.id.toString()));
+    await vi.waitFor(
+      async () => {
+        expect(await env.REPO_BUCKET.head(generationIndexKey)).not.toBeNull();
+        expect(await stub.getPendingGenerationPublication()).toBeNull();
+      },
+      { timeout: 2_000, interval: 10 }
+    );
+
     expect(stateAfterCompaction.compaction?.queued).toBe(false);
     expect(stateAfterCompaction.activePacks?.some((pack) => pack.kind === "compact")).toBe(true);
     expect(stateAfterCompaction.supersededPacks?.length).toBe(4);

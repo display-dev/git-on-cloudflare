@@ -7,6 +7,7 @@ import type { Logger } from "@/worker/common/logger";
 import { createDigestStream } from "@/worker/common";
 import { isResolveAbortedError } from "@/worker/git/pack/indexer/resolve/errors";
 import { encodeOfsDeltaDistance } from "../packMeta";
+import { readPackRange } from "../packMeta";
 import {
   WHOLE_PACK_MAX_BYTES,
   buildPackHeader,
@@ -15,6 +16,8 @@ import {
   type RewriteOptions,
   type SelectionTable,
 } from "./shared";
+
+const PASSTHROUGH_RANGE_BYTES = 8 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Entry header construction
@@ -112,7 +115,7 @@ export async function passthroughSinglePack(
   env: Env,
   snapshotPack: OrderedPackSnapshotEntry,
   readState: PackReadState,
-  controller: ReadableStreamDefaultController<Uint8Array>,
+  outputWriter: WritableStreamDefaultWriter<Uint8Array>,
   log: Logger,
   warnedFlags: Set<string>,
   options?: RewriteOptions
@@ -127,7 +130,7 @@ export async function passthroughSinglePack(
 
   const emit = async (chunk: Uint8Array) => {
     await writer.write(chunk);
-    controller.enqueue(chunk);
+    await outputWriter.write(chunk);
   };
 
   options?.onProgress?.(`Enumerating objects: ${snapshotPack.idx.count}, from 1 packs\n`);
@@ -144,52 +147,39 @@ export async function passthroughSinglePack(
   } else if (snapshotPack.packBytes <= WHOLE_PACK_MAX_BYTES) {
     throw new Error("rewrite: missing whole-pack preload for passthrough");
   } else {
-    countRewriteSubrequest(
-      log,
-      warnedFlags,
-      options,
-      `rewrite-passthrough:${snapshotPack.packKey}`,
-      { op: "r2:get-pack", packKey: snapshotPack.packKey }
-    );
-    await options!.limiter!.run("r2:get-pack", async () => {
-      const packObject = await env.REPO_BUCKET.get(snapshotPack.packKey);
-      if (!packObject?.body) {
-        throw new Error("rewrite: passthrough pack stream unavailable");
+    const bodyBytes = snapshotPack.packBytes - 20;
+    if (bodyBytes <= 0) throw new Error("rewrite: truncated passthrough pack");
+    let offset = 0;
+    let ranges = 0;
+    while (offset < bodyBytes) {
+      if (options?.signal?.aborted) {
+        await writer.abort();
+        throw new Error("rewrite: passthrough aborted");
       }
-
-      const reader = packObject.body.getReader();
-      let trailing = new Uint8Array(0);
-      while (true) {
-        if (options?.signal?.aborted) {
-          await reader.cancel();
-          await writer.abort();
-          throw new Error("rewrite: passthrough aborted");
-        }
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-
-        const chunk = new Uint8Array(trailing.length + value.length);
-        chunk.set(trailing, 0);
-        chunk.set(value, trailing.length);
-        if (chunk.length <= 20) {
-          trailing = chunk;
-          continue;
-        }
-
-        const bodyChunk = chunk.subarray(0, chunk.length - 20);
-        trailing = chunk.slice(chunk.length - 20);
-        if (options?.signal?.aborted) {
-          await reader.cancel();
-          await writer.abort();
-          throw new Error("rewrite: passthrough aborted");
-        }
-        await emit(bodyChunk);
-      }
-
-      if (trailing.length < 20) {
-        throw new Error("rewrite: truncated passthrough pack");
-      }
+      const length = Math.min(PASSTHROUGH_RANGE_BYTES, bodyBytes - offset);
+      const bytes = await readPackRange(env, snapshotPack.packKey, offset, length, {
+        limiter: options!.limiter,
+        signal: options?.signal,
+        log,
+        exactLength: true,
+        countSubrequest: (n?: number) =>
+          countRewriteSubrequest(
+            log,
+            warnedFlags,
+            options,
+            `rewrite-passthrough-range:${snapshotPack.packKey}`,
+            { op: "r2:get-range", offset, length },
+            n
+          ),
+      });
+      if (!bytes) throw new Error("rewrite: passthrough range unavailable");
+      await emit(bytes);
+      offset += bytes.byteLength;
+      ranges++;
+    }
+    log.info("rewrite:passthrough-ranges-complete", {
+      bytes: bodyBytes,
+      ranges,
     });
   }
 
@@ -197,7 +187,7 @@ export async function passthroughSinglePack(
   options?.onProgress?.(
     `Counting objects: 100% (${snapshotPack.idx.count}/${snapshotPack.idx.count}), done.\n`
   );
-  controller.enqueue(new Uint8Array(await digestStream.digest));
+  await outputWriter.write(new Uint8Array(await digestStream.digest));
   return "completed";
 }
 
@@ -210,40 +200,41 @@ export function createPassthroughStream(args: {
   options?: RewriteOptions;
   onComplete?: () => void;
 }): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        const status = await passthroughSinglePack(
-          args.env,
-          args.snapshotPack,
-          args.readState,
-          controller,
-          args.log,
-          args.warnedFlags,
-          args.options
-        );
-        if (status === "aborted") {
-          args.log.debug("rewrite:passthrough-aborted");
-          controller.close();
-          return;
-        }
-        args.onComplete?.();
-        controller.close();
-      } catch (error) {
-        if (
-          isResolveAbortedError(error) ||
-          args.options?.signal?.aborted ||
-          (error instanceof Error && error.message === "rewrite: passthrough aborted")
-        ) {
-          args.log.debug("rewrite:passthrough-aborted");
-          controller.close();
-          return;
-        }
-        args.log.error("rewrite:passthrough-error", { error: String(error) });
-        controller.error(error);
+  const output = new TransformStream<Uint8Array, Uint8Array>();
+  const outputWriter = output.writable.getWriter();
+  void (async () => {
+    try {
+      const status = await passthroughSinglePack(
+        args.env,
+        args.snapshotPack,
+        args.readState,
+        outputWriter,
+        args.log,
+        args.warnedFlags,
+        args.options
+      );
+      if (status === "aborted") {
+        args.log.debug("rewrite:passthrough-aborted");
+        await outputWriter.close();
+        return;
       }
-    },
-  });
+      args.onComplete?.();
+      await outputWriter.close();
+    } catch (error) {
+      if (
+        isResolveAbortedError(error) ||
+        args.options?.signal?.aborted ||
+        (error instanceof Error && error.message === "rewrite: passthrough aborted")
+      ) {
+        args.log.debug("rewrite:passthrough-aborted");
+        await outputWriter.abort(error).catch(() => undefined);
+        return;
+      }
+      args.log.error("rewrite:passthrough-error", { error: String(error) });
+      await outputWriter.abort(error).catch(() => undefined);
+    }
+  })();
+  return output.readable;
 }
 
 // ---------------------------------------------------------------------------

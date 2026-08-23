@@ -150,6 +150,7 @@ function createSidebandReceiveResponse(args: {
   leaseToken: string;
   operationId?: string | undefined;
   activeCatalog: PackCatalogRow[];
+  catalogGeneration: number;
   commands: ParsedReceiveRequest["commands"];
   acceptedWrites: AcceptedWriteFact[];
   capabilities: ReceiveNegotiatedCapabilities;
@@ -189,6 +190,7 @@ function createSidebandReceiveResponse(args: {
           leaseToken: args.leaseToken,
           operationId: args.operationId,
           activeCatalog: args.activeCatalog,
+          catalogGeneration: args.catalogGeneration,
           commands: args.commands,
           acceptedWrites: args.acceptedWrites,
           log: args.log,
@@ -392,6 +394,7 @@ export async function handleStreamingReceivePackPOST(
         leaseToken: begin.lease.token,
         operationId: requestedOperationId,
         activeCatalog: begin.activeCatalog,
+        catalogGeneration: begin.packsetVersion,
         commands: parsedRequest.commands,
         acceptedWrites,
         capabilities: parsedRequest.capabilities,
@@ -416,6 +419,7 @@ export async function handleStreamingReceivePackPOST(
       leaseToken: begin.lease.token,
       operationId: requestedOperationId,
       activeCatalog: begin.activeCatalog,
+      catalogGeneration: begin.packsetVersion,
       commands: parsedRequest.commands,
       acceptedWrites,
       log,

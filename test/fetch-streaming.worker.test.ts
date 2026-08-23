@@ -1,4 +1,4 @@
-import { afterEach, it, expect, describe } from "vitest";
+import { afterEach, it, expect, describe, vi } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 import { pktLine, delimPkt, flushPkt, concatChunks, decodePktLines } from "@/worker/git";
 import {
@@ -187,6 +187,7 @@ describe("git fetch streaming (default)", () => {
   it("closes an actual post-start assembly failure with one fatal packet and a flush", async () => {
     const owner = "o";
     const repo = uniqueRepoId("streaming-fatal");
+    const repoId = `${owner}/${repo}`;
     await setupRepoForTests(env, owner, repo);
     const id = env.REPO_DO.idFromName(`${owner}/${repo}`);
     const { commitOid } = await runDOWithRetry(
@@ -198,16 +199,12 @@ describe("git fetch streaming (default)", () => {
       failure: { reason: "injected-range-exhausted", retryable: true },
     }));
 
-    const response = await workerExports.default.fetch(
-      `https://example.com/${owner}/${repo}/git-upload-pack`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-git-upload-pack-request",
-          "Git-Protocol": "version=2",
-        },
-        body: asBufferSource(buildFetchBody({ wants: [commitOid], done: true })),
-      }
+    const response = await handleFetchV2Streaming(
+      env,
+      repoId,
+      buildFetchBody({ wants: [commitOid], done: true }),
+      undefined,
+      createTestCacheContext(`https://example.com/${owner}/${repo}/git-upload-pack`)
     );
     expect(response.status).toBe(200);
     const lines = decodePktLines(new Uint8Array(await response.arrayBuffer()));
@@ -226,6 +223,7 @@ describe("git fetch streaming (default)", () => {
   it("closes an actual stream failure after pack bytes with one fatal packet and a flush", async () => {
     const owner = "o";
     const repo = uniqueRepoId("streaming-partial-fatal");
+    const repoId = `${owner}/${repo}`;
     await setupRepoForTests(env, owner, repo);
     const id = env.REPO_DO.idFromName(`${owner}/${repo}`);
     const { commitOid } = await runDOWithRetry(
@@ -246,16 +244,12 @@ describe("git fetch streaming (default)", () => {
       }),
     }));
 
-    const response = await workerExports.default.fetch(
-      `https://example.com/${owner}/${repo}/git-upload-pack`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-git-upload-pack-request",
-          "Git-Protocol": "version=2",
-        },
-        body: asBufferSource(buildFetchBody({ wants: [commitOid], done: true })),
-      }
+    const response = await handleFetchV2Streaming(
+      env,
+      repoId,
+      buildFetchBody({ wants: [commitOid], done: true }),
+      undefined,
+      createTestCacheContext(`https://example.com/${owner}/${repo}/git-upload-pack`)
     );
     expect(response.status).toBe(200);
     const lines = decodePktLines(new Uint8Array(await response.arrayBuffer()));
@@ -266,6 +260,219 @@ describe("git fetch streaming (default)", () => {
     expect(fatals).toHaveLength(1);
     expect(fatalIndex).toBeGreaterThan(packIndex);
     expect(lines.at(-1)).toEqual({ type: "flush" });
+  });
+
+  it("does not drain a large pack into the response queue ahead of a slow client", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("streaming-backpressure");
+    const repoId = `${owner}/${repo}`;
+    await setupRepoForTests(env, owner, repo);
+    const id = env.REPO_DO.idFromName(repoId);
+    const { commitOid } = await runDOWithRetry(
+      () => env.REPO_DO.get(id),
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    const totalChunks = 32;
+    let pulls = 0;
+    uploadStreamTest.setResolvePackStreamResult(async () => ({
+      status: "ok",
+      addedDeltaBases: 0,
+      stream: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls++;
+          controller.enqueue(new Uint8Array(64 * 1024));
+          if (pulls === totalChunks) controller.close();
+        },
+      }),
+    }));
+
+    const response = await handleFetchV2Streaming(
+      env,
+      repoId,
+      buildFetchBody({ wants: [commitOid], done: true }),
+      undefined,
+      createTestCacheContext(`https://example.com/${owner}/${repo}/git-upload-pack`)
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(pulls).toBeLessThan(totalChunks);
+
+    await response.arrayBuffer();
+    expect(pulls).toBe(totalChunks);
+  });
+
+  it("releases a backpressured read lease when the request aborts", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("streaming-backpressure-abort");
+    const repoId = `${owner}/${repo}`;
+    await setupRepoForTests(env, owner, repo);
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(repoId));
+    const { commitOid } = await runDOWithRetry(
+      () => stub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    let pulls = 0;
+    uploadStreamTest.setResolvePackStreamResult(async () => ({
+      status: "ok",
+      addedDeltaBases: 0,
+      stream: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls++;
+          controller.enqueue(new Uint8Array(64 * 1024));
+        },
+      }),
+    }));
+    const requestAbort = new AbortController();
+    const response = await handleFetchV2Streaming(
+      env,
+      repoId,
+      buildFetchBody({ wants: [commitOid], done: true }),
+      requestAbort.signal,
+      createTestCacheContext(`https://example.com/${owner}/${repo}/git-upload-pack`)
+    );
+    await vi.waitFor(() => expect(pulls).toBeGreaterThan(0));
+    requestAbort.abort("injected client disconnect");
+    await vi.waitFor(
+      async () => {
+        expect(
+          await runDOWithRetry(
+            () => stub,
+            async (_instance, state) => await state.storage.get("repositoryReadLeases")
+          )
+        ).toBeUndefined();
+      },
+      { timeout: 1_000, interval: 10 }
+    );
+    await response.body?.cancel();
+  });
+
+  it("releases a backpressured read lease when renewal is refused", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("streaming-backpressure-renewal");
+    const repoId = `${owner}/${repo}`;
+    await setupRepoForTests(env, owner, repo);
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(repoId));
+    const { commitOid } = await runDOWithRetry(
+      () => stub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    uploadStreamTest.setRepositoryReadHeartbeatMs(10);
+    let pulls = 0;
+    uploadStreamTest.setResolvePackStreamResult(async () => ({
+      status: "ok",
+      addedDeltaBases: 0,
+      stream: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls++;
+          controller.enqueue(new Uint8Array(64 * 1024));
+        },
+      }),
+    }));
+    const response = await handleFetchV2Streaming(
+      env,
+      repoId,
+      buildFetchBody({ wants: [commitOid], done: true }),
+      undefined,
+      createTestCacheContext(`https://example.com/${owner}/${repo}/git-upload-pack`)
+    );
+    await vi.waitFor(() => expect(pulls).toBeGreaterThan(0));
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => await state.storage.put("repositoryDeleting", true)
+    );
+    await vi.waitFor(
+      async () => {
+        expect(
+          await runDOWithRetry(
+            () => stub,
+            async (_instance, state) => await state.storage.get("repositoryReadLeases")
+          )
+        ).toBeUndefined();
+      },
+      { timeout: 1_000, interval: 10 }
+    );
+    await response.body?.cancel();
+  });
+
+  it("renews a repository read lease during blocked resolution and streaming", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("streaming-reader-lease");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(repoId));
+    const { commitOid } = await runDOWithRetry(
+      () => stub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    uploadStreamTest.setRepositoryReadHeartbeatMs(10);
+    let heartbeatCount = 0;
+    uploadStreamTest.setRepositoryReadHeartbeatObserver(() => {
+      heartbeatCount++;
+    });
+    const waitForHeartbeat = async (minimum: number): Promise<void> => {
+      for (let attempt = 0; attempt < 20 && heartbeatCount < minimum; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(heartbeatCount).toBeGreaterThanOrEqual(minimum);
+    };
+    let releaseResolution: (() => void) | undefined;
+    const resolutionReleased = new Promise<void>((resolve) => {
+      releaseResolution = resolve;
+    });
+    let markResolutionStarted: (() => void) | undefined;
+    const resolutionStarted = new Promise<void>((resolve) => {
+      markResolutionStarted = resolve;
+    });
+    let releaseStream: (() => void) | undefined;
+    const streamReleased = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    let markStarted: (() => void) | undefined;
+    const streamStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    uploadStreamTest.setResolvePackStreamResult(async () => {
+      markResolutionStarted?.();
+      await resolutionReleased;
+      return {
+        status: "ok",
+        addedDeltaBases: 0,
+        stream: new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3]));
+            markStarted?.();
+            await streamReleased;
+            controller.close();
+          },
+        }),
+      };
+    });
+
+    const response = await handleFetchV2Streaming(
+      env,
+      repoId,
+      buildFetchBody({ wants: [commitOid], done: true }),
+      undefined,
+      createTestCacheContext(`https://example.com/${owner}/${repo}/git-upload-pack`)
+    );
+    const body = response.arrayBuffer();
+    await resolutionStarted;
+    await waitForHeartbeat(1);
+    releaseResolution?.();
+    await streamStarted;
+    await waitForHeartbeat(2);
+    releaseStream?.();
+    await body;
+    await vi.waitFor(
+      async () => {
+        expect(
+          await runDOWithRetry(
+            () => stub,
+            async (_instance, state) => await state.storage.get("repositoryReadLeases")
+          )
+        ).toBeUndefined();
+      },
+      { timeout: 1_000, interval: 10 }
+    );
   });
 
   it("handles fetch with streaming by default", async () => {

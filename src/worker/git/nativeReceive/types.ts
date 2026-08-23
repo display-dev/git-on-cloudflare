@@ -34,6 +34,7 @@ export type NativeReceiveOperation = {
   commands: ReceiveCommand[];
   acceptedWrites: AcceptedWriteFact[];
   activeCatalog: PackCatalogRow[];
+  catalogGeneration: number;
   createdAt: number;
   updatedAt: number;
   attempts: number;
@@ -47,10 +48,15 @@ export type NativeReceiveOperation = {
   result?: NativeReceiveTerminalResult | undefined;
 };
 
+export type NativeReceiveOperationMetrics = Pick<
+  NativeReceiveProcessResult,
+  "elapsedMs" | "scratchBytes" | "hydratedBytes" | "downloadedBytes" | "cacheHitBytes"
+>;
+
 export type NativeReceiveOperationView = Pick<
   NativeReceiveOperation,
   "id" | "state" | "createdAt" | "updatedAt" | "attempts" | "errorCode" | "result"
->;
+> & { metrics?: NativeReceiveOperationMetrics | undefined };
 
 export type EnqueueNativeReceiveResult =
   | { status: "queued"; operation: NativeReceiveOperationView }
@@ -85,6 +91,9 @@ export type NativeReceiveProcessResult = {
   packSha1: string;
   elapsedMs: number;
   scratchBytes: number;
+  hydratedBytes: number;
+  downloadedBytes: number;
+  cacheHitBytes: number;
 };
 
 export type RepositoryContainerBridgeProps = {
@@ -104,6 +113,15 @@ export function nativeReceiveOperationView(
     attempts: operation.attempts,
     errorCode: operation.errorCode,
     result: operation.result,
+    metrics: operation.processorResult
+      ? {
+          elapsedMs: operation.processorResult.elapsedMs,
+          scratchBytes: operation.processorResult.scratchBytes,
+          hydratedBytes: operation.processorResult.hydratedBytes,
+          downloadedBytes: operation.processorResult.downloadedBytes,
+          cacheHitBytes: operation.processorResult.cacheHitBytes,
+        }
+      : undefined,
   };
 }
 

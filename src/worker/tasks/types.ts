@@ -20,6 +20,7 @@ export const CompactionDeleteQueueMessageSchema = z.object({
   doId: z.string(),
   repoId: z.string().optional(),
   packKeys: z.array(z.string()),
+  supersededAtGeneration: z.number().int().nonnegative().optional(),
   removeCatalogRows: z.boolean().optional(),
 });
 

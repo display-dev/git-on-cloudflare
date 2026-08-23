@@ -20,7 +20,12 @@ export type RepoLease = {
   token: string;
   createdAt: number;
   expiresAt: number;
-  operation?: "receive" | "compaction" | "reachability-gc" | "pack-ref-backfill";
+  operation?:
+    | "receive"
+    | "compaction"
+    | "reachability-gc"
+    | "pack-ref-backfill"
+    | "generation-publication";
 };
 
 export type SnapshotMaterializationLease = RepoLease & {
@@ -28,7 +33,22 @@ export type SnapshotMaterializationLease = RepoLease & {
 };
 
 export type RepositoryMaintenanceLease = RepoLease & {
-  operation: "pack-ref-backfill";
+  operation: "pack-ref-backfill" | "generation-publication";
+};
+
+export type NativeCatalogReaderLease = {
+  token: string;
+  createdAt: number;
+  expiresAt: number;
+  operation: "native-reader";
+  generation: number;
+};
+
+export type RepositoryReadLease = {
+  token: string;
+  createdAt: number;
+  expiresAt: number;
+  operation: "git-fetch";
 };
 
 export type ReachabilityGcPending = {
@@ -108,10 +128,19 @@ export type RepoStateSchema = {
   head: Head;
   refsVersion: number;
   packsetVersion: number;
+  generationPublicationPending:
+    | {
+        generation: number;
+        activePackKeys: string[];
+      }
+    | undefined;
+  nativeCatalogReaderGenerationFloor: number | undefined;
   nextPackSeq: number;
   receiveLease: RepoLease | undefined;
   receiveOutcomeIndex: string[] | undefined;
   nativeReceiveOperationIndex: string[] | undefined;
+  nativeCatalogReaderLease: NativeCatalogReaderLease | undefined;
+  repositoryReadLeases: RepositoryReadLease[] | undefined;
   ingestionReceiptIndex: string[] | undefined;
   compactLease: RepoLease | undefined;
   reachabilityGcPending: ReachabilityGcPending | undefined;

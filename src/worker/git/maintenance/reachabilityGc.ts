@@ -24,6 +24,11 @@ import {
 } from "@/worker/git/receive/r2Upload";
 import { doPrefix, getDoIdFromPath, r2PackKey } from "@/worker/keys";
 import { SUPERSEDED_PACK_DELETE_DELAY_SECONDS } from "@/worker/tasks/types";
+import {
+  publishRepositoryGeneration,
+  readPublishedRepositoryGeneration,
+} from "@/worker/git/generation/publish";
+import type { BeginRepositoryMaintenanceResult } from "@/worker/do/repo/repositoryLifecycle";
 
 let failCommitResponsesForTesting = 0;
 let failCommitTransportsForTesting = 0;
@@ -93,6 +98,59 @@ function retryResult(log: Logger, reason: string): ReachabilityGcResult {
   return { status: "retry", reason };
 }
 
+async function publishPendingGeneration(args: {
+  env: Env;
+  repoId: string;
+  stub: DurableObjectStub<RepoDurableObject>;
+  limiter: Limiter;
+  log: Logger;
+  countSubrequest(op: string, n?: number): void;
+}): Promise<boolean> {
+  args.countSubrequest("do:begin-generation-publication");
+  const maintenance = await args.limiter.run<BeginRepositoryMaintenanceResult>(
+    "do:begin-generation-publication",
+    () => args.stub.beginRepositoryMaintenance("generation-publication")
+  );
+  if (!maintenance.ok) return false;
+  try {
+    args.countSubrequest("do:get-pending-generation");
+    let pending = await args.limiter.run("do:get-pending-generation", () =>
+      args.stub.getPendingGenerationPublication()
+    );
+    if (!pending) {
+      const publishedGeneration = await readPublishedRepositoryGeneration({
+        env: args.env,
+        doId: args.stub.id.toString(),
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+      });
+      if (publishedGeneration !== null) return true;
+      args.countSubrequest("do:ensure-generation-publication");
+      pending = await args.limiter.run("do:ensure-generation-publication", () =>
+        args.stub.ensureGenerationPublicationPending()
+      );
+    }
+    await publishRepositoryGeneration({
+      env: args.env,
+      doId: args.stub.id.toString(),
+      generation: pending.generation,
+      activePackKeys: pending.activePackKeys,
+      limiter: args.limiter,
+      countSubrequest: args.countSubrequest,
+      log: args.log,
+    });
+    args.countSubrequest("do:complete-generation-publication");
+    return await args.limiter.run("do:complete-generation-publication", () =>
+      args.stub.completeGenerationPublication(pending.generation)
+    );
+  } finally {
+    args.countSubrequest("do:finish-generation-publication");
+    await args.limiter.run("do:finish-generation-publication", () =>
+      args.stub.finishRepositoryMaintenance(maintenance.token)
+    );
+  }
+}
+
 async function scheduleSupersededPackCleanup(args: {
   env: Env;
   repoId: string;
@@ -100,6 +158,7 @@ async function scheduleSupersededPackCleanup(args: {
   limiter: Limiter;
   log: Logger;
   countSubrequest(op: string, n?: number): void;
+  supersededAtGeneration?: number;
 }): Promise<boolean> {
   if (args.packKeys.length === 0) return true;
   const doId = getDoIdFromPath(args.packKeys[0]!);
@@ -122,6 +181,9 @@ async function scheduleSupersededPackCleanup(args: {
             repoId: args.repoId,
             packKeys,
             removeCatalogRows: true,
+            ...(typeof args.supersededAtGeneration === "number"
+              ? { supersededAtGeneration: args.supersededAtGeneration }
+              : {}),
           },
           { delaySeconds: SUPERSEDED_PACK_DELETE_DELAY_SECONDS }
         )
@@ -256,6 +318,9 @@ export async function runReachabilityGc(args: {
   const stub = getRepoStub(args.env, args.repoId);
   args.cacheCtx.memo = args.cacheCtx.memo || {};
   args.cacheCtx.memo.limiter = args.limiter;
+  if (!(await publishPendingGeneration({ ...args, stub }))) {
+    return retryResult(args.log, "generation-publication-advanced");
+  }
   const pending = await reconcilePendingGc({ ...args, stub });
   if (pending) return pending;
   const priorCleanup = await reconcilePriorCleanup({ ...args, stub });
@@ -427,9 +492,13 @@ export async function runReachabilityGc(args: {
       return retryResult(args.log, commit.reason);
     }
     stagedUpload = undefined;
+    if (!(await publishPendingGeneration({ ...args, stub }))) {
+      return retryResult(args.log, "generation-publication-advanced");
+    }
     const cleanupScheduled = await scheduleSupersededPackCleanup({
       ...args,
       packKeys: commit.supersededPackKeys,
+      supersededAtGeneration: commit.packCatalogVersion,
     });
     if (!cleanupScheduled) return retryResult(args.log, "cleanup-enqueue-failed");
     args.log.info("reachability-gc:complete", {

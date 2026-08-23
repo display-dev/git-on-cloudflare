@@ -15,7 +15,8 @@ export async function compactOnce(repoId: string): Promise<QueueRunResult> {
 export async function deleteSupersededOnce(
   repoId: string,
   packKeys: string[],
-  removeCatalogRows = false
+  removeCatalogRows = false,
+  supersededAtGeneration?: number
 ): Promise<QueueRunResult> {
   const doId = env.REPO_DO.idFromName(repoId).toString();
   return await runQueueMessage({
@@ -24,6 +25,7 @@ export async function deleteSupersededOnce(
     repoId,
     packKeys,
     removeCatalogRows,
+    ...(typeof supersededAtGeneration === "number" ? { supersededAtGeneration } : {}),
   });
 }
 

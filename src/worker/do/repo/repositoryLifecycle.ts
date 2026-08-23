@@ -2,12 +2,15 @@ import type {
   RepoLease,
   RepoStateSchema,
   RepositoryMaintenanceLease,
+  RepositoryReadLease,
   SnapshotMaterializationLease,
 } from "./repoState";
 
 import { asTypedStorage } from "./repoState";
 
 const SNAPSHOT_MATERIALIZATION_LEASE_TTL_MS = 30 * 60_000;
+const REPOSITORY_READ_LEASE_TTL_MS = 2 * 60_000;
+const MAX_REPOSITORY_READ_LEASES = 128;
 // Receive and compaction R2 subrequests are platform-bounded, but their lease
 // owner may lose the response at expiry. Keep deletion fenced for a further
 // bounded drain window so an already-started upload cannot finish after the
@@ -27,6 +30,10 @@ export type BeginRepositoryMaintenanceResult =
   | { ok: true; token: string }
   | { ok: false; reason: "repository-deleting" };
 
+export type BeginRepositoryReadResult =
+  | { ok: true; token: string }
+  | { ok: false; reason: "repository-deleting" | "reader-capacity" };
+
 function writerMayStillBeDraining(lease: RepoLease | undefined, now: number): boolean {
   return Boolean(lease && lease.expiresAt + EXPIRED_WRITER_DRAIN_MS > now);
 }
@@ -45,8 +52,72 @@ function activeMaintenanceLeases(
   return (leases ?? []).filter((lease) => lease.expiresAt + EXPIRED_WRITER_DRAIN_MS > now);
 }
 
-export async function beginRepositoryMaintenanceState(
+function activeReadLeases(
+  leases: RepositoryReadLease[] | undefined,
+  now: number
+): RepositoryReadLease[] {
+  return (leases ?? []).filter((lease) => lease.expiresAt > now);
+}
+
+export async function beginRepositoryReadState(
   ctx: DurableObjectState
+): Promise<BeginRepositoryReadResult> {
+  return await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) {
+      return { ok: false, reason: "repository-deleting" };
+    }
+    const now = Date.now();
+    const leases = activeReadLeases(await store.get("repositoryReadLeases"), now);
+    if (leases.length >= MAX_REPOSITORY_READ_LEASES) {
+      return { ok: false, reason: "reader-capacity" };
+    }
+    const token = crypto.randomUUID();
+    leases.push({
+      token,
+      operation: "git-fetch",
+      createdAt: now,
+      expiresAt: now + REPOSITORY_READ_LEASE_TTL_MS,
+    });
+    await store.put("repositoryReadLeases", leases);
+    return { ok: true, token };
+  });
+}
+
+export async function renewRepositoryReadState(
+  ctx: DurableObjectState,
+  token: string
+): Promise<boolean> {
+  return await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return false;
+    const now = Date.now();
+    const leases = activeReadLeases(await store.get("repositoryReadLeases"), now);
+    const index = leases.findIndex((lease) => lease.token === token);
+    if (index < 0) return false;
+    leases[index] = { ...leases[index]!, expiresAt: now + REPOSITORY_READ_LEASE_TTL_MS };
+    await store.put("repositoryReadLeases", leases);
+    return true;
+  });
+}
+
+export async function finishRepositoryReadState(
+  ctx: DurableObjectState,
+  token: string
+): Promise<void> {
+  await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const leases = activeReadLeases(await store.get("repositoryReadLeases"), Date.now()).filter(
+      (lease) => lease.token !== token
+    );
+    if (leases.length > 0) await store.put("repositoryReadLeases", leases);
+    else await store.delete("repositoryReadLeases");
+  });
+}
+
+export async function beginRepositoryMaintenanceState(
+  ctx: DurableObjectState,
+  operation: RepositoryMaintenanceLease["operation"] = "pack-ref-backfill"
 ): Promise<BeginRepositoryMaintenanceResult> {
   return await ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
@@ -58,7 +129,7 @@ export async function beginRepositoryMaintenanceState(
     const token = crypto.randomUUID();
     leases.push({
       token,
-      operation: "pack-ref-backfill",
+      operation,
       createdAt: now,
       expiresAt: now + SNAPSHOT_MATERIALIZATION_LEASE_TTL_MS,
     });
@@ -178,6 +249,9 @@ export async function beginRepositoryDeletionState(
       await store.get("repositoryMaintenanceLeases"),
       now
     );
+    const nativeReaderLease = await store.get("nativeCatalogReaderLease");
+    const nativeReaderActive = !!nativeReaderLease && nativeReaderLease.expiresAt > now;
+    const readLeases = activeReadLeases(await store.get("repositoryReadLeases"), now);
     if (snapshotLeases.length > 0) {
       await store.put("snapshotMaterializationLeases", snapshotLeases);
     } else {
@@ -188,11 +262,18 @@ export async function beginRepositoryDeletionState(
     } else {
       await store.delete("repositoryMaintenanceLeases");
     }
+    if (readLeases.length > 0) {
+      await store.put("repositoryReadLeases", readLeases);
+    } else {
+      await store.delete("repositoryReadLeases");
+    }
     await store.put("repositoryDeleting", true);
     return {
       ready:
         !writerMayStillBeDraining(await store.get("receiveLease"), now) &&
         !writerMayStillBeDraining(await store.get("compactLease"), now) &&
+        !nativeReaderActive &&
+        readLeases.length === 0 &&
         snapshotLeases.length === 0 &&
         maintenanceLeases.length === 0,
       snapshotPrefixes: (await store.get("snapshotPrefixes")) ?? [],

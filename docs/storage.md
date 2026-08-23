@@ -9,6 +9,7 @@ This project uses a hybrid storage approach to balance strong consistency for re
   - `refs` (array of `{ name, oid }`)
   - `head` (object with `target`, optional `oid`, `unborn`)
   - Lease state (`receiveLease`, `compactLease`)
+  - Native Container reader lease and pending generation-publication marker
 - Access patterns:
   - Always consistent; great for writes and metadata reads
 
@@ -28,9 +29,26 @@ Note: All SQLite access goes through the data access layer (DAL) in `src/do/repo
 - Objects:
   - Pack files: `do/<id>/objects/pack/<name>.pack`
   - Pack indexes: `do/<id>/objects/pack/<name>.idx` — authoritative for pack membership and object lookup
+  - Immutable generation manifests: `do/<id>/generations/<generation>.json`
+  - Low-frequency CAS pointer: `do/<id>/generation-index.json`
 - Access patterns:
   - Range reads for packfile assembly (cheap and efficient)
   - `.idx` fanout reads for object discovery and location
+  - Conditional generation-pointer writes after compaction or reachability GC;
+    ordinary reads and receives do not mutate this key
+  - Every superseded-pack delete validates repository ownership and proves the
+    target absent from the currently indexed immutable manifest. Native
+    processing and streaming Git fetches hold renewable read leases until they
+    stop using their captured pack snapshot.
+
+## Container active cache
+
+The repository Container keeps immutable pack and index files on its ephemeral
+SSD while the instance remains active. Each operation builds a disposable bare
+Git view from hard links to those cached artifacts. A cold Container downloads
+the active catalog once; a warm checkpoint downloads only its new input and any
+catalog artifact not already present. The cache is never authoritative: R2 plus
+RepoDO metadata remains sufficient to reconstruct it after sleep or restart.
 
 ## Key conventions (src/keys.ts)
 

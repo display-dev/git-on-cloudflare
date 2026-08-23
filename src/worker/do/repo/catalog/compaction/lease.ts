@@ -257,6 +257,10 @@ export async function commitCompactionState(args: {
 
   const activeCatalog = await listActivePackCatalog(db);
   const nextPackCatalogVersion = await bumpPacksetVersion(store);
+  await store.put("generationPublicationPending", {
+    generation: nextPackCatalogVersion,
+    activePackKeys: activeCatalog.map((row) => row.packKey),
+  });
 
   const shouldRequeue = catalogNeedsCompaction(activeCatalog);
   if (shouldRequeue) {

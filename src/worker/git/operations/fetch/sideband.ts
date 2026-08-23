@@ -140,9 +140,13 @@ export async function pipePackWithSideband(
     signal?: AbortSignal;
     progressMux: SidebandProgressMux;
     log: Logger;
+    onChunk?: () => Promise<void>;
+    waitForCapacity?: () => Promise<void>;
   }
 ): Promise<void> {
   const { signal, progressMux, log } = options;
+  let packBytes = 0;
+  let packChunks = 0;
 
   try {
     const sidebandTransform = createSidebandTransform({ signal });
@@ -161,14 +165,19 @@ export async function pipePackWithSideband(
       const { done, value } = await reader.read();
       if (done) break;
 
+      await options.onChunk?.();
       await progressMux.sendPending((msg) => emitProgress(controller, msg));
+      await options.waitForCapacity?.();
       controller.enqueue(value);
+      packBytes += value.byteLength;
+      packChunks++;
     }
 
     progressMux.sendRemaining((msg) => emitProgress(controller, msg));
     controller.enqueue(flushPkt());
+    log.info("pipe:complete", { packBytes, packChunks });
   } catch (error) {
-    log.error("pipe:error", { error: String(error) });
+    log.error("pipe:error", { packBytes, packChunks, error: String(error) });
     throw error;
   }
 }

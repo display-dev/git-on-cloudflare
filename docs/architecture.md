@@ -50,6 +50,17 @@ The codebase is organized into focused modules with `index.ts` export files:
   - `beginReceive()`, `finalizeReceive()`, `abortReceive()` — receive lease lifecycle
   - `beginCompaction()`, `commitCompaction()` — queue-driven pack compaction
   - `getActivePackCatalog()` — pack catalog snapshot for worker-local reads
+- Native processing pins the returned `packsetVersion` with one renewable
+  Container reader lease. Superseded-pack cleanup retries while an older
+  generation is pinned.
+- Smart HTTP fetches hold a bounded renewable repository read lease for the
+  lifetime of the response stream, so a long clone cannot lose a snapshotted
+  pack to delayed cleanup.
+- Successful compaction/GC leaves a durable publication marker in RepoDO until
+  the Worker uploads the immutable R2 generation manifest and conditionally
+  advances `generation-index.json`. The marker stores only the ordered pack
+  keys, and upgraded repositories bootstrap their first marker from the current
+  catalog before any old superseded rows are removed.
 - Push: the Worker writes `.pack` and `.idx` to R2, then commits refs and pack-catalog metadata atomically through typed DO RPCs. One active receive lease at a time; concurrent pushes receive `503 Retry-After: 10`.
 - Pack metadata lives in `pack_catalog` (SQLite). Exact pack membership lives in `.idx` files in R2.
 

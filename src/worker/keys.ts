@@ -32,6 +32,14 @@ export function r2PackDirPrefix(prefix: string): string {
   return `${prefix}/objects/pack/`;
 }
 
+export function repositoryGenerationManifestKey(prefix: string, generation: number): string {
+  return `${prefix}/generations/${generation}.json`;
+}
+
+export function repositoryGenerationIndexKey(prefix: string): string {
+  return `${prefix}/generation-index.json`;
+}
+
 // The raw client pack is immutable staging input. Native processing writes a
 // separate self-contained pack so a retry can safely replace only its own
 // derived artifacts without ever mutating an active catalog entry.

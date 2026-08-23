@@ -2,6 +2,7 @@ import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
 import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
 import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
+import type { BeginRepositoryMaintenanceResult } from "@/worker/do/repo/repositoryLifecycle";
 
 import {
   type CompactionDeleteQueueMessage,
@@ -21,8 +22,13 @@ import {
   stagePackToR2,
   type StagedPackUpload,
 } from "@/worker/git/receive/r2Upload";
-import { doPrefix, packIndexKey, packRefsKey, r2PackKey } from "@/worker/keys";
+import { doPrefix, packIndexKey, packRefsKey, r2PackDirPrefix, r2PackKey } from "@/worker/keys";
 import { createQueueTaskContext, logSoftBudgetExhausted, retryQueueMessage } from "./context";
+import {
+  publishRepositoryGeneration,
+  readPublishedRepositoryGeneration,
+  readPublishedRepositoryGenerationState,
+} from "@/worker/git/generation/publish";
 
 const COMPACTION_SUBREQUEST_BUDGET = 7_500;
 const COMPACTION_RETRY_DELAY_SECONDS = 30;
@@ -36,6 +42,103 @@ function countCompactionSubrequest(cacheCtx: CacheContext, log: Logger, op: stri
     op,
     count: n,
   });
+}
+
+async function publishPendingGeneration(args: {
+  env: Env;
+  doId: string;
+  stub: DurableObjectStub<RepoDurableObject>;
+  limiter: SubrequestLimiter;
+  cacheCtx: CacheContext;
+  log: Logger;
+}): Promise<boolean> {
+  countCompactionSubrequest(args.cacheCtx, args.log, "do:begin-generation-publication");
+  const maintenance = await args.limiter.run<BeginRepositoryMaintenanceResult>(
+    "do:begin-generation-publication",
+    () => args.stub.beginRepositoryMaintenance("generation-publication")
+  );
+  if (!maintenance.ok) return false;
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      countCompactionSubrequest(args.cacheCtx, args.log, "do:get-pending-generation");
+      const pending = await args.limiter.run("do:get-pending-generation", () =>
+        args.stub.getPendingGenerationPublication()
+      );
+      let publication = pending;
+      if (!publication) {
+        const publishedGeneration = await readPublishedRepositoryGeneration({
+          env: args.env,
+          doId: args.doId,
+          limiter: args.limiter,
+          countSubrequest: (op, n = 1) => countCompactionSubrequest(args.cacheCtx, args.log, op, n),
+        });
+        if (publishedGeneration !== null) return true;
+        countCompactionSubrequest(args.cacheCtx, args.log, "do:ensure-generation-publication");
+        publication = await args.limiter.run("do:ensure-generation-publication", () =>
+          args.stub.ensureGenerationPublicationPending()
+        );
+      }
+      await publishRepositoryGeneration({
+        env: args.env,
+        doId: args.doId,
+        generation: publication.generation,
+        activePackKeys: publication.activePackKeys,
+        limiter: args.limiter,
+        countSubrequest: (op, n = 1) => countCompactionSubrequest(args.cacheCtx, args.log, op, n),
+        log: args.log,
+      });
+      countCompactionSubrequest(args.cacheCtx, args.log, "do:complete-generation-publication");
+      const completed = await args.limiter.run("do:complete-generation-publication", () =>
+        args.stub.completeGenerationPublication(publication.generation)
+      );
+      if (completed) return true;
+    }
+    throw new Error("repository generation publication advanced during reconciliation");
+  } finally {
+    countCompactionSubrequest(args.cacheCtx, args.log, "do:finish-generation-publication");
+    await args.limiter.run("do:finish-generation-publication", () =>
+      args.stub.finishRepositoryMaintenance(maintenance.token)
+    );
+  }
+}
+
+async function scheduleSupersededPackCleanup(args: {
+  env: Env;
+  doId: string;
+  repoId?: string;
+  stub: DurableObjectStub<RepoDurableObject>;
+  limiter: SubrequestLimiter;
+  cacheCtx: CacheContext;
+  log: Logger;
+}): Promise<void> {
+  countCompactionSubrequest(args.cacheCtx, args.log, "do:list-superseded-packs");
+  const superseded = await args.limiter.run("do:list-superseded-packs", () =>
+    args.stub.listSupersededGcPacks()
+  );
+  if (superseded.length === 0) return;
+  const publishedGeneration = await readPublishedRepositoryGeneration({
+    env: args.env,
+    doId: args.doId,
+    limiter: args.limiter,
+    countSubrequest: (op, n = 1) => countCompactionSubrequest(args.cacheCtx, args.log, op, n),
+  });
+  if (publishedGeneration === null) {
+    throw new Error("superseded cleanup is waiting for a published repository generation");
+  }
+  countCompactionSubrequest(args.cacheCtx, args.log, "queue:compaction-delete");
+  await args.limiter.run("queue:compaction-delete", () =>
+    args.env.REPO_TASKS_QUEUE.send(
+      {
+        kind: "compaction-delete",
+        doId: args.doId,
+        repoId: args.repoId,
+        packKeys: superseded.map((row) => row.packKey),
+        supersededAtGeneration: publishedGeneration,
+        removeCatalogRows: true,
+      },
+      { delaySeconds: SUPERSEDED_PACK_DELETE_DELAY_SECONDS }
+    )
+  );
 }
 
 async function cleanupStagedCompaction(args: {
@@ -137,6 +240,19 @@ export async function handleCompactionMessage(
   let leaseToken: string | undefined;
 
   try {
+    if (!(await publishPendingGeneration({ env, doId: body.doId, stub, limiter, cacheCtx, log }))) {
+      message.ack();
+      return;
+    }
+    await scheduleSupersededPackCleanup({
+      env,
+      doId: body.doId,
+      repoId: body.repoId,
+      stub,
+      limiter,
+      cacheCtx,
+      log,
+    });
     countCompactionSubrequest(cacheCtx, log, "do:begin-compaction");
     const begin = await limiter.run("do:begin-compaction", async () => {
       return await stub.beginCompaction();
@@ -321,6 +437,7 @@ export async function handleCompactionMessage(
     }
 
     leaseToken = undefined;
+    stagedUpload = undefined;
     if (commit.shouldRequeue) {
       ctx.waitUntil(
         env.REPO_TASKS_QUEUE.send({
@@ -333,21 +450,19 @@ export async function handleCompactionMessage(
       );
     }
 
-    if (commit.supersededPackKeys.length > 0) {
-      ctx.waitUntil(
-        env.REPO_TASKS_QUEUE.send(
-          {
-            kind: "compaction-delete",
-            doId: body.doId,
-            repoId: body.repoId,
-            packKeys: commit.supersededPackKeys,
-          },
-          { delaySeconds: SUPERSEDED_PACK_DELETE_DELAY_SECONDS }
-        ).catch((error) => {
-          log.warn("compaction:delete-enqueue-failed", { error: String(error) });
-        })
-      );
+    if (!(await publishPendingGeneration({ env, doId: body.doId, stub, limiter, cacheCtx, log }))) {
+      message.ack();
+      return;
     }
+    await scheduleSupersededPackCleanup({
+      env,
+      doId: body.doId,
+      repoId: body.repoId,
+      stub,
+      limiter,
+      cacheCtx,
+      log,
+    });
 
     log.info("compaction:done", {
       targetPackKey: commit.targetPackKey,
@@ -396,6 +511,46 @@ export async function handleCompactionDeleteMessage(
   const { cacheCtx, limiter } = task;
 
   try {
+    const readerStub = getRepoStubByDoId(env, body.doId) as DurableObjectStub<RepoDurableObject>;
+    const ownedPackPrefix = r2PackDirPrefix(doPrefix(body.doId));
+    if (body.packKeys.some((packKey) => !packKey.startsWith(ownedPackPrefix))) {
+      log.warn("compaction:delete-invalid-pack-owner");
+      message.ack();
+      return;
+    }
+    const published = await readPublishedRepositoryGenerationState({
+      env,
+      doId: body.doId,
+      limiter,
+      countSubrequest: (op, n = 1) => countCompactionSubrequest(cacheCtx, log, op, n),
+    });
+    const generationTooOld =
+      body.supersededAtGeneration !== undefined &&
+      (published === null || published.generation < body.supersededAtGeneration);
+    const stillPublished =
+      published === null || body.packKeys.some((packKey) => published.activePackKeys.has(packKey));
+    if (generationTooOld || stillPublished) {
+      log.info("compaction:delete-generation-pending", {
+        supersededAtGeneration: body.supersededAtGeneration,
+        publishedGeneration: published?.generation,
+        stillPublished,
+      });
+      retryQueueMessage(message, COMPACTION_RETRY_DELAY_SECONDS);
+      return;
+    }
+    countCompactionSubrequest(cacheCtx, log, "do:check-native-reader-generation");
+    const deletionGeneration = body.supersededAtGeneration ?? published.generation;
+    const readerFence = await limiter.run("do:check-native-reader-generation", async () => {
+      return await readerStub.canDeleteSupersededGeneration(deletionGeneration);
+    });
+    if (!readerFence.safe) {
+      log.info("compaction:delete-reader-active", {
+        supersededAtGeneration: deletionGeneration,
+        retryAfterSeconds: readerFence.retryAfterSeconds,
+      });
+      retryQueueMessage(message, readerFence.retryAfterSeconds ?? 30);
+      return;
+    }
     let confirmedPackKeys = body.packKeys;
     let cleanupStub: DurableObjectStub<RepoDurableObject> | undefined;
     if (body.removeCatalogRows) {

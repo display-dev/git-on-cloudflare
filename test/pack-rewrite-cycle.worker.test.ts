@@ -41,6 +41,46 @@ async function readStreamBytes(stream: ReadableStream<Uint8Array>): Promise<Uint
 }
 
 describe("pack rewrite cycles", () => {
+  it("preserves a single pack byte-for-byte across multiple exact R2 ranges", async () => {
+    const payload = new Uint8Array(9 * 1024 * 1024);
+    let state = 0x6d2b79f5;
+    for (let index = 0; index < payload.length; index++) {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      payload[index] = state & 0xff;
+    }
+    const oid = await computeOid("blob", payload);
+    const packBytes = await buildPack([{ type: "blob", payload }]);
+    expect(packBytes.byteLength).toBeGreaterThan(8 * 1024 * 1024);
+
+    const packKey = `test/rewrite-ranged-passthrough-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(packKey, packBytes);
+    const indexed = await indexTestPack(env, packKey, packBytes.byteLength);
+    const snapshot = {
+      packs: [{ packKey, packBytes: packBytes.byteLength, idx: indexed.idxView }],
+    };
+    const rewritten = await rewritePack(env, snapshot, [oid], {
+      limiter: { run: async <T>(_label: string, fn: () => Promise<T>) => await fn() },
+      countSubrequest: () => {},
+    });
+    expect(rewritten).toBeDefined();
+    const rewrittenBytes = await readStreamBytes(rewritten!);
+    expect(rewrittenBytes.byteLength).toBe(packBytes.byteLength);
+    const [expectedDigest, actualDigest] = await Promise.all([
+      crypto.subtle.digest("SHA-256", Uint8Array.from(packBytes).buffer),
+      crypto.subtle.digest("SHA-256", Uint8Array.from(rewrittenBytes).buffer),
+    ]);
+    expect(bytesToHex(new Uint8Array(actualDigest))).toBe(
+      bytesToHex(new Uint8Array(expectedDigest))
+    );
+
+    const verifyKey = `test/rewrite-ranged-passthrough-verify-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(verifyKey, rewrittenBytes);
+    const verified = await indexTestPack(env, verifyKey, rewrittenBytes.byteLength);
+    expect(verified.objectCount).toBe(1);
+  });
+
   it("skips a cyclic selected REF_DELTA base duplicate and chooses an older alternate", async () => {
     const seedPayload = new TextEncoder().encode("seed\n");
     const aSuffix = new TextEncoder().encode("a\n");

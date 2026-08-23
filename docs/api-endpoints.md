@@ -65,7 +65,9 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
   receive. Returns `202` while durable processing is active, `200` for a
   terminal ledger result, `404` when no operation exists, and `503` when the
   authoritative Durable Object cannot be queried. Authentication runs before
-  repository lookup.
+  repository lookup. Once native processing has completed, the result includes
+  bounded `elapsedMs`, `scratchBytes`, `hydratedBytes`, `downloadedBytes`, and
+  `cacheHitBytes` metrics; it never returns R2 keys or Container diagnostics.
 
 ## Web UI Routes
 

@@ -32,6 +32,15 @@ export function isReachabilityGcReservedSubrequest(op: string): boolean {
   return (
     op === "queue:reachability-gc-delete" ||
     op === "do:reconcile-reachability-gc" ||
+    op === "do:begin-generation-publication" ||
+    op === "do:get-pending-generation" ||
+    op === "do:ensure-generation-publication" ||
+    op === "do:complete-generation-publication" ||
+    op === "do:finish-generation-publication" ||
+    op === "r2:put-generation-manifest" ||
+    op === "r2:get-generation-manifest" ||
+    op === "r2:get-generation-index" ||
+    op === "r2:cas-generation-index" ||
     op === "do:abort-empty-reachability-gc" ||
     op === "do:abort-reachability-gc" ||
     op === "r2:abort-pack-multipart" ||

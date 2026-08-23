@@ -49,6 +49,7 @@ type ExecuteNativeReceivePipelineArgs = {
   leaseToken: string;
   operationId?: string | undefined;
   activeCatalog: PackCatalogRow[];
+  catalogGeneration: number;
   commands: ReceiveCommand[];
   acceptedWrites: AcceptedWriteFact[];
   log: Logger;
@@ -172,6 +173,7 @@ export async function executeNativeReceivePipeline(
       commands: args.commands,
       acceptedWrites: args.acceptedWrites,
       activeCatalog: args.activeCatalog,
+      catalogGeneration: args.catalogGeneration,
       createdAt: now,
       updatedAt: now,
       attempts: 0,

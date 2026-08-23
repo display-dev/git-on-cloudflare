@@ -39,7 +39,8 @@ const CONTAINER_READY_ATTEMPTS = 120;
 const CONTAINER_READY_INTERVAL_MS = 250;
 const CONTAINER_RESPONSE_MAX_BYTES = 64 * 1024;
 const OUTPUT_SIDECAR_MAX_BYTES = 1_000_000_000;
-const LEASE_HEARTBEAT_MS = 60_000;
+const LEASE_HEARTBEAT_MS = 30_000;
+const NATIVE_READER_LEASE_TTL_MS = 2 * 60_000;
 const PROCESSING_CLAIM_TTL_MS = 3 * 60_000;
 const CONTAINER_PROCESS_TIMEOUT_MS = 20 * 60_000;
 
@@ -52,6 +53,9 @@ const nativeReceiveProcessResultSchema = z.object({
   packSha1: z.string().regex(/^[0-9a-f]{40}$/),
   elapsedMs: z.number().int().nonnegative(),
   scratchBytes: z.number().int().nonnegative(),
+  hydratedBytes: z.number().int().nonnegative().default(0),
+  downloadedBytes: z.number().int().nonnegative().default(0),
+  cacheHitBytes: z.number().int().nonnegative().default(0),
 });
 
 type NativeProcessor = (args: {
@@ -422,6 +426,111 @@ async function releaseOperationClaim(
   return (await getNativeReceiveOperationState(ctx, operation.id)) ?? released;
 }
 
+async function acquireNativeCatalogReaderLease(
+  ctx: DurableObjectState,
+  operation: NativeReceiveOperation
+): Promise<"acquired" | "catalog_superseded" | "reader_busy" | "repository_deleting"> {
+  const now = Date.now();
+  return await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return "repository_deleting";
+    const generationFloor = await store.get("nativeCatalogReaderGenerationFloor");
+    if (typeof generationFloor === "number" && operation.catalogGeneration < generationFloor) {
+      return "catalog_superseded";
+    }
+    const existing = await store.get("nativeCatalogReaderLease");
+    if (existing && existing.expiresAt > now && existing.token !== operation.id) {
+      return "reader_busy";
+    }
+    await store.put("nativeCatalogReaderLease", {
+      token: operation.id,
+      createdAt: existing?.token === operation.id ? existing.createdAt : now,
+      expiresAt: now + NATIVE_READER_LEASE_TTL_MS,
+      operation: "native-reader",
+      generation: operation.catalogGeneration,
+    });
+    return "acquired";
+  });
+}
+
+async function renewNativeCatalogReaderLease(
+  ctx: DurableObjectState,
+  operation: NativeReceiveOperation
+): Promise<boolean> {
+  const now = Date.now();
+  return await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) return false;
+    const existing = await store.get("nativeCatalogReaderLease");
+    if (
+      !existing ||
+      existing.token !== operation.id ||
+      existing.generation !== operation.catalogGeneration ||
+      existing.expiresAt <= now
+    ) {
+      return false;
+    }
+    await store.put("nativeCatalogReaderLease", {
+      ...existing,
+      expiresAt: now + NATIVE_READER_LEASE_TTL_MS,
+    });
+    return true;
+  });
+}
+
+async function releaseNativeCatalogReaderLease(
+  ctx: DurableObjectState,
+  operationId: string
+): Promise<void> {
+  await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const existing = await store.get("nativeCatalogReaderLease");
+    if (existing?.token === operationId) await store.delete("nativeCatalogReaderLease");
+  });
+}
+
+export async function canDeleteSupersededGenerationState(
+  ctx: DurableObjectState,
+  generation?: number
+): Promise<{ safe: boolean; retryAfterSeconds?: number }> {
+  return await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const lease = await store.get("nativeCatalogReaderLease");
+    const now = Date.now();
+    const repositoryReaders = ((await store.get("repositoryReadLeases")) ?? []).filter(
+      (reader) => reader.expiresAt > now
+    );
+    if (repositoryReaders.length > 0) {
+      await store.put("repositoryReadLeases", repositoryReaders);
+      return {
+        safe: false,
+        retryAfterSeconds: Math.max(
+          1,
+          Math.ceil((Math.max(...repositoryReaders.map((reader) => reader.expiresAt)) - now) / 1000)
+        ),
+      };
+    }
+    await store.delete("repositoryReadLeases");
+    if (
+      lease &&
+      lease.expiresAt > now &&
+      (typeof generation !== "number" || lease.generation < generation)
+    ) {
+      return {
+        safe: false,
+        retryAfterSeconds: Math.max(1, Math.ceil((lease.expiresAt - now) / 1000)),
+      };
+    }
+    if (typeof generation === "number") {
+      const floor = await store.get("nativeCatalogReaderGenerationFloor");
+      if (floor === undefined || floor < generation) {
+        await store.put("nativeCatalogReaderGenerationFloor", generation);
+      }
+    }
+    return { safe: true };
+  });
+}
+
 function bridgeProps(operation: NativeReceiveOperation): RepositoryContainerBridgeProps {
   const activeBytes = operation.activeCatalog.reduce((total, pack) => total + pack.packBytes, 0);
   const maximumOutputPackBytes = operation.inputBytes + activeBytes;
@@ -534,12 +643,11 @@ async function runContainerProcessor(args: {
   }
 
   const container = repositoryContainer(args.ctx);
-  if (container.running) {
-    await container.destroy("restarting repository processor for a durable operation attempt");
-  }
   const bridge = args.ctx.exports.RepositoryContainerBridge({ props: args.bridgeProps });
   await container.interceptOutboundHttp("repo-r2.internal", bridge);
-  container.start({ enableInternet: false });
+  if (!container.running) {
+    container.start({ enableInternet: false });
+  }
 
   try {
     await waitForContainerReady(container);
@@ -577,9 +685,6 @@ async function runContainerProcessor(args: {
     if (activeProcessorAborts.get(processorKey) === processorAbort) {
       activeProcessorAborts.delete(processorKey);
     }
-    if (container.running) {
-      await container.destroy("repository operation attempt complete").catch(() => {});
-    }
   }
 }
 
@@ -588,6 +693,8 @@ export async function stopNativeReceiveContainerState(ctx: DurableObjectState): 
   if (ctx.container?.running) {
     await ctx.container.destroy("repository deletion fence activated");
   }
+  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  await store.delete("nativeCatalogReaderLease");
 }
 
 async function deleteOperationObjects(args: {
@@ -791,13 +898,58 @@ export async function runNativeReceiveOperationState(args: {
   });
 
   let nativeResult: NativeReceiveProcessResult;
+  const readerLeaseResult = await acquireNativeCatalogReaderLease(args.ctx, operation);
+  if (readerLeaseResult === "catalog_superseded") {
+    args.logger.warn("native-receive:catalog-superseded", {
+      operationId: operation.id,
+      catalogGeneration: operation.catalogGeneration,
+      retryable: false,
+    });
+    const failed = await markTerminal({
+      ctx: args.ctx,
+      operation,
+      claimId,
+      state: "failed",
+      errorCode: "catalog_superseded",
+    });
+    await abortReceiveLease(args.ctx, operation.leaseToken);
+    const cleaned = await completeOperationCleanup({
+      ctx: args.ctx,
+      env: args.env,
+      operation: failed,
+      includeOutputs: true,
+      logger: args.logger,
+    });
+    return nativeReceiveOperationView(cleaned);
+  }
+  if (readerLeaseResult !== "acquired") {
+    args.logger.info("native-receive:reader-pending", {
+      operationId: operation.id,
+      reason: readerLeaseResult,
+      retryable: true,
+    });
+    const released = await releaseOperationClaim(
+      args.ctx,
+      {
+        ...operation,
+        state: "staged",
+        attempts: Math.max(0, operation.attempts - 1),
+      },
+      claimId
+    );
+    await scheduleNativeWake(args.ctx, args.env, Date.now() + 1_000);
+    return nativeReceiveOperationView(released);
+  }
   let heartbeatFailure: Error | undefined;
   let heartbeatTail = Promise.resolve();
   const heartbeat = setInterval(() => {
     heartbeatTail = heartbeatTail
       .then(async () => {
-        if (!(await renewOperationLease(args.ctx, operation, claimId))) {
+        const operationRenewed = await renewOperationLease(args.ctx, operation, claimId);
+        const readerRenewed = await renewNativeCatalogReaderLease(args.ctx, operation);
+        if (!operationRenewed || !readerRenewed) {
           heartbeatFailure = new Error("native receive lease ownership was lost");
+          activeProcessorAborts.get(args.ctx.id.toString())?.abort("native lease renewal failed");
         }
       })
       .catch((error) => {
@@ -860,7 +1012,16 @@ export async function runNativeReceiveOperationState(args: {
     return nativeReceiveOperationView(cleaned);
   } finally {
     clearInterval(heartbeat);
+    await releaseNativeCatalogReaderLease(args.ctx, operation.id);
   }
+
+  args.logger.info("native-receive:processing-complete", {
+    operationId: operation.id,
+    elapsedMs: nativeResult.elapsedMs,
+    hydratedBytes: nativeResult.hydratedBytes,
+    downloadedBytes: nativeResult.downloadedBytes,
+    cacheHitBytes: nativeResult.cacheHitBytes,
+  });
 
   const ready: NativeReceiveOperation = {
     ...operation,

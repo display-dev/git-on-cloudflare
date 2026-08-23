@@ -319,6 +319,10 @@ export async function commitReachabilityGcState(args: {
     const currentVersion = (await store.get("packsetVersion")) || 0;
     const packCatalogVersion =
       currentVersion > args.packsetVersion ? currentVersion : await bumpPacksetVersion(store);
+    await store.put("generationPublicationPending", {
+      generation: packCatalogVersion,
+      activePackKeys: (await listActivePackCatalog(db)).map((row) => row.packKey),
+    });
     // The original GC owns only the next catalog version. If receives or a
     // later maintenance operation advanced it again while the Worker retried
     // a lost response, their compaction request is newer authority and must
@@ -439,6 +443,10 @@ export async function commitReachabilityGcState(args: {
     throw new Error("reachability GC catalog commit produced an invalid active pack count");
   }
   const packCatalogVersion = await bumpPacksetVersion(store);
+  await store.put("generationPublicationPending", {
+    generation: packCatalogVersion,
+    activePackKeys: committedActiveCatalog.map((row) => row.packKey),
+  });
   await store.delete("compactionWantedAt");
   await clearGcAttemptState(args.ctx, args.token);
   args.logger?.info("reachability-gc:commit", {

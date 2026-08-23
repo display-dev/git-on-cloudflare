@@ -403,6 +403,9 @@ describe("durable native receive and import", () => {
         packSha1: "c".repeat(40),
         elapsedMs: 2,
         scratchBytes: pack.byteLength + 2,
+        hydratedBytes: 0,
+        downloadedBytes: pack.byteLength,
+        cacheHitBytes: 0,
       };
     });
 
@@ -498,6 +501,9 @@ describe("durable native receive and import", () => {
         packSha1: "f".repeat(40),
         elapsedMs: 1,
         scratchBytes: pack.byteLength + 2,
+        hydratedBytes: 0,
+        downloadedBytes: pack.byteLength,
+        cacheHitBytes: 0,
       };
     });
 
@@ -563,6 +569,13 @@ describe("durable native receive and import", () => {
       id: "native-lost-enqueue-operation",
       state: "committed",
       result: { changed: true },
+      metrics: {
+        elapsedMs: 1,
+        scratchBytes: pack.byteLength + 2,
+        hydratedBytes: 0,
+        downloadedBytes: pack.byteLength,
+        cacheHitBytes: 0,
+      },
     });
     expect((await stub.listRefs()).find((ref) => ref.name === "refs/heads/main")?.oid).toBe(
       commit.oid
@@ -773,6 +786,9 @@ describe("durable native receive and import", () => {
         packSha1: "a".repeat(40),
         elapsedMs: 5,
         scratchBytes: 6,
+        hydratedBytes: 0,
+        downloadedBytes: 1,
+        cacheHitBytes: 0,
       };
     });
 
@@ -891,6 +907,9 @@ describe("durable native receive and import", () => {
         packSha1: "b".repeat(40),
         elapsedMs: 1,
         scratchBytes: 3,
+        hydratedBytes: 0,
+        downloadedBytes: 1,
+        cacheHitBytes: 0,
       };
     });
 
@@ -913,6 +932,122 @@ describe("durable native receive and import", () => {
     expect(second?.state).toBe("committed");
     expect(second?.attempts).toBe(2);
     expect(await env.REPO_BUCKET.head(inputKey)).toBeNull();
+  });
+
+  it("does not consume processing attempts while another catalog reader owns the lease", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("native-reader-contention");
+    const seeded = await setupRepoForTests(env, owner, repo);
+    const operationId = "operation-reader-contention";
+    const input = new Uint8Array([1, 2, 3, 4]);
+    const inputKey = repositoryImportPackKey(seeded.doName, operationId);
+    const inputObject = await env.REPO_BUCKET.put(inputKey, input);
+    if (!inputObject) throw new Error("failed to stage test import");
+    nativeReceiveTest.setNativeProcessor(async ({ request }) => {
+      await env.REPO_BUCKET.put(request.outputPackKey, new Uint8Array([1]));
+      await env.REPO_BUCKET.put(request.outputIdxKey, new Uint8Array([2]));
+      await env.REPO_BUCKET.put(request.outputRefsKey, new Uint8Array([3]));
+      return {
+        operationId: request.operationId,
+        packBytes: 1,
+        idxBytes: 1,
+        refsBytes: 1,
+        objectCount: 1,
+        packSha1: "e".repeat(40),
+        elapsedMs: 1,
+        scratchBytes: 3,
+        hydratedBytes: 0,
+        downloadedBytes: 1,
+        cacheHitBytes: 0,
+      };
+    });
+    expect(
+      (
+        await postImport({
+          owner,
+          repo,
+          operationId,
+          inputBytes: input.byteLength,
+          inputEtag: inputObject.etag,
+        })
+      ).status
+    ).toBe(202);
+
+    const stub = getRepoStub(env, seeded.doName);
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        await state.storage.put("nativeCatalogReaderLease", {
+          token: "other-reader",
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 60_000,
+          operation: "native-reader",
+          generation: 0,
+        });
+      }
+    );
+    expect((await stub.runNativeReceiveOperation(operationId))?.attempts).toBe(0);
+    expect((await stub.runNativeReceiveOperation(operationId))?.attempts).toBe(0);
+
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => await state.storage.delete("nativeCatalogReaderLease")
+    );
+    const committed = await stub.runNativeReceiveOperation(operationId);
+    expect(committed?.state).toBe("committed");
+    expect(committed?.attempts).toBe(1);
+  });
+
+  it("refuses a stale native reader after deletion advances the generation floor", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("native-reader-floor");
+    const seeded = await setupRepoForTests(env, owner, repo);
+    const operationId = "operation-reader-floor";
+    const input = new Uint8Array([1, 2, 3, 4]);
+    const inputKey = repositoryImportPackKey(seeded.doName, operationId);
+    const inputObject = await env.REPO_BUCKET.put(inputKey, input);
+    if (!inputObject) throw new Error("failed to stage test import");
+    expect(
+      (
+        await postImport({
+          owner,
+          repo,
+          operationId,
+          inputBytes: input.byteLength,
+          inputEtag: inputObject.etag,
+        })
+      ).status
+    ).toBe(202);
+
+    const stub = getRepoStub(env, seeded.doName);
+    const operation = await runDOWithRetry(
+      () => stub,
+      async (_instance, state) =>
+        await state.storage.get<NativeReceiveOperation>(nativeReceiveOperationKey(operationId))
+    );
+    if (!operation) throw new Error("expected durable native receive operation");
+    await env.REPO_BUCKET.put(operation.outputPackKey, new Uint8Array([9]));
+    await env.REPO_BUCKET.put(packIndexKey(operation.outputPackKey), new Uint8Array([8]));
+    await env.REPO_BUCKET.put(packRefsKey(operation.outputPackKey), new Uint8Array([7]));
+    expect(await stub.canDeleteSupersededGeneration(1)).toEqual({ safe: true });
+    const stale = await stub.runNativeReceiveOperation(operationId);
+    expect(stale?.state).toBe("failed");
+    expect(stale?.errorCode).toBe("catalog_superseded");
+    expect(await stub.runNativeReceiveOperation(operationId)).toEqual(stale);
+    expect(await env.REPO_BUCKET.head(inputKey)).toBeNull();
+    expect(await env.REPO_BUCKET.head(operation.outputPackKey)).toBeNull();
+    expect(await env.REPO_BUCKET.head(packIndexKey(operation.outputPackKey))).toBeNull();
+    expect(await env.REPO_BUCKET.head(packRefsKey(operation.outputPackKey))).toBeNull();
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        expect(await state.storage.get("receiveLease")).toBeUndefined();
+        expect(
+          (await state.storage.get<NativeReceiveOperation>(nativeReceiveOperationKey(operationId)))
+            ?.cleanupPending
+        ).toBe(false);
+      }
+    );
   });
 
   it("rejects a same-size staged import overwrite by immutable etag", async () => {
@@ -965,6 +1100,9 @@ describe("durable native receive and import", () => {
         packSha1: "d".repeat(40),
         elapsedMs: 1,
         scratchBytes: 3,
+        hydratedBytes: 0,
+        downloadedBytes: 1,
+        cacheHitBytes: 0,
       };
     });
     expect(
@@ -989,6 +1127,7 @@ describe("durable native receive and import", () => {
     const duplicate = await stub.runNativeReceiveOperation(operationId);
     expect(duplicate?.state).toBe("processing");
     expect(calls).toBe(1);
+    expect(await stub.canDeleteSupersededGeneration(1)).toMatchObject({ safe: false });
     expect(
       await runDOWithRetry(
         () => stub,
@@ -998,6 +1137,7 @@ describe("durable native receive and import", () => {
     releaseProcessor?.();
     expect((await first)?.state).toBe("committed");
     expect(calls).toBe(1);
+    expect(await stub.canDeleteSupersededGeneration(1)).toEqual({ safe: true });
   });
 
   it("commits 130 sequential checkpoint receives without losing CAS or operation liveness", async () => {
@@ -1018,6 +1158,9 @@ describe("durable native receive and import", () => {
         packSha1: "e".repeat(40),
         elapsedMs: 1,
         scratchBytes: 3,
+        hydratedBytes: 0,
+        downloadedBytes: 1,
+        cacheHitBytes: 0,
       };
     });
 

@@ -18,7 +18,8 @@ Host unlimited private Git repositories at the edge with <50ms response times gl
 - **Streaming pack assembly** from R2 with range reads for efficient clones
 - **Streaming push pipeline** with atomic pack ingress and queue-driven compaction
 - **Durable native receive/import** behind an explicit rollout flag, with one
-  repository Durable Object owning the Container lifecycle and final outcome
+  repository Durable Object owning the Container lifecycle and final outcome;
+  immutable active packs remain cached on Container SSD across warm operations
 - **Modern web UI** with Tailwind CSS v4, React SSR, and focused client islands
 - **Interactive merge commit exploration** - expand merge commits to see side branch history
 - **Safer raw views**: `text/plain` for `/raw` by default and same‑origin Referer check for `/rawpath` to prevent hotlinking
@@ -69,8 +70,11 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 
 - Complete Git pack protocol v2 with `ls-refs` and `fetch` commands
 - Streaming receive writes packs directly to R2 with atomic metadata commit
-- Native receive/import stages immutable input in R2, survives request loss via
-  Queue and alarm recovery, and reconciles ambiguous finalization before cleanup
+- Native receive/import stages immutable input in R2 and survives request loss through durable
+  operations, Queue/alarm recovery, and queryable outcomes
+- Compaction publishes an immutable R2 generation manifest and CAS-updates one
+  low-frequency repository generation pointer; native readers and streaming
+  Git fetches hold bounded renewable leases while using captured pack snapshots
 - Tessera OIDC browser sessions and personal access tokens for Git pushes
 - Modern web UI with Tailwind CSS v4, React page components, and worker-side SSR
 - SQLite-backed metadata inside Durable Objects using `drizzle-orm/durable-sqlite`
@@ -155,6 +159,8 @@ See `.dev.vars.example` and `wrangler.jsonc` for the complete configuration.
 - 300s configured CPU limit per request on fetch and receive paths
 - Native receive/import uses a bounded standard-4 Container scratch envelope;
   this is an internal rollout seam, not a repository quota
+- Container SSD is an ephemeral active cache. A cold Container reconstructs
+  immutable packs from R2; warm operations download only missing catalog bytes
 - HTTP(S) only, no SSH protocol support
 - No server-side hooks yet
 - Thin-pack is not advertised; clients receive thick packs (side-band-64k, ofs-delta)

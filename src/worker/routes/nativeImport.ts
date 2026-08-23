@@ -201,6 +201,7 @@ async function handleCommitImport(c: AppContext): Promise<Response> {
     commands: parsed.data.commands,
     acceptedWrites,
     activeCatalog: begin.activeCatalog,
+    catalogGeneration: begin.packsetVersion,
     createdAt: now,
     updatedAt: now,
     attempts: 0,
