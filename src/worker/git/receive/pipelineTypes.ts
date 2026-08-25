@@ -4,6 +4,8 @@ export type ReceivePipelineResult = {
   empty: boolean;
   packKey?: string;
   packBytes?: number;
+  /** Byte-identical response emitted by stock receive-pack after durable commit. */
+  receivePackResponse?: Uint8Array;
 };
 
 export class ReceivePipelineHttpError extends Error {

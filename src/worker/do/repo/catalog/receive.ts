@@ -30,6 +30,9 @@ import {
   type AcceptedWriteFact,
 } from "@/worker/git/acceptedWrite";
 import { snapshotEventProbeEnabled } from "@/worker/git/snapshot/config";
+import { packIndexKey, packRefsKey } from "@/worker/keys";
+import { SubrequestLimiter } from "@/worker/git/operations/limits";
+import { bytesToHex, createDigestStream } from "@/worker/common";
 import {
   RECOVERY_ESCALATION_ATTEMPTS,
   recoveryRetryDelayMs,
@@ -43,6 +46,9 @@ export type FinalizeReceiveResult =
       changed: boolean;
       empty: boolean;
       shouldQueueCompaction: boolean;
+      outputValidationBytes: number;
+      outputValidationRequests: number;
+      outputEtags?: { pack: string; idx: string; refs: string };
     }
   | {
       status: "ref_conflict";
@@ -59,6 +65,135 @@ export type ReconcileReceiveResult =
   | { status: "aborted" }
   | { status: "unknown" };
 
+export class ReceiveOutputIntegrityError extends Error {
+  readonly bytes: number;
+  readonly requests: number;
+  readonly role: "pack" | "index" | "references";
+
+  constructor(
+    message: string,
+    details: {
+      bytes: number;
+      requests: number;
+      role: "pack" | "index" | "references";
+    }
+  ) {
+    super(message);
+    this.name = "ReceiveOutputIntegrityError";
+    this.bytes = details.bytes;
+    this.requests = details.requests;
+    this.role = details.role;
+  }
+}
+
+export type ReceiveFinalizeMilestone = {
+  phase: "output-integrity-verified" | "wal-put-complete" | "authoritative-ref-cas";
+  durable?: boolean | undefined;
+  bytes?: number | undefined;
+};
+
+async function verifyReceiveOutputIntegrity(
+  env: Env,
+  stagedPack: ReceiveFinalizeIntent["stagedPack"],
+  logger?: Logger
+): Promise<{
+  bytes: number;
+  requests: number;
+  etags?: { pack: string; idx: string; refs: string };
+}> {
+  if (!stagedPack?.integrity) return { bytes: 0, requests: 0 };
+  const limiter = new SubrequestLimiter(3);
+  const artifacts = [
+    {
+      role: "pack",
+      key: stagedPack.packKey,
+      bytes: stagedPack.packBytes,
+      sha256: stagedPack.integrity.packSha256,
+      expectedEtag: stagedPack.integrity.packEtag,
+    },
+    {
+      role: "index",
+      key: packIndexKey(stagedPack.packKey),
+      bytes: stagedPack.idxBytes,
+      sha256: stagedPack.integrity.idxSha256,
+      expectedEtag: stagedPack.integrity.idxEtag,
+    },
+    {
+      role: "references",
+      key: packRefsKey(stagedPack.packKey),
+      bytes: stagedPack.integrity.refsBytes,
+      sha256: stagedPack.integrity.refsSha256,
+      expectedEtag: stagedPack.integrity.refsEtag,
+    },
+  ] as const;
+  const etags: string[] = [];
+  let validatedBytes = 0;
+  let validationRequests = 0;
+  for (const artifact of artifacts) {
+    const reject = (message: string): ReceiveOutputIntegrityError =>
+      new ReceiveOutputIntegrityError(message, {
+        bytes: validatedBytes,
+        requests: validationRequests,
+        role: artifact.role,
+      });
+    if (artifact.bytes <= 0 || artifact.bytes > 32 * 1024 * 1024) {
+      throw reject(`receive ${artifact.role} output exceeds integrity verification bound`);
+    }
+    validationRequests++;
+    const object = await limiter.run(`r2:verify-receive-${artifact.role}`, () =>
+      env.REPO_BUCKET.get(artifact.key)
+    );
+    if (
+      !object ||
+      object.size !== artifact.bytes ||
+      object.customMetadata?.sha256 !== artifact.sha256 ||
+      (artifact.expectedEtag !== undefined && object.etag !== artifact.expectedEtag)
+    ) {
+      throw reject(`receive ${artifact.role} output integrity mismatch`);
+    }
+    etags.push(object.etag);
+    const digest = createDigestStream("SHA-256");
+    const digestWriter = digest.getWriter();
+    const reader = object.body.getReader();
+    let readBytes = 0;
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      validatedBytes += next.value.byteLength;
+      if (next.value.byteLength > artifact.bytes - readBytes) {
+        await reader.cancel("receive output exceeded declared size").catch(() => {});
+        await digestWriter.abort("receive output exceeded declared size").catch(() => {});
+        throw reject(`receive ${artifact.role} output exceeded declared size`);
+      }
+      readBytes += next.value.byteLength;
+      await digestWriter.write(next.value);
+    }
+    if (readBytes !== artifact.bytes) {
+      await digestWriter.abort("receive output was truncated").catch(() => {});
+      throw reject(`receive ${artifact.role} output was truncated`);
+    }
+    await digestWriter.close();
+    const actualSha256 = bytesToHex(new Uint8Array(await digest.digest));
+    if (actualSha256 !== artifact.sha256) {
+      throw reject(`receive ${artifact.role} output digest mismatch`);
+    }
+    logger?.debug("receive:output-integrity-read", {
+      role: artifact.role,
+      bytes: artifact.bytes,
+    });
+  }
+  logger?.info("receive:output-integrity-verified", { artifactCount: artifacts.length });
+  return {
+    bytes: validatedBytes,
+    requests: validationRequests,
+    etags: {
+      pack: etags[0]!,
+      idx: etags[1]!,
+      refs: etags[2]!,
+    },
+  };
+}
+
 const MAX_INGESTION_RECEIPTS = 128;
 const MAX_RECEIVE_OUTCOMES = 128;
 let skipNextReceiptStoreForTesting = false;
@@ -69,6 +204,7 @@ let failNextAfterCatalogUpsertForTesting = false;
 let catalogUpsertFailureCountForTesting = 0;
 let catalogActivationFailureCountForTesting = 0;
 let outcomeStoreFailureCountForTesting = 0;
+let suppressCompactionSchedulingForTesting = false;
 
 function acceptedWriteContextForFacts(
   facts: AcceptedWriteFact[] | undefined
@@ -106,6 +242,12 @@ function acceptedWriteFactsForIntent(
 }
 
 export const __test = {
+  suppressCompactionScheduling(): void {
+    suppressCompactionSchedulingForTesting = true;
+  },
+  compactionSchedulingSuppressed(): boolean {
+    return suppressCompactionSchedulingForTesting;
+  },
   skipNextReceiptStore(): void {
     skipNextReceiptStoreForTesting = true;
   },
@@ -141,6 +283,7 @@ export const __test = {
     catalogUpsertFailureCountForTesting = 0;
     catalogActivationFailureCountForTesting = 0;
     outcomeStoreFailureCountForTesting = 0;
+    suppressCompactionSchedulingForTesting = false;
   },
 };
 
@@ -249,7 +392,7 @@ export async function reconcileReceiveState(
   if (outcome) {
     await storeReceiveOutcome(ctx.storage, outcome);
     if (args.ingestionReceipt) await storeIngestionReceipt(ctx.storage, args.ingestionReceipt);
-    if (outcome.shouldQueueCompaction) {
+    if (outcome.shouldQueueCompaction && !suppressCompactionSchedulingForTesting) {
       await store.put("compactionWantedAt", Date.now());
       await scheduleCompactionWake(ctx, env);
     }
@@ -262,6 +405,9 @@ export async function reconcileReceiveState(
         changed: outcome.changed,
         empty: outcome.empty,
         shouldQueueCompaction: outcome.shouldQueueCompaction,
+        outputValidationBytes: outcome.outputValidationBytes ?? 0,
+        outputValidationRequests: outcome.outputValidationRequests ?? 0,
+        outputEtags: outcome.outputEtags,
       },
     };
   }
@@ -302,6 +448,8 @@ export async function reconcileReceiveState(
       changed: args.commands.length > 0,
       empty: refs.length === 0,
       shouldQueueCompaction: catalogNeedsCompaction(activeCatalog),
+      outputValidationBytes: 0,
+      outputValidationRequests: 0,
     };
     await storeReceiveOutcome(ctx.storage, {
       token: args.token,
@@ -309,6 +457,9 @@ export async function reconcileReceiveState(
       changed: result.changed,
       empty: result.empty,
       shouldQueueCompaction: result.shouldQueueCompaction,
+      outputValidationBytes: result.outputValidationBytes,
+      outputValidationRequests: result.outputValidationRequests,
+      outputEtags: result.outputEtags,
     });
     if (args.ingestionReceipt) await storeIngestionReceipt(ctx.storage, args.ingestionReceipt);
     await store.delete("receiveLease");
@@ -391,6 +542,28 @@ function resolveHeadAfterReceive(args: {
   return { target, unborn: true } as const;
 }
 
+function stagedPackMatchesRequest(
+  durable: ReceiveFinalizeIntent["stagedPack"],
+  requested: ReceiveFinalizeIntent["stagedPack"]
+): boolean {
+  if (!durable || !requested) return durable === requested;
+  const durableIntegrity = durable.integrity
+    ? {
+        packSha256: durable.integrity.packSha256,
+        idxSha256: durable.integrity.idxSha256,
+        refsSha256: durable.integrity.refsSha256,
+        refsBytes: durable.integrity.refsBytes,
+      }
+    : undefined;
+  return (
+    durable.packKey === requested.packKey &&
+    durable.packBytes === requested.packBytes &&
+    durable.idxBytes === requested.idxBytes &&
+    durable.objectCount === requested.objectCount &&
+    JSON.stringify(durableIntegrity) === JSON.stringify(requested.integrity)
+  );
+}
+
 export async function finalizeReceiveState(args: {
   ctx: DurableObjectState;
   env: Env;
@@ -402,11 +575,21 @@ export async function finalizeReceiveState(args: {
         packBytes: number;
         idxBytes: number;
         objectCount: number;
+        integrity?: {
+          packSha256: string;
+          idxSha256: string;
+          refsSha256: string;
+          refsBytes: number;
+          packEtag?: string;
+          idxEtag?: string;
+          refsEtag?: string;
+        };
       }
     | undefined;
   ingestionReceipt?: IngestionReceipt | undefined;
   acceptedWrites?: AcceptedWriteFact[] | undefined;
   logger?: Logger;
+  onMilestone?: ((milestone: ReceiveFinalizeMilestone) => Promise<void>) | undefined;
 }): Promise<FinalizeReceiveResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
   const intentKey = receiveFinalizeIntentKey(args.token);
@@ -421,11 +604,17 @@ export async function finalizeReceiveState(args: {
   await ensureRepoMetadataDefaults(store);
 
   if (priorOutcome) {
+    await args.onMilestone?.({
+      phase: "output-integrity-verified",
+      bytes: priorOutcome.outputValidationBytes ?? 0,
+    });
+    await args.onMilestone?.({ phase: "wal-put-complete", durable: true });
+    await args.onMilestone?.({ phase: "authoritative-ref-cas", durable: true });
     await storeReceiveOutcome(args.ctx.storage, priorOutcome);
     if (args.ingestionReceipt) {
       await storeIngestionReceipt(args.ctx.storage, args.ingestionReceipt);
     }
-    if (priorOutcome.shouldQueueCompaction) {
+    if (priorOutcome.shouldQueueCompaction && !suppressCompactionSchedulingForTesting) {
       await store.put("compactionWantedAt", Date.now());
       await scheduleCompactionWake(args.ctx, args.env);
     }
@@ -437,8 +626,15 @@ export async function finalizeReceiveState(args: {
       changed: priorOutcome.changed,
       empty: priorOutcome.empty,
       shouldQueueCompaction: priorOutcome.shouldQueueCompaction,
+      outputValidationBytes: priorOutcome.outputValidationBytes ?? 0,
+      outputValidationRequests: priorOutcome.outputValidationRequests ?? 0,
+      outputEtags: priorOutcome.outputEtags,
     };
   }
+
+  let outputValidationBytes = 0;
+  let outputValidationRequests = 0;
+  let outputEtags: { pack: string; idx: string; refs: string } | undefined;
 
   if (!intent) {
     const lease = await store.get("receiveLease");
@@ -483,13 +679,37 @@ export async function finalizeReceiveState(args: {
     }
     const nextRefs = applyReceiveCommands(currentRefs, args.commands);
     const expectedRefsVersion = (await store.get("refsVersion")) || 0;
+    const outputVerification = await verifyReceiveOutputIntegrity(
+      args.env,
+      args.stagedPack,
+      args.logger
+    );
+    outputValidationBytes = outputVerification.bytes;
+    outputValidationRequests = outputVerification.requests;
+    outputEtags = outputVerification.etags;
+    await args.onMilestone?.({
+      phase: "output-integrity-verified",
+      bytes: outputVerification.bytes,
+    });
+    const stagedPack =
+      args.stagedPack?.integrity && outputEtags
+        ? {
+            ...args.stagedPack,
+            integrity: {
+              ...args.stagedPack.integrity,
+              packEtag: outputEtags.pack,
+              idxEtag: outputEtags.idx,
+              refsEtag: outputEtags.refs,
+            },
+          }
+        : args.stagedPack;
     const nextIntent: ReceiveFinalizeIntent = {
       token: args.token,
       commands: args.commands,
       expectedRefsVersion,
       nextHead: resolveHeadAfterReceive({ storedHead: await store.get("head"), refs: nextRefs }),
       nextRefsVersion: expectedRefsVersion + 1,
-      stagedPack: args.stagedPack,
+      stagedPack,
       packSequence: args.stagedPack ? (await store.get("nextPackSeq")) || 1 : undefined,
       nextPacksetVersion: args.stagedPack
         ? ((await store.get("packsetVersion")) || 0) + 1
@@ -508,13 +728,31 @@ export async function finalizeReceiveState(args: {
         await transaction.setAlarm(recoveryAt);
       }
     });
+    args.logger?.info("receive:wal-put-complete", {
+      stockIntegrity: Boolean(nextIntent.stagedPack?.integrity),
+    });
+    await args.onMilestone?.({ phase: "wal-put-complete", durable: true });
   } else if (
     JSON.stringify(intent.commands) !== JSON.stringify(args.commands) ||
-    JSON.stringify(intent.stagedPack) !== JSON.stringify(args.stagedPack) ||
+    !stagedPackMatchesRequest(intent.stagedPack, args.stagedPack) ||
     JSON.stringify(intent.acceptedWriteContext) !==
       JSON.stringify(acceptedWriteContextForFacts(args.acceptedWrites))
   ) {
     throw new Error("FUBAR: receive finalize retry does not match durable intent");
+  } else {
+    const outputVerification = await verifyReceiveOutputIntegrity(
+      args.env,
+      intent.stagedPack,
+      args.logger
+    );
+    outputValidationBytes = outputVerification.bytes;
+    outputValidationRequests = outputVerification.requests;
+    outputEtags = outputVerification.etags;
+    await args.onMilestone?.({
+      phase: "output-integrity-verified",
+      bytes: outputVerification.bytes,
+    });
+    await args.onMilestone?.({ phase: "wal-put-complete", durable: true });
   }
 
   let shouldQueueCompaction = false;
@@ -607,12 +845,16 @@ export async function finalizeReceiveState(args: {
       );
     }
   });
+  await args.onMilestone?.({ phase: "authoritative-ref-cas", durable: true });
   const committed: ReceiveCommitOutcome = {
     token: args.token,
     statuses,
     changed: intent.commands.length > 0,
     empty: committedRefs.length === 0,
     shouldQueueCompaction,
+    outputValidationBytes,
+    outputValidationRequests,
+    outputEtags,
   };
   await storeReceiveOutcome(args.ctx.storage, committed);
   if (failNextAfterOutcomeStoreForTesting) {
@@ -623,7 +865,7 @@ export async function finalizeReceiveState(args: {
   if (intent.ingestionReceipt) {
     await storeIngestionReceipt(args.ctx.storage, intent.ingestionReceipt);
   }
-  if (shouldQueueCompaction) {
+  if (shouldQueueCompaction && !suppressCompactionSchedulingForTesting) {
     await store.put("compactionWantedAt", Date.now());
     await scheduleCompactionWake(args.ctx, args.env);
   }
@@ -644,5 +886,8 @@ export async function finalizeReceiveState(args: {
     changed: committed.changed,
     empty: committed.empty,
     shouldQueueCompaction,
+    outputValidationBytes,
+    outputValidationRequests,
+    outputEtags,
   };
 }

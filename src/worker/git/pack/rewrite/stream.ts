@@ -62,11 +62,13 @@ async function emitPackPayload(
   writer: WritableStreamDefaultWriter<Uint8Array>,
   table: SelectionTable,
   sel: number,
-  state: PackReadState | undefined
+  state: PackReadState | undefined,
+  waitForCapacity: () => Promise<void>
 ): Promise<void> {
   const syntheticPayload = table.syntheticPayloads[sel];
   if (syntheticPayload) {
     await writer.write(syntheticPayload);
+    await waitForCapacity();
     controller.enqueue(syntheticPayload);
     return;
   }
@@ -84,6 +86,7 @@ async function emitPackPayload(
   if (state.wholePack) {
     const payload = state.wholePack.subarray(payloadStart, payloadStart + bytesLeft);
     await writer.write(payload);
+    await waitForCapacity();
     controller.enqueue(payload);
     return;
   }
@@ -101,6 +104,7 @@ async function emitPackPayload(
     }
 
     await writer.write(window);
+    await waitForCapacity();
     controller.enqueue(window);
     currentOffset += window.length;
     bytesLeft -= window.length;
@@ -249,111 +253,147 @@ export function createRewriteStream(
   options?: RewriteOptions,
   onComplete?: () => void
 ): ReadableStream<Uint8Array> {
+  let resumeOnPull: (() => void) | undefined;
   return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let writer: WritableStreamDefaultWriter<Uint8Array> | undefined;
-      try {
-        const digestStream = createDigestStream("SHA-1");
-        const digestWriter = digestStream.getWriter();
-        writer = digestWriter;
+    start(controller) {
+      void (async () => {
+        let writer: WritableStreamDefaultWriter<Uint8Array> | undefined;
+        try {
+          const digestStream = createDigestStream("SHA-1");
+          const digestWriter = digestStream.getWriter();
+          writer = digestWriter;
 
-        const emit = async (chunk: Uint8Array) => {
-          await digestWriter.write(chunk);
-          controller.enqueue(chunk);
-        };
+          const waitForCapacity = async (): Promise<void> => {
+            while ((controller.desiredSize ?? 1) <= 0) {
+              if (options?.signal?.aborted) {
+                throw options.signal.reason ?? new Error("rewrite stream aborted");
+              }
+              await new Promise<void>((resolve) => {
+                let settled = false;
+                const resume = (): void => {
+                  if (settled) return;
+                  settled = true;
+                  options?.signal?.removeEventListener("abort", resume);
+                  if (resumeOnPull === resume) resumeOnPull = undefined;
+                  resolve();
+                };
+                resumeOnPull = resume;
+                options?.signal?.addEventListener("abort", resume, { once: true });
+                if (options?.signal?.aborted) resume();
+              });
+            }
+          };
 
-        await emit(buildPackHeader(table.count));
-        options?.onProgress?.(
-          `Enumerating objects: ${table.count}, from ${readStates.size} packs\n`
-        );
+          const emit = async (chunk: Uint8Array) => {
+            await digestWriter.write(chunk);
+            await waitForCapacity();
+            controller.enqueue(chunk);
+          };
 
-        const progressInterval = Math.max(1, Math.floor(table.count / 10));
-        let streamed = 0;
+          await emit(buildPackHeader(table.count));
+          options?.onProgress?.(
+            `Enumerating objects: ${table.count}, from ${readStates.size} packs\n`
+          );
 
-        for (let i = 0; i < table.count; i++) {
-          if (options?.signal?.aborted) {
+          const progressInterval = Math.max(1, Math.floor(table.count / 10));
+          let streamed = 0;
+
+          for (let i = 0; i < table.count; i++) {
+            if (options?.signal?.aborted) {
+              log.debug("rewrite:stream-aborted");
+              await digestWriter.abort();
+              controller.close();
+              return;
+            }
+
+            const sel = table.outputOrder[i];
+            const packSlot = table.packSlots[sel];
+            const readState = readStates.get(packSlot);
+            const syntheticPayload = table.syntheticPayloads[sel];
+            const headerBytes = buildEntryHeaderBytes(table, sel);
+            if (!readState && !syntheticPayload) {
+              const pack = snapshot.packs[packSlot];
+              log.error("rewrite:missing-read-state", {
+                sel,
+                packSlot,
+                entryIndex: table.entryIndices[sel],
+                packKey: pack?.packKey,
+                typeCode: table.typeCodes[sel],
+                baseSel: table.baseSlots[sel],
+              });
+              throw new Error(
+                `rewrite: missing read state for ${pack?.packKey}#${table.entryIndices[sel]}`
+              );
+            }
+
+            if (!headerBytes) {
+              const pack = snapshot.packs[packSlot];
+              const svLen = table.sizeVarLens[sel];
+              const typeCode = table.typeCodes[sel];
+              const baseSel = table.baseSlots[sel];
+              const basePackSlot = baseSel >= 0 ? table.packSlots[baseSel] : undefined;
+              const baseEntryIndex = baseSel >= 0 ? table.entryIndices[baseSel] : undefined;
+              log.error("rewrite:invalid-header-state", {
+                sel,
+                packSlot,
+                entryIndex: table.entryIndices[sel],
+                packKey: pack?.packKey,
+                typeCode,
+                sizeVarLen: svLen,
+                hasBaseOidRaw: !!table.baseOidRaw,
+                baseSel,
+                basePackSlot,
+                baseEntryIndex,
+              });
+              throw new Error(
+                `rewrite: invalid header state for ${pack?.packKey}#${table.entryIndices[sel]}`
+              );
+            }
+
+            await emit(headerBytes);
+            await emitPackPayload(controller, writer, table, sel, readState, waitForCapacity);
+
+            streamed++;
+            if (streamed % progressInterval === 0 || streamed === table.count) {
+              const percent = Math.round((streamed / table.count) * 100);
+              if (streamed === table.count) {
+                options?.onProgress?.(
+                  `Counting objects: 100% (${table.count}/${table.count}), done.\n`
+                );
+              } else {
+                options?.onProgress?.(
+                  `Counting objects: ${percent}% (${streamed}/${table.count})\r`
+                );
+              }
+            }
+          }
+
+          await digestWriter.close();
+          await waitForCapacity();
+          controller.enqueue(new Uint8Array(await digestStream.digest));
+          onComplete?.();
+          controller.close();
+        } catch (error) {
+          if (isResolveAbortedError(error) || options?.signal?.aborted) {
             log.debug("rewrite:stream-aborted");
-            await digestWriter.abort();
+            try {
+              await writer?.abort();
+            } catch {}
             controller.close();
             return;
           }
-
-          const sel = table.outputOrder[i];
-          const packSlot = table.packSlots[sel];
-          const readState = readStates.get(packSlot);
-          const syntheticPayload = table.syntheticPayloads[sel];
-          const headerBytes = buildEntryHeaderBytes(table, sel);
-          if (!readState && !syntheticPayload) {
-            const pack = snapshot.packs[packSlot];
-            log.error("rewrite:missing-read-state", {
-              sel,
-              packSlot,
-              entryIndex: table.entryIndices[sel],
-              packKey: pack?.packKey,
-              typeCode: table.typeCodes[sel],
-              baseSel: table.baseSlots[sel],
-            });
-            throw new Error(
-              `rewrite: missing read state for ${pack?.packKey}#${table.entryIndices[sel]}`
-            );
-          }
-
-          if (!headerBytes) {
-            const pack = snapshot.packs[packSlot];
-            const svLen = table.sizeVarLens[sel];
-            const typeCode = table.typeCodes[sel];
-            const baseSel = table.baseSlots[sel];
-            const basePackSlot = baseSel >= 0 ? table.packSlots[baseSel] : undefined;
-            const baseEntryIndex = baseSel >= 0 ? table.entryIndices[baseSel] : undefined;
-            log.error("rewrite:invalid-header-state", {
-              sel,
-              packSlot,
-              entryIndex: table.entryIndices[sel],
-              packKey: pack?.packKey,
-              typeCode,
-              sizeVarLen: svLen,
-              hasBaseOidRaw: !!table.baseOidRaw,
-              baseSel,
-              basePackSlot,
-              baseEntryIndex,
-            });
-            throw new Error(
-              `rewrite: invalid header state for ${pack?.packKey}#${table.entryIndices[sel]}`
-            );
-          }
-
-          await emit(headerBytes);
-          await emitPackPayload(controller, writer, table, sel, readState);
-
-          streamed++;
-          if (streamed % progressInterval === 0 || streamed === table.count) {
-            const percent = Math.round((streamed / table.count) * 100);
-            if (streamed === table.count) {
-              options?.onProgress?.(
-                `Counting objects: 100% (${table.count}/${table.count}), done.\n`
-              );
-            } else {
-              options?.onProgress?.(`Counting objects: ${percent}% (${streamed}/${table.count})\r`);
-            }
-          }
+          log.error("rewrite:stream-error", { error: String(error) });
+          controller.error(error);
         }
-
-        await digestWriter.close();
-        controller.enqueue(new Uint8Array(await digestStream.digest));
-        onComplete?.();
-        controller.close();
-      } catch (error) {
-        if (isResolveAbortedError(error) || options?.signal?.aborted) {
-          log.debug("rewrite:stream-aborted");
-          try {
-            await writer?.abort();
-          } catch {}
-          controller.close();
-          return;
-        }
-        log.error("rewrite:stream-error", { error: String(error) });
-        controller.error(error);
-      }
+      })();
+    },
+    pull() {
+      resumeOnPull?.();
+      resumeOnPull = undefined;
+    },
+    cancel() {
+      resumeOnPull?.();
+      resumeOnPull = undefined;
     },
   });
 }

@@ -110,7 +110,8 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
     opts.limiter,
     opts.countSubrequest,
     log,
-    opts.signal
+    opts.signal,
+    opts.onRead
   );
   const auxReader = new SequentialReader(
     env,
@@ -120,7 +121,8 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
     opts.limiter,
     opts.countSubrequest,
     log,
-    opts.signal
+    opts.signal,
+    opts.onRead
   );
 
   const isBase = new Uint8Array(objectCount);
@@ -328,7 +330,9 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
     lru.setCurrentOffset(table.offsets[index]);
     const deltaPayload = await inflateFromReader(auxReader, table, index);
     throwIfAborted(opts.signal, log, "resolve:external-fallback");
-    const result = applyGitDelta(baseObj.payload, deltaPayload);
+    const result = applyGitDelta(baseObj.payload, deltaPayload, {
+      maxResultBytes: opts.maxObjectBytes,
+    });
     if (result.length !== table.decompressedSizes[index]) {
       throw new Error(
         `resolve: deferred delta result size mismatch at offset ${table.offsets[index]} (expected ${table.decompressedSizes[index]}, got ${result.length})`

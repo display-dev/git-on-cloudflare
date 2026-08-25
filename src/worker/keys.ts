@@ -47,12 +47,51 @@ export function nativeReceiveInputPackKey(prefix: string, operationId: string): 
   return r2PackKey(prefix, `pack-native-input-${operationId}.pack`);
 }
 
+export function nativeReceiveInputRequestKey(prefix: string, operationId: string): string {
+  return `${prefix}/native-receive/input-${operationId}.request`;
+}
+
 export function nativeReceiveOutputPackKey(
   prefix: string,
   operationId: string,
   fingerprint: string
 ): string {
   return r2PackKey(prefix, `pack-native-${operationId}-${fingerprint}.pack`);
+}
+
+export function nativeReceiveClaimOutputPackKey(basePackKey: string, claimId: string): string {
+  if (!basePackKey.endsWith(".pack") || !/^[0-9a-f-]{36}$/.test(claimId)) {
+    throw new Error("invalid native receive claim output identity");
+  }
+  return `${basePackKey.slice(0, -5)}-claim-${claimId}.pack`;
+}
+
+function nativeReceiveAuthorityPrefix(
+  outputPackKey: string,
+  operationId: string,
+  fingerprint: string
+): string {
+  const marker = "/objects/pack/";
+  const markerIndex = outputPackKey.indexOf(marker);
+  if (markerIndex <= 0) throw new Error("invalid native receive output pack key");
+  return `${outputPackKey.slice(0, markerIndex)}/native-receive/authority/${operationId}-${fingerprint}`;
+}
+
+export function nativeReceiveAuthorityRefKey(
+  outputPackKey: string,
+  operationId: string,
+  fingerprint: string,
+  index: number
+): string {
+  return `${nativeReceiveAuthorityPrefix(outputPackKey, operationId, fingerprint)}/ref-${index}.json`;
+}
+
+export function nativeReceiveAuthorityReceiptKey(
+  outputPackKey: string,
+  operationId: string,
+  fingerprint: string
+): string {
+  return `${nativeReceiveAuthorityPrefix(outputPackKey, operationId, fingerprint)}/receipt.json`;
 }
 
 export function repositoryImportPackKey(repositoryId: string, operationId: string): string {

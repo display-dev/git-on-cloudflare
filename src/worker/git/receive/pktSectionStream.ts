@@ -65,6 +65,7 @@ function parsePktSectionPrefix(bytes: Uint8Array): ParsedPktSection {
 export async function readPktSectionStream(body: ReadableStream<Uint8Array>): Promise<{
   lines: string[];
   bytesConsumed: number;
+  rawPrefix: Uint8Array;
   packStream: ReadableStream<Uint8Array>;
 }> {
   const reader = body.getReader();
@@ -96,6 +97,7 @@ export async function readPktSectionStream(body: ReadableStream<Uint8Array>): Pr
       return {
         lines: parsed.lines,
         bytesConsumed: parsed.offset,
+        rawPrefix: cloneBytes(buffered.subarray(0, parsed.offset)),
         packStream,
       };
     }

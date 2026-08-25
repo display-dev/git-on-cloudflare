@@ -86,4 +86,5 @@ export default {
 };
 
 export { RepoDurableObject } from "./do/repo/repoDO";
+export { StockReceiveContainerHost } from "./do/stockReceiveContainerHost";
 export { RepositoryContainerBridge } from "./git/nativeReceive/bridge";

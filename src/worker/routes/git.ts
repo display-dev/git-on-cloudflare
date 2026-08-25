@@ -24,11 +24,11 @@ import {
 } from "@/worker/auth/gitAuth";
 import type { Db } from "@/worker/db/d1/client";
 import type { Logger } from "@/worker/common/logger";
-import type { Limiter } from "@/worker/git/operations/limits";
+import { countSubrequest, type Limiter } from "@/worker/git/operations/limits";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
 import { emitAcceptedWriteFacts } from "@/worker/git/acceptedWrite";
-import { materializeAcceptedWrite } from "@/worker/git/snapshot/materialize";
-import { snapshotEventProbeEnabled } from "@/worker/git/snapshot/config";
+import { snapshotRepositoryPrefix } from "@/worker/git/snapshot/materialize";
+import type { SnapshotMaterializeQueueMessage } from "@/worker/tasks/types";
 import { workerExecutionContext, type AppContext, type AppRouter } from "./hono";
 
 type GitService = "git-upload-pack" | "git-receive-pack";
@@ -240,28 +240,51 @@ async function handleReceivePackPOST(
     onRepoStateChanged: async ({ changed, acceptedWrites }) => {
       if (!changed) return;
       emitAcceptedWriteFacts(log, acceptedWrites);
-      if (snapshotEventProbeEnabled(env)) return;
-      for (const fact of acceptedWrites) {
+      let snapshotQueueEnabled = false;
+      try {
+        snapshotQueueEnabled = snapshotRepositoryPrefix(env, route.repositoryId) !== null;
+      } catch (error) {
+        // Ref publication is already authoritative. Treat invalid optional
+        // snapshot configuration as a terminal derived-data failure.
+        log.error("snapshot:enqueue-invalid-configuration", {
+          repositoryId: route.repositoryId,
+          error: String(error),
+        });
+      }
+      for (const fact of snapshotQueueEnabled ? acceptedWrites : []) {
+        const message: SnapshotMaterializeQueueMessage = {
+          kind: "snapshot-materialize",
+          doName: route.doName,
+          ...fact,
+        };
         try {
-          await materializeAcceptedWrite({
-            env,
-            repoId: route.doName,
-            fact,
-            request,
-            ctx,
-            limiter,
-            log,
+          if (!countSubrequest(cacheCtx)) {
+            log.warn("snapshot:enqueue-soft-budget-exhausted", {
+              repositoryId: route.repositoryId,
+            });
+          }
+          await limiter.run("queue:snapshot-materialize", () => env.REPO_TASKS_QUEUE.send(message));
+          log.info("snapshot:enqueued", {
+            repositoryId: route.repositoryId,
+            ref: fact.ref,
+            commitSha: fact.afterSha,
           });
         } catch (error) {
           // Git receive is already authoritative when this callback runs.
-          // Investigation 6 owns durable retry/reconciliation; the benchmark
-          // hook must not turn an accepted protocol push into an unhandled task.
-          log.warn("snapshot:materialization-failed", {
+          // A queue outage must not turn an accepted protocol push into an
+          // unhandled task. Log the derived-data gap for reconciliation.
+          log.warn("snapshot:enqueue-failed", {
             repositoryId: route.repositoryId,
             commitSha: fact.afterSha,
             error: String(error),
           });
         }
+      }
+      if (!snapshotQueueEnabled && acceptedWrites.length > 0) {
+        log.debug("snapshot:enqueue-disabled", {
+          repositoryId: route.repositoryId,
+          acceptedWrites: acceptedWrites.length,
+        });
       }
       try {
         await touchRepositoryUpdatedAt(db, route.repositoryId, Date.now());

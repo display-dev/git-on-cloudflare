@@ -6,13 +6,15 @@ import { handleNativeReceiveMessage } from "./nativeReceive";
 import { handleRouteCacheSyncMessage } from "./routeCacheSync";
 import { handleRepositoryDeleteMessage } from "./repositoryDelete";
 import { handleReachabilityGcMessage } from "./reachabilityGc";
+import { handleSnapshotMaterializeMessage } from "./snapshotMaterialize";
 import { RepoTaskQueueMessageSchema } from "./types";
 
 export type { RepoTaskQueueMessage, RepositoryDeleteMessage, RouteCacheSyncMessage } from "./types";
 
 // The queue carries repo lifecycle work as well as maintenance: compaction,
-// pack-ref backfill, reachability GC, route-cache repair, and repository deletion. Producers
-// use the `REPO_TASKS_QUEUE` binding; the physical queue name remains
+// pack-ref backfill, reachability GC, accepted-write snapshot materialization,
+// route-cache repair, and repository deletion. Producers use the
+// `REPO_TASKS_QUEUE` binding; the physical queue name remains
 // `git-on-cloudflare-repo-maint` for continuity. Schemas live in
 // `./types.ts`; this file dispatches.
 export async function handleRepoTaskQueue(
@@ -48,6 +50,9 @@ export async function handleRepoTaskQueue(
         break;
       case "native-receive":
         await handleNativeReceiveMessage(message, body, env, ctx);
+        break;
+      case "snapshot-materialize":
+        await handleSnapshotMaterializeMessage(message, body, env, ctx);
         break;
       case "route-cache-sync":
         await handleRouteCacheSyncMessage(message, body, env, ctx);

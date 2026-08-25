@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,19 +25,35 @@ import (
 )
 
 const (
-	listenAddress       = ":8080"
-	bridgeBaseURL       = "http://repo-r2.internal/r2/"
-	maxRequestBytes     = 1 << 20
-	maxActivePacks      = 250
-	maxCommands         = 4096
-	maxHydratedBytes    = int64(6_500_000_000)
-	packRefMagic        = uint32(0x50524546)
-	packRefVersion      = uint32(1)
-	packRefHeaderBytes  = 4 + 4 + 4 + 8 + 20 + 20
-	objectIDBytes       = 20
-	containerHTTPClient = 30 * time.Minute
-	persistentCacheRoot = "/tmp/repository-git-cache"
+	defaultListenAddress = ":8080"
+	bridgeBaseURL        = "http://repo-r2.internal/r2/"
+	maxRequestBytes      = 1 << 20
+	maxActivePacks       = 250
+	maxCommands          = 4096
+	maxHydratedBytes     = int64(6_500_000_000)
+	packRefMagic         = uint32(0x50524546)
+	packRefVersion       = uint32(1)
+	packRefHeaderBytes   = 4 + 4 + 4 + 8 + 20 + 20
+	objectIDBytes        = 20
+	containerHTTPClient  = 30 * time.Minute
+	persistentCacheRoot  = "/tmp/repository-git-cache"
 )
+
+func listenAddress() string {
+	configured := os.Getenv("REPOSITORY_GIT_LISTEN_ADDRESS")
+	if configured == "" {
+		return defaultListenAddress
+	}
+	host, port, err := net.SplitHostPort(configured)
+	if err != nil || host != "127.0.0.1" {
+		return defaultListenAddress
+	}
+	parsedPort, err := strconv.Atoi(port)
+	if err != nil || parsedPort < 1024 || parsedPort > 65535 {
+		return defaultListenAddress
+	}
+	return configured
+}
 
 var (
 	objectIDPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -113,6 +130,29 @@ type objectBridge interface {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "stock-pre-receive" {
+		if err := runStockPreReceiveHook(context.Background(), os.Stdin); err != nil {
+			fmt.Fprintln(os.Stderr, "selective receive closure rejected")
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "stock-receive-stdio" {
+		if err := runStockReceiveStdio(context.Background(), os.Stdin, os.Stdout); err != nil {
+			code := "stock-receive-rejected"
+			var transient transientProcessError
+			if errors.As(err, &transient) {
+				code = "r2-transient"
+			}
+			_ = json.NewEncoder(os.Stderr).Encode(errorResponse{
+				Error: "stock receive failed",
+				Code:  code,
+			})
+			os.Exit(1)
+		}
+		return
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ready", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -120,9 +160,11 @@ func main() {
 		_, _ = writer.Write([]byte("ready\n"))
 	})
 	mux.HandleFunc("POST /process", processHandler)
+	mux.HandleFunc("POST /stock-receive", stockReceiveHandler)
+	mux.HandleFunc("POST /stock-receive-bundle", stockReceiveBundleHandler)
 
 	server := &http.Server{
-		Addr:              listenAddress,
+		Addr:              listenAddress(),
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -616,8 +658,8 @@ func runGit(ctx context.Context, gitDir string, args ...string) error {
 	command := exec.CommandContext(ctx, "git", args...)
 	if gitDir != "" {
 		command.Dir = gitDir
-		command.Env = append(os.Environ(), "GIT_DIR="+gitDir)
 	}
+	command.Env = stockGitEnvironment(ctx, gitDir)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s failed: %w: %s", args[0], err, boundedText(output))
@@ -693,6 +735,11 @@ func (bridge bridgeClient) upload(ctx context.Context, key string, source string
 	}
 	request.ContentLength = size
 	request.Header.Set("Content-Type", "application/octet-stream")
+	if digest, digestErr := sha256File(source); digestErr == nil {
+		request.Header.Set("X-Display-SHA256", digest)
+	} else {
+		return digestErr
+	}
 	response, err := bridge.client.Do(request)
 	if err != nil {
 		return err

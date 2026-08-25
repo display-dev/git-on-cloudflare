@@ -2,7 +2,10 @@ import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
 import type { RepoDurableObject } from "@/worker/do";
 import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
-import type { BeginReceiveResult } from "@/worker/do/repo/catalog/shared";
+import type {
+  BeginReceiveResult,
+  BeginStockReceiveRecoveryResult,
+} from "@/worker/do/repo/catalog/shared";
 import type { ReceiveStatus } from "@/worker/git/operations/validation";
 import type { ReceiveCommand } from "@/worker/git/operations/validation";
 import {
@@ -20,6 +23,7 @@ import { executeReceivePipeline } from "./pipeline";
 import { executeNativeReceivePipeline } from "./nativePipeline";
 import { isValidNativeReceiveOperationId } from "@/worker/git/nativeReceive/types";
 import { NativeReceiveIndeterminateError, ReceivePipelineHttpError } from "./pipelineTypes";
+import { doPrefix, nativeReceiveInputRequestKey } from "@/worker/keys";
 import { readPktSectionStream } from "./pktSectionStream";
 import {
   parseReceiveRequest,
@@ -41,6 +45,8 @@ import {
 
 const RECEIVE_SUBREQUEST_BUDGET = 5_000;
 const NATIVE_RECEIVE_OPERATION_HEADER = "X-Display-Operation-ID";
+const STOCK_RECEIVE_SPIKE_HEADER = "X-Display-Spike1b-Stock";
+const STOCK_RECEIVE_REQUEST_MAX_BYTES = 16 * 1024 * 1024;
 
 type RepoStub = DurableObjectStub<RepoDurableObject>;
 export type RepoStateChangeHandler = (change: {
@@ -280,6 +286,20 @@ export async function handleStreamingReceivePackPOST(
     return clientAbortedResponse();
   }
 
+  const stockReceiveRequested = request.headers.get(STOCK_RECEIVE_SPIKE_HEADER) === "1";
+  if (stockReceiveRequested) {
+    const declaredLength = request.headers.get("Content-Length");
+    if (!declaredLength || !/^\d+$/.test(declaredLength)) {
+      logReceiveEnd(log, 411, { reason: "stock-receive-length-required" });
+      return new Response("Stock receive requires an exact Content-Length.\n", { status: 411 });
+    }
+    const bytes = Number(declaredLength);
+    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > STOCK_RECEIVE_REQUEST_MAX_BYTES) {
+      logReceiveEnd(log, 413, { reason: "stock-receive-declaration-too-large" });
+      return new Response("Stock receive declaration exceeds its bound.\n", { status: 413 });
+    }
+  }
+
   const cacheCtx = options?.cacheCtx ?? {
     req: request,
     ctx,
@@ -301,11 +321,48 @@ export async function handleStreamingReceivePackPOST(
     });
   }
 
-  countReceiveSubrequest(cacheCtx, log, "do:begin-receive");
-  const begin = await limiter.run<BeginReceiveResult>(
-    "do:begin-receive",
-    async () => await stub.beginReceive()
-  );
+  let begin: BeginReceiveResult;
+  if (stockReceiveRequested && requestedOperationId) {
+    countReceiveSubrequest(cacheCtx, log, "do:begin-stock-receive-recovery");
+    let recovery = await limiter.run<BeginStockReceiveRecoveryResult>(
+      "do:begin-stock-receive-recovery",
+      async () => await stub.beginStockReceiveRecovery(requestedOperationId)
+    );
+    if (recovery.status === "cleanup_required") {
+      const cleanup = recovery;
+      const staleKey = nativeReceiveInputRequestKey(doPrefix(stub.id.toString()), cleanup.token);
+      countReceiveSubrequest(cacheCtx, log, "r2:cleanup-stock-recovery-input");
+      await limiter.run("r2:cleanup-stock-recovery-input", () => env.REPO_BUCKET.delete(staleKey));
+      countReceiveSubrequest(cacheCtx, log, "do:complete-stock-recovery-cleanup");
+      const cleaned = await limiter.run("do:complete-stock-recovery-cleanup", () =>
+        stub.completeStockReceiveRecovery(cleanup.operationId, cleanup.token)
+      );
+      if (!cleaned) throw new Error("stock-receive:recovery-cleanup-stale");
+      countReceiveSubrequest(cacheCtx, log, "do:retry-begin-stock-receive-recovery");
+      recovery = await limiter.run<BeginStockReceiveRecoveryResult>(
+        "do:retry-begin-stock-receive-recovery",
+        async () => await stub.beginStockReceiveRecovery(requestedOperationId)
+      );
+    }
+    if (recovery.status === "busy" || recovery.status === "cleanup_required") {
+      begin = {
+        ok: false,
+        retryAfter: recovery.status === "busy" ? recovery.retryAfter : 10,
+      };
+    } else if (recovery.status === "recovery") {
+      begin = recovery.begin;
+    } else {
+      countReceiveSubrequest(cacheCtx, log, "do:begin-receive");
+      begin = await limiter.run<BeginReceiveResult>("do:begin-receive", async () =>
+        stub.beginReceive()
+      );
+    }
+  } else {
+    countReceiveSubrequest(cacheCtx, log, "do:begin-receive");
+    begin = await limiter.run<BeginReceiveResult>("do:begin-receive", async () =>
+      stub.beginReceive()
+    );
+  }
   if (!begin.ok) {
     log.warn("receive:block-busy", { retryAfter: begin.retryAfter, mode: "streaming" });
     logReceiveEnd(log, 503, { reason: "receive-lease-active" });
@@ -320,7 +377,9 @@ export async function handleStreamingReceivePackPOST(
 
   let pipelineStarted = false;
   try {
-    const { lines, bytesConsumed, packStream } = await readPktSectionStream(request.body);
+    const { lines, bytesConsumed, rawPrefix, packStream } = await readPktSectionStream(
+      request.body
+    );
     throwIfReceiveAborted(request, log, "read-command-section");
 
     const parsedRequest = parseReceiveRequest(lines);
@@ -331,6 +390,7 @@ export async function handleStreamingReceivePackPOST(
         })
       : [];
     const responseMode = selectReceiveResponseMode(parsedRequest.capabilities);
+    const stockReceive = request.headers.get(STOCK_RECEIVE_SPIKE_HEADER) === "1";
 
     if (requestedOperationId && !useNativeReceive(env, parsedRequest.commands)) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
@@ -363,7 +423,15 @@ export async function handleStreamingReceivePackPOST(
     }
 
     const preflightStatuses = validateReceiveCommands(begin.refs, parsedRequest.commands);
-    if (!preflightStatuses.every((status) => status.ok)) {
+    const potentialCommittedReplay =
+      stockReceive &&
+      requestedOperationId !== undefined &&
+      parsedRequest.commands.every(
+        (command) =>
+          begin.refs.find((ref) => ref.name === command.ref)?.oid.toLowerCase() ===
+          command.newOid.toLowerCase()
+      );
+    if (!preflightStatuses.every((status) => status.ok) && !potentialCommittedReplay) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
       await limiter
         .run("do:abort-receive", () => stub.abortReceive(begin.lease.token))
@@ -381,7 +449,7 @@ export async function handleStreamingReceivePackPOST(
       return response;
     }
 
-    if (responseMode === "side-band-64k") {
+    if (responseMode === "side-band-64k" && !stockReceive) {
       return createSidebandReceiveResponse({
         env,
         repoId,
@@ -415,6 +483,10 @@ export async function handleStreamingReceivePackPOST(
       ctx,
       packStream,
       bytesConsumed,
+      rawPrefix,
+      stockReceive,
+      stockRecovery: begin.stockRecovery,
+      advertisedRefs: begin.refs,
       stub,
       leaseToken: begin.lease.token,
       operationId: requestedOperationId,
@@ -435,12 +507,20 @@ export async function handleStreamingReceivePackPOST(
       acceptedWrites,
     });
 
-    const response = buildReceiveResultResponse({
-      mode: "plain",
-      reportStatusBody: result.reportStatusBody,
-      changed: result.changed,
-      empty: result.empty,
-    });
+    const response = result.receivePackResponse
+      ? new Response(Uint8Array.from(result.receivePackResponse).buffer, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/x-git-receive-pack-result",
+            "Cache-Control": "no-store",
+          },
+        })
+      : buildReceiveResultResponse({
+          mode: "plain",
+          reportStatusBody: result.reportStatusBody,
+          changed: result.changed,
+          empty: result.empty,
+        });
     logReceiveEnd(log, response.status, {
       changed: result.changed,
       empty: result.empty,

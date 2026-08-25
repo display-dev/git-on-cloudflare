@@ -1,6 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 import { createLogger } from "@/worker/common/logger";
+import { bytesToHex, createDigestStream } from "@/worker/common";
 import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits";
 import type { RepositoryContainerBridgeProps } from "./types";
 
@@ -37,7 +38,8 @@ function keyRole(props: RepositoryContainerBridgeProps, key: string): string {
 async function writeFixedLengthBody(
   body: ReadableStream<Uint8Array>,
   writable: WritableStream<Uint8Array>,
-  expectedBytes: number
+  expectedBytes: number,
+  digestWriter?: WritableStreamDefaultWriter<Uint8Array>
 ): Promise<void> {
   const reader = body.getReader();
   const writer = writable.getWriter();
@@ -50,15 +52,42 @@ async function writeFixedLengthBody(
       if (written > expectedBytes) {
         throw new Error("Container output exceeded its declared Content-Length");
       }
+      await digestWriter?.write(next.value);
       await writer.write(next.value);
     }
     if (written !== expectedBytes) {
       throw new Error("Container output did not match its declared Content-Length");
     }
     await writer.close();
+    await digestWriter?.close();
   } catch (error) {
     await writer.abort(error).catch(() => {});
     throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function hashStoredObject(
+  object: R2ObjectBody,
+  expectedBytes: number
+): Promise<string | null> {
+  if (object.size !== expectedBytes) return null;
+  const digest = createDigestStream("SHA-256");
+  const writer = digest.getWriter();
+  const reader = object.body.getReader();
+  let readBytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      if (next.value.byteLength > expectedBytes - readBytes) return null;
+      readBytes += next.value.byteLength;
+      await writer.write(next.value);
+    }
+    if (readBytes !== expectedBytes) return null;
+    await writer.close();
+    return bytesToHex(new Uint8Array(await digest.digest));
   } finally {
     reader.releaseLock();
   }
@@ -123,7 +152,16 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
     if (request.method === "PUT") {
       const allowance = this.ctx.props.writeKeys.find((entry) => entry.key === key);
       const bytes = contentLength(request);
-      if (!allowance || bytes === null || bytes > allowance.maxBytes || !request.body) {
+      const declaredSha256 = request.headers.get("X-Display-SHA256")?.toLowerCase();
+      const validDeclaredSha256 =
+        declaredSha256 !== undefined && /^[0-9a-f]{64}$/.test(declaredSha256);
+      if (
+        !allowance ||
+        bytes === null ||
+        bytes > allowance.maxBytes ||
+        !request.body ||
+        (this.ctx.props.requireWriteSha256 && !validDeclaredSha256)
+      ) {
         log.warn("container-bridge:write-denied", {
           operationId: this.ctx.props.operationId,
           keyRole: keyRole(this.ctx.props, key),
@@ -136,17 +174,28 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
       // FixedLengthStream preserves that contract and rejects both a short
       // body and an overrun without buffering Container output in the Worker.
       const fixedLength = new FixedLengthStream(bytes);
-      const pipePromise = writeFixedLengthBody(request.body, fixedLength.writable, bytes);
+      const digest = this.ctx.props.requireWriteSha256 ? createDigestStream("SHA-256") : undefined;
+      const pipePromise = writeFixedLengthBody(
+        request.body,
+        fixedLength.writable,
+        bytes,
+        digest?.getWriter()
+      );
       const putPromise = this.limiter.run("r2:container-bridge-put", () =>
         this.env.REPO_BUCKET.put(key, fixedLength.readable, {
+          onlyIf: this.ctx.props.requireWriteSha256 ? { etagDoesNotMatch: "*" } : undefined,
           httpMetadata: { contentType: "application/octet-stream" },
+          customMetadata: validDeclaredSha256 ? { sha256: declaredSha256 } : undefined,
         })
       );
       const [pipeResult, putResult] = await Promise.allSettled([pipePromise, putPromise]);
+      const createdByInvocation = putResult.status === "fulfilled" && putResult.value !== null;
       if (pipeResult.status === "rejected" || putResult.status === "rejected") {
-        await this.limiter
-          .run("r2:container-bridge-delete-rejected", () => this.env.REPO_BUCKET.delete(key))
-          .catch(() => {});
+        if (createdByInvocation) {
+          await this.limiter
+            .run("r2:container-bridge-delete-rejected", () => this.env.REPO_BUCKET.delete(key))
+            .catch(() => {});
+        }
         const bodyMismatch = pipeResult.status === "rejected";
         log.warn("container-bridge:write-rejected", {
           operationId: this.ctx.props.operationId,
@@ -157,13 +206,58 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
           status: bodyMismatch ? 400 : 503,
         });
       }
+      let computedSha256: string | undefined;
+      if (digest) {
+        computedSha256 = bytesToHex(new Uint8Array(await digest.digest));
+        if (computedSha256 !== declaredSha256) {
+          if (createdByInvocation) {
+            await this.limiter.run("r2:container-bridge-delete-digest-mismatch", () =>
+              this.env.REPO_BUCKET.delete(key)
+            );
+          }
+          return new Response("Write digest mismatch\n", { status: 400 });
+        }
+      }
+      if (this.ctx.props.requireWriteSha256 && putResult.value === null) {
+        const existing = await this.limiter.run("r2:container-bridge-get-existing", () =>
+          this.env.REPO_BUCKET.get(key)
+        );
+        const existingSha256 = existing ? await hashStoredObject(existing, bytes) : null;
+        if (
+          !existing ||
+          existingSha256 !== computedSha256 ||
+          existing.customMetadata?.sha256 !== declaredSha256
+        ) {
+          log.warn("container-bridge:immutable-write-conflict", {
+            operationId: this.ctx.props.operationId,
+            keyRole: keyRole(this.ctx.props, key),
+            bytes,
+          });
+          return new Response("Immutable output key already exists\n", { status: 409 });
+        }
+        log.info("container-bridge:write-reconciled", {
+          operationId: this.ctx.props.operationId,
+          keyRole: keyRole(this.ctx.props, key),
+          bytes,
+        });
+        return new Response(null, {
+          status: 204,
+          headers: { ETag: existing.etag },
+        });
+      }
       const stored = await this.limiter.run("r2:container-bridge-head", () =>
         this.env.REPO_BUCKET.head(key)
       );
-      if (!stored || stored.size !== bytes) {
-        await this.limiter.run("r2:container-bridge-delete-invalid", () =>
-          this.env.REPO_BUCKET.delete(key)
-        );
+      if (
+        !stored ||
+        stored.size !== bytes ||
+        (this.ctx.props.requireWriteSha256 && stored.customMetadata?.sha256 !== declaredSha256)
+      ) {
+        if (createdByInvocation) {
+          await this.limiter.run("r2:container-bridge-delete-invalid", () =>
+            this.env.REPO_BUCKET.delete(key)
+          );
+        }
         log.error("container-bridge:write-verification-failed", {
           operationId: this.ctx.props.operationId,
           keyRole: keyRole(this.ctx.props, key),
@@ -177,7 +271,10 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
         keyRole: keyRole(this.ctx.props, key),
         bytes,
       });
-      return new Response(null, { status: 204 });
+      return new Response(null, {
+        status: 204,
+        headers: stored ? { ETag: stored.etag } : undefined,
+      });
     }
 
     return new Response("Method not allowed\n", {

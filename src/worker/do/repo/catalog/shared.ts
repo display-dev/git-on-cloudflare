@@ -21,7 +21,14 @@ export type BeginReceiveResult =
       packsetVersion: number;
       nextPackSeq: number;
       activeCatalog: PackCatalogRow[];
+      stockRecovery?: { operationId: string; token: string } | undefined;
     };
+
+export type BeginStockReceiveRecoveryResult =
+  | { status: "not_found" }
+  | { status: "busy"; retryAfter: number }
+  | { status: "cleanup_required"; operationId: string; token: string }
+  | { status: "recovery"; begin: Extract<BeginReceiveResult, { ok: true }> };
 
 export function uniq(items: Array<string | undefined>): string[] {
   const seen = new Set<string>();

@@ -56,7 +56,9 @@ export async function resolveDeltaEntry(args: ResolveDeltaEntryArgs): Promise<vo
   );
   const deltaPayload = await inflateFromReader(args.deltaReader, args.table, args.index);
   throwIfAborted(args.resolveOpts.signal, args.resolveOpts.log, "resolve:delta-apply");
-  const result = applyGitDelta(base.payload, deltaPayload);
+  const result = applyGitDelta(base.payload, deltaPayload, {
+    maxResultBytes: args.resolveOpts.maxObjectBytes,
+  });
   if (result.length !== args.table.decompressedSizes[args.index]) {
     throw new Error(
       `resolve: delta result size mismatch at offset ${args.table.offsets[args.index]} (expected ${args.table.decompressedSizes[args.index]}, got ${result.length})`

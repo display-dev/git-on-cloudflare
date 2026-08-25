@@ -2,21 +2,32 @@ import type { Logger } from "@/worker/common/logger";
 import type {
   EnqueueNativeReceiveResult,
   MatchNativeReceiveOperationResult,
+  NativeReceiveAuthorityPublication,
+  NativeReceiveEvidenceEvent,
   NativeReceiveOperation,
   NativeReceiveOperationView,
   NativeReceiveProcessRequest,
   NativeReceiveProcessResult,
   RepositoryContainerBridgeProps,
 } from "@/worker/git/nativeReceive/types";
+import { asBufferSource, bytesToHex } from "@/worker/common";
 import { z } from "zod";
 import {
   isNativeReceiveTerminal,
   nativeReceiveOperationView,
 } from "@/worker/git/nativeReceive/types";
-import { packIndexKey } from "@/worker/keys";
+import {
+  nativeReceiveAuthorityReceiptKey,
+  nativeReceiveAuthorityRefKey,
+  packIndexKey,
+} from "@/worker/keys";
 import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits";
 
-import { finalizeReceiveState } from "./catalog/receive";
+import {
+  finalizeReceiveState,
+  ReceiveOutputIntegrityError,
+  type ReceiveFinalizeMilestone,
+} from "./catalog/receive";
 import { RECEIVE_LEASE_TTL_MS } from "./catalog/shared";
 import { abortReceiveLease } from "./catalog/leases";
 import {
@@ -33,30 +44,171 @@ import {
 } from "./scheduler";
 
 const MAX_RETAINED_OPERATIONS = 128;
+const MAX_EVIDENCE_EVENTS = 128;
 const MAX_PROCESS_ATTEMPTS = 5;
 const CONTAINER_PORT = 8080;
 const CONTAINER_READY_ATTEMPTS = 120;
 const CONTAINER_READY_INTERVAL_MS = 250;
 const CONTAINER_RESPONSE_MAX_BYTES = 64 * 1024;
 const OUTPUT_SIDECAR_MAX_BYTES = 1_000_000_000;
+const STOCK_OUTPUT_PACK_MAX_BYTES = 32 * 1024 * 1024;
+const STOCK_OUTPUT_SIDECAR_MAX_BYTES = 32 * 1024 * 1024;
 const LEASE_HEARTBEAT_MS = 30_000;
 const NATIVE_READER_LEASE_TTL_MS = 2 * 60_000;
 const PROCESSING_CLAIM_TTL_MS = 3 * 60_000;
-const CONTAINER_PROCESS_TIMEOUT_MS = 20 * 60_000;
+const CONTAINER_PROCESS_TIMEOUT_MS = 14 * 60_000;
 
-const nativeReceiveProcessResultSchema = z.object({
-  operationId: z.string().min(1),
-  packBytes: z.number().int().positive(),
-  idxBytes: z.number().int().positive(),
-  refsBytes: z.number().int().positive(),
-  objectCount: z.number().int().nonnegative(),
-  packSha1: z.string().regex(/^[0-9a-f]{40}$/),
-  elapsedMs: z.number().int().nonnegative(),
-  scratchBytes: z.number().int().nonnegative(),
-  hydratedBytes: z.number().int().nonnegative().default(0),
-  downloadedBytes: z.number().int().nonnegative().default(0),
-  cacheHitBytes: z.number().int().nonnegative().default(0),
-});
+const stockOidSchema = z.string().regex(/^[0-9a-f]{40}$/);
+const stockSha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const stockTypeCountsSchema = z
+  .object({
+    commit: z.number().int().nonnegative(),
+    tree: z.number().int().nonnegative(),
+    blob: z.number().int().nonnegative(),
+    tag: z.number().int().nonnegative(),
+  })
+  .strict();
+const stockClosureProofSchema = z
+  .object({
+    planSha256: stockSha256Schema,
+    incomingOids: z.array(stockOidSchema).max(100_000),
+    semanticExternalOids: z.array(stockOidSchema).max(100_000),
+    visitedIncomingObjectCount: z.number().int().nonnegative().max(100_000),
+    logicalEdgeCount: z.number().int().nonnegative().max(500_000),
+    internalEdgeCount: z.number().int().nonnegative().max(500_000),
+    externalEdgeCount: z.number().int().nonnegative().max(500_000),
+    missingObjectCount: z.number().int().nonnegative().max(500_000),
+    objectTypeCounts: stockTypeCountsSchema,
+  })
+  .strict();
+const stockActivePackReadSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      packChecksum: stockOidSchema,
+      start: z.number().int().nonnegative(),
+      end: z.number().int().positive(),
+      returnedBytes: z.number().int().positive(),
+      kind: z.literal("trailer"),
+    })
+    .strict(),
+  z
+    .object({
+      packChecksum: stockOidSchema,
+      start: z.number().int().nonnegative(),
+      end: z.number().int().positive(),
+      returnedBytes: z.number().int().positive(),
+      kind: z.literal("required-object"),
+      requiredOid: stockOidSchema,
+    })
+    .strict(),
+]);
+
+const nativeReceiveProcessResultSchema = z
+  .object({
+    operationId: z.string().min(1),
+    packBytes: z.number().int().positive(),
+    idxBytes: z.number().int().positive(),
+    refsBytes: z.number().int().positive(),
+    objectCount: z.number().int().nonnegative(),
+    inputPackObjectCount: z.number().int().positive().max(100_000).optional(),
+    packSha1: z.string().regex(/^[0-9a-f]{40}$/),
+    elapsedMs: z.number().int().nonnegative(),
+    scratchBytes: z.number().int().nonnegative(),
+    hydratedBytes: z.number().int().nonnegative().default(0),
+    downloadedBytes: z.number().int().nonnegative().default(0),
+    cacheHitBytes: z.number().int().nonnegative().default(0),
+    receivePackResponse: z.string().max(1_400_000).optional(),
+    inputRequestSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    packSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    idxSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    refsSha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+    stockTrace: z
+      .array(
+        z
+          .object({
+            sequence: z.number().int().positive(),
+            event: z.string().min(1).max(100),
+          })
+          .strict()
+      )
+      .max(128)
+      .optional(),
+    metadataBytes: z.number().int().nonnegative().optional(),
+    rangeBytes: z.number().int().nonnegative().optional(),
+    rangeRequests: z.number().int().nonnegative().optional(),
+    packsTouched: z.number().int().nonnegative().optional(),
+    quarantinePathInsideOwnedWorkRoot: z.boolean().optional(),
+    quarantineRemovedAfterReceive: z.boolean().optional(),
+    quarantinePathNonEmpty: z.boolean().optional(),
+    planSha256: stockSha256Schema.optional(),
+    closureProof: stockClosureProofSchema.optional(),
+    semanticExternalOids: z.array(stockOidSchema).max(100_000).optional(),
+    thinDeltaBaseOids: z.array(stockOidSchema).max(256).optional(),
+    requiredRootOids: z.array(stockOidSchema).max(256).optional(),
+    ranges: z
+      .array(
+        z
+          .object({
+            packChecksum: stockOidSchema,
+            start: z.number().int().nonnegative(),
+            end: z.number().int().positive(),
+            reason: z.literal("required-object"),
+            requiredOid: stockOidSchema,
+          })
+          .strict()
+      )
+      .max(256)
+      .optional(),
+    activePackReads: z.array(stockActivePackReadSchema).max(320).optional(),
+    activePackTrailerBytes: z.number().int().nonnegative().optional(),
+    activePackTrailerRequests: z.number().int().nonnegative().optional(),
+    activePackRangeBytes: z.number().int().nonnegative().optional(),
+    activePackRangeRequests: z.number().int().nonnegative().optional(),
+    activePackWholeBytes: z.number().int().nonnegative().optional(),
+    activePackWholeRequests: z.number().int().nonnegative().optional(),
+    activePackUnattributedBytes: z.number().int().nonnegative().optional(),
+    activePackUnattributedRequests: z.number().int().nonnegative().optional(),
+    closureManifestKey: z.string().min(1).max(1_024).optional(),
+    closureManifestBytes: z
+      .number()
+      .int()
+      .positive()
+      .max(16 * 1024 * 1024)
+      .optional(),
+    closureManifestSha256: stockSha256Schema.optional(),
+    closureManifestEtag: z.string().min(1).max(256).optional(),
+    prerequisitePackKey: z.string().min(1).max(1_024).optional(),
+    prerequisitePackBytes: z
+      .number()
+      .int()
+      .positive()
+      .max(16 * 1024 * 1024)
+      .optional(),
+    prerequisitePackSha256: stockSha256Schema.optional(),
+    prerequisitePackEtag: z.string().min(1).max(256).optional(),
+    incomingObjectCount: z.number().int().nonnegative().max(100_000).optional(),
+    visitedIncomingObjectCount: z.number().int().nonnegative().max(100_000).optional(),
+    logicalEdgeCount: z.number().int().nonnegative().max(500_000).optional(),
+    internalEdgeCount: z.number().int().nonnegative().max(500_000).optional(),
+    externalEdgeCount: z.number().int().nonnegative().max(500_000).optional(),
+    missingObjectCount: z.number().int().nonnegative().max(500_000).optional(),
+    objectTypeCounts: stockTypeCountsSchema.optional(),
+    selectedPackBytes: z.number().int().nonnegative().optional(),
+    activePackCount: z.number().int().nonnegative().max(64).optional(),
+  })
+  .strict();
 
 type NativeProcessor = (args: {
   ctx: DurableObjectState;
@@ -83,6 +235,22 @@ export const __test = {
   },
   failNextAfterEnqueueStore(): void {
     failNextAfterEnqueueStoreForTesting = true;
+  },
+  retryableProcessorError(code: "r2-transient"): Error {
+    return new NativeProcessorError(code, "Host Git processor reported a retryable R2 read.", true);
+  },
+  processorError(
+    code: "r2-transient" | "stock-receive-rejected" | "stock-plan-wrong-range"
+  ): Error {
+    return new NativeProcessorError(
+      code,
+      code === "r2-transient"
+        ? "Host Git processor reported a retryable R2 read."
+        : code === "stock-plan-wrong-range"
+          ? "Stock receive planner rejected an injected wrong range."
+          : "Host Git processor rejected the stock receive.",
+      code === "r2-transient"
+    );
   },
   reset(): void {
     nativeProcessorForTesting = undefined;
@@ -135,6 +303,259 @@ function operationFingerprintMatches(
   return existing.fingerprint === input.fingerprint;
 }
 
+function isSortedUnique(values: string[]): boolean {
+  return values.every((value, index) => index === 0 || values[index - 1]! < value);
+}
+
+function equalStrings(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function stockRangeKey(range: {
+  packChecksum: string;
+  start: number;
+  end: number;
+  requiredOid: string;
+}): string {
+  return `${range.packChecksum}:${range.start}:${range.end}:${range.requiredOid}`;
+}
+
+function validateStockProcessorProof(
+  operation: NativeReceiveOperation,
+  result: NativeReceiveProcessResult
+): boolean {
+  const proof = result.closureProof;
+  const semantic = result.semanticExternalOids;
+  const thin = result.thinDeltaBaseOids;
+  const required = result.requiredRootOids;
+  const ranges = result.ranges;
+  const activePackReads = result.activePackReads;
+  if (
+    !proof ||
+    !semantic ||
+    !thin ||
+    !required ||
+    !ranges ||
+    !activePackReads ||
+    !result.planSha256 ||
+    result.planSha256 !== result.closureManifestSha256 ||
+    proof.planSha256 !== result.planSha256 ||
+    !result.closureManifestKey ||
+    !result.closureManifestBytes ||
+    !result.closureManifestEtag ||
+    !result.prerequisitePackKey ||
+    !result.prerequisitePackBytes ||
+    !result.prerequisitePackSha256 ||
+    !result.prerequisitePackEtag ||
+    result.quarantinePathNonEmpty !== true ||
+    !isSortedUnique(proof.incomingOids) ||
+    !isSortedUnique(semantic) ||
+    !isSortedUnique(thin) ||
+    !isSortedUnique(required) ||
+    !equalStrings(proof.semanticExternalOids, semantic) ||
+    proof.visitedIncomingObjectCount !== result.visitedIncomingObjectCount ||
+    proof.visitedIncomingObjectCount !== result.incomingObjectCount ||
+    proof.incomingOids.length !== result.incomingObjectCount ||
+    result.inputPackObjectCount !== result.incomingObjectCount ||
+    result.objectCount !== result.incomingObjectCount + thin.length ||
+    proof.logicalEdgeCount !== result.logicalEdgeCount ||
+    proof.internalEdgeCount !== result.internalEdgeCount ||
+    proof.externalEdgeCount !== result.externalEdgeCount ||
+    proof.internalEdgeCount + proof.externalEdgeCount !== proof.logicalEdgeCount ||
+    proof.missingObjectCount !== 0 ||
+    result.missingObjectCount !== 0 ||
+    JSON.stringify(proof.objectTypeCounts) !== JSON.stringify(result.objectTypeCounts) ||
+    Object.values(proof.objectTypeCounts).reduce((total, count) => total + count, 0) !==
+      proof.visitedIncomingObjectCount ||
+    result.activePackCount !== operation.activeCatalog.length
+  ) {
+    return false;
+  }
+  const union = [...new Set([...semantic, ...thin])].sort();
+  if (!equalStrings(union, required) || ranges.length !== required.length) return false;
+  const rangeOids = ranges.map((range) => range.requiredOid).sort();
+  if (!equalStrings(rangeOids, required)) return false;
+  if (
+    ranges.some((range) => range.end <= range.start) ||
+    ranges.reduce((total, range) => total + range.end - range.start, 0) !== result.rangeBytes ||
+    result.rangeRequests !== ranges.length ||
+    result.packsTouched !== new Set(ranges.map((range) => range.packChecksum)).size
+  ) {
+    return false;
+  }
+  const trailerReads = activePackReads.filter((read) => read.kind === "trailer");
+  const rangeReads = activePackReads.filter((read) => read.kind === "required-object");
+  const observedRangeKeys = rangeReads.map(stockRangeKey).sort();
+  const plannedRangeKeys = ranges.map(stockRangeKey).sort();
+  if (
+    activePackReads.length !== trailerReads.length + rangeReads.length ||
+    trailerReads.length !== operation.activeCatalog.length ||
+    new Set(trailerReads.map((read) => read.packChecksum)).size !== trailerReads.length ||
+    trailerReads.some((read) => read.end - read.start !== 20 || read.returnedBytes !== 20) ||
+    result.activePackTrailerRequests !== trailerReads.length ||
+    result.activePackTrailerBytes !== trailerReads.length * 20 ||
+    result.activePackRangeRequests !== rangeReads.length ||
+    result.activePackRangeRequests !== result.rangeRequests ||
+    result.activePackRangeBytes !== result.rangeBytes ||
+    rangeReads.some((read) => read.end - read.start !== read.returnedBytes) ||
+    !equalStrings(observedRangeKeys, plannedRangeKeys) ||
+    result.activePackWholeBytes !== 0 ||
+    result.activePackWholeRequests !== 0 ||
+    result.activePackUnattributedBytes !== 0 ||
+    result.activePackUnattributedRequests !== 0
+  ) {
+    return false;
+  }
+  return true;
+}
+
+async function sha256Bytes(bytes: Uint8Array): Promise<string> {
+  return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", asBufferSource(bytes))));
+}
+
+async function putImmutableAuthorityObject(args: {
+  env: Env;
+  limiter: SubrequestLimiter;
+  key: string;
+  bytes: Uint8Array;
+  sha256: string;
+}): Promise<string> {
+  const created = await args.limiter.run("r2:put-native-authority", () =>
+    args.env.REPO_BUCKET.put(args.key, args.bytes, {
+      onlyIf: { etagDoesNotMatch: "*" },
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: { sha256: args.sha256 },
+    })
+  );
+  if (created) return created.etag;
+  const existing = await args.limiter.run("r2:get-native-authority", () =>
+    args.env.REPO_BUCKET.get(args.key)
+  );
+  if (
+    !existing ||
+    existing.size !== args.bytes.byteLength ||
+    existing.customMetadata?.sha256 !== args.sha256
+  ) {
+    throw new Error("native authority object conflicts with immutable publication");
+  }
+  const actual = new Uint8Array(await existing.arrayBuffer());
+  if ((await sha256Bytes(actual)) !== args.sha256) {
+    throw new Error("native authority object digest mismatch");
+  }
+  return existing.etag;
+}
+
+async function publishStockAuthority(args: {
+  env: Env;
+  operation: NativeReceiveOperation;
+  processorResult: NativeReceiveProcessResult;
+}): Promise<NativeReceiveAuthorityPublication> {
+  if (
+    args.operation.commands.length !== 1 ||
+    args.operation.commands[0]!.newOid === "0".repeat(40)
+  ) {
+    throw new Error("stock authority publication requires one non-delete ref transition");
+  }
+  const command = args.operation.commands[0]!;
+  if (
+    args.processorResult.outputValidationBytes === undefined ||
+    args.processorResult.outputValidationRequests === undefined ||
+    !args.processorResult.outputPackEtag ||
+    !args.processorResult.outputIdxEtag ||
+    !args.processorResult.outputRefsEtag
+  ) {
+    throw new Error("stock authority publication requires durable output validation proof");
+  }
+  const limiter = new SubrequestLimiter(3);
+  const refBytes = new TextEncoder().encode(
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: "authoritative-ref",
+      name: command.ref,
+      oid: command.newOid,
+    })
+  );
+  const refSha256 = await sha256Bytes(refBytes);
+  const refKey = nativeReceiveAuthorityRefKey(
+    args.operation.outputPackKey,
+    args.operation.id,
+    args.operation.fingerprint,
+    0
+  );
+  const refEtag = await putImmutableAuthorityObject({
+    env: args.env,
+    limiter,
+    key: refKey,
+    bytes: refBytes,
+    sha256: refSha256,
+  });
+  const receiptDigest = await sha256Bytes(
+    new TextEncoder().encode(
+      JSON.stringify({
+        operationId: args.operation.id,
+        fingerprint: args.operation.fingerprint,
+        refName: command.ref,
+        oldOid: command.oldOid,
+        newOid: command.newOid,
+        packSha256: args.processorResult.packSha256,
+        idxSha256: args.processorResult.idxSha256,
+        refsSha256: args.processorResult.refsSha256,
+        planSha256: args.processorResult.planSha256,
+        outputValidationBytes: args.processorResult.outputValidationBytes,
+        outputValidationRequests: args.processorResult.outputValidationRequests,
+        outputPackEtag: args.processorResult.outputPackEtag,
+        outputIdxEtag: args.processorResult.outputIdxEtag,
+        outputRefsEtag: args.processorResult.outputRefsEtag,
+      })
+    )
+  );
+  const receiptBytes = new TextEncoder().encode(
+    JSON.stringify({
+      schemaVersion: 1,
+      kind: "operation-receipt",
+      disposition: "committed",
+      refName: command.ref,
+      newOid: command.newOid,
+      digest: receiptDigest,
+    })
+  );
+  const receiptSha256 = await sha256Bytes(receiptBytes);
+  const receiptKey = nativeReceiveAuthorityReceiptKey(
+    args.operation.outputPackKey,
+    args.operation.id,
+    args.operation.fingerprint
+  );
+  const receiptEtag = await putImmutableAuthorityObject({
+    env: args.env,
+    limiter,
+    key: receiptKey,
+    bytes: receiptBytes,
+    sha256: receiptSha256,
+  });
+  return {
+    refs: [
+      {
+        name: command.ref,
+        oid: command.newOid,
+        key: refKey,
+        bytes: refBytes.byteLength,
+        sha256: refSha256,
+        etag: refEtag,
+      },
+    ],
+    receipt: {
+      disposition: "committed",
+      refName: command.ref,
+      newOid: command.newOid,
+      digest: receiptDigest,
+      key: receiptKey,
+      bytes: receiptBytes.byteLength,
+      sha256: receiptSha256,
+      etag: receiptEtag,
+    },
+  };
+}
+
 async function storeOperation(
   storage: DurableObjectStorage,
   operation: NativeReceiveOperation
@@ -154,6 +575,45 @@ async function storeOperation(
       if (removedId) await store.delete(nativeReceiveOperationKey(removedId));
     }
     await store.put("nativeReceiveOperationIndex", nextIndex);
+  });
+}
+
+function withEvidenceEvents(
+  operation: NativeReceiveOperation,
+  additions: Array<Omit<NativeReceiveEvidenceEvent, "sequence">>
+): NativeReceiveOperation {
+  let events = operation.events ?? [];
+  for (const addition of additions) {
+    if (events.some((event) => event.phase === addition.phase)) continue;
+    if (events.length >= MAX_EVIDENCE_EVENTS) {
+      throw new Error("native receive evidence event bound exceeded");
+    }
+    events = [
+      ...events,
+      {
+        ...addition,
+        sequence: (events.at(-1)?.sequence ?? 0) + 1,
+      },
+    ];
+  }
+  return events === operation.events ? operation : { ...operation, events };
+}
+
+async function appendClaimedEvidenceEvents(args: {
+  ctx: DurableObjectState;
+  operationId: string;
+  claimId: string;
+  events: Array<Omit<NativeReceiveEvidenceEvent, "sequence">>;
+}): Promise<NativeReceiveOperation> {
+  return await args.ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const current = await store.get(nativeReceiveOperationKey(args.operationId));
+    if (!current || current.claimId !== args.claimId) {
+      throw new Error("native receive operation claim was lost while recording evidence");
+    }
+    const updated = withEvidenceEvents(current, args.events);
+    if (updated !== current) await store.put(nativeReceiveOperationKey(args.operationId), updated);
+    return updated;
   });
 }
 
@@ -180,6 +640,32 @@ export async function getNativeReceiveOperationState(
   return (await store.get(nativeReceiveOperationKey(operationId))) ?? null;
 }
 
+export async function recordNativeReceiveClientAckState(
+  ctx: DurableObjectState,
+  operationId: string
+): Promise<boolean> {
+  return await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const operation = await store.get(nativeReceiveOperationKey(operationId));
+    if (
+      !operation ||
+      operation.state !== "committed" ||
+      !operation.stockReceive ||
+      !operation.result?.receivePackResponse
+    ) {
+      return false;
+    }
+    if (operation.clientAckReadyAt !== undefined) return true;
+    const acknowledged = withEvidenceEvents(operation, [{ phase: "worker-response-ack" }]);
+    await store.put(nativeReceiveOperationKey(operationId), {
+      ...acknowledged,
+      clientAckReadyAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    return true;
+  });
+}
+
 export async function matchNativeReceiveOperationState(
   ctx: DurableObjectState,
   operationId: string,
@@ -197,6 +683,12 @@ export async function enqueueNativeReceiveState(args: {
   operation: NativeReceiveOperation;
   logger: Logger;
 }): Promise<EnqueueNativeReceiveResult> {
+  if (args.operation.stockReceive) {
+    return {
+      status: "dispatch_failed",
+      message: "Stock receive requires tagged admission.",
+    };
+  }
   const result = await args.ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
     if (await store.get("repositoryDeleting")) {
@@ -206,12 +698,27 @@ export async function enqueueNativeReceiveState(args: {
       } satisfies EnqueueNativeReceiveResult;
     }
 
+    const stagedOperation = args.operation.stockReceive
+      ? withEvidenceEvents(args.operation, [{ phase: "repo-do-operation-staged", durable: true }])
+      : args.operation;
     const existing = await store.get(nativeReceiveOperationKey(args.operation.id));
     if (existing) {
       if (!operationFingerprintMatches(existing, args.operation)) {
         return {
           status: "conflict",
           message: "Operation id is already bound to a different receive.",
+        } satisfies EnqueueNativeReceiveResult;
+      }
+      if (
+        existing.stockReceive &&
+        existing.state === "failed" &&
+        existing.errorCode === "r2-transient" &&
+        !existing.cleanupPending
+      ) {
+        await store.put(nativeReceiveOperationKey(args.operation.id), stagedOperation);
+        return {
+          status: "queued",
+          operation: nativeReceiveOperationView(stagedOperation),
         } satisfies EnqueueNativeReceiveResult;
       }
       return {
@@ -241,11 +748,11 @@ export async function enqueueNativeReceiveState(args: {
       const [removedId] = nextIndex.splice(removableIndex, 1);
       if (removedId) await store.delete(nativeReceiveOperationKey(removedId));
     }
-    await store.put(nativeReceiveOperationKey(args.operation.id), args.operation);
+    await store.put(nativeReceiveOperationKey(args.operation.id), stagedOperation);
     await store.put("nativeReceiveOperationIndex", nextIndex);
     return {
       status: "queued",
-      operation: nativeReceiveOperationView(args.operation),
+      operation: nativeReceiveOperationView(stagedOperation),
     } satisfies EnqueueNativeReceiveResult;
   });
 
@@ -533,7 +1040,12 @@ export async function canDeleteSupersededGenerationState(
 
 function bridgeProps(operation: NativeReceiveOperation): RepositoryContainerBridgeProps {
   const activeBytes = operation.activeCatalog.reduce((total, pack) => total + pack.packBytes, 0);
-  const maximumOutputPackBytes = operation.inputBytes + activeBytes;
+  const maximumOutputPackBytes = operation.stockReceive
+    ? Math.min(STOCK_OUTPUT_PACK_MAX_BYTES, operation.inputBytes + 16 * 1024 * 1024)
+    : operation.inputBytes + activeBytes;
+  const maximumSidecarBytes = operation.stockReceive
+    ? STOCK_OUTPUT_SIDECAR_MAX_BYTES
+    : OUTPUT_SIDECAR_MAX_BYTES;
   return {
     operationId: operation.id,
     readKeys: [
@@ -542,16 +1054,19 @@ function bridgeProps(operation: NativeReceiveOperation): RepositoryContainerBrid
         expectedBytes: operation.inputBytes,
         expectedEtag: operation.inputEtag,
       },
-      ...operation.activeCatalog.flatMap((pack) => [
-        { key: pack.packKey, expectedBytes: pack.packBytes },
-        { key: packIndexKey(pack.packKey), expectedBytes: pack.idxBytes },
-      ]),
+      ...(operation.stockReceive
+        ? []
+        : operation.activeCatalog.flatMap((pack) => [
+            { key: pack.packKey, expectedBytes: pack.packBytes },
+            { key: packIndexKey(pack.packKey), expectedBytes: pack.idxBytes },
+          ])),
     ],
     writeKeys: [
       { key: operation.outputPackKey, maxBytes: maximumOutputPackBytes },
-      { key: operation.outputIdxKey, maxBytes: OUTPUT_SIDECAR_MAX_BYTES },
-      { key: operation.outputRefsKey, maxBytes: OUTPUT_SIDECAR_MAX_BYTES },
+      { key: operation.outputIdxKey, maxBytes: maximumSidecarBytes },
+      { key: operation.outputRefsKey, maxBytes: maximumSidecarBytes },
     ],
+    requireWriteSha256: operation.stockReceive !== undefined,
   };
 }
 
@@ -569,6 +1084,7 @@ function processRequest(operation: NativeReceiveOperation): NativeReceiveProcess
     outputPackKey: operation.outputPackKey,
     outputIdxKey: operation.outputIdxKey,
     outputRefsKey: operation.outputRefsKey,
+    stockReceive: operation.stockReceive,
   };
 }
 
@@ -634,12 +1150,29 @@ async function runContainerProcessor(args: {
   ]);
   if (nativeProcessorForTesting) {
     try {
-      return await nativeProcessorForTesting({ ...args, signal });
+      const result = await nativeProcessorForTesting({ ...args, signal });
+      const parsed = nativeReceiveProcessResultSchema.safeParse(result);
+      if (!parsed.success || parsed.data.operationId !== args.request.operationId) {
+        throw new NativeProcessorError(
+          "host_processor_invalid_response",
+          "Host Git processor returned an invalid result.",
+          false
+        );
+      }
+      return parsed.data;
     } finally {
       if (activeProcessorAborts.get(processorKey) === processorAbort) {
         activeProcessorAborts.delete(processorKey);
       }
     }
+  }
+
+  if (args.request.stockReceive) {
+    throw new NativeProcessorError(
+      "host_stock_adapter_required",
+      "Stock receive requires the host Git 2.50.1 adapter in this spike.",
+      false
+    );
   }
 
   const container = repositoryContainer(args.ctx);
@@ -703,7 +1236,7 @@ async function deleteOperationObjects(args: {
   includeOutputs: boolean;
   logger: Logger;
 }): Promise<void> {
-  const keys = args.includeOutputs
+  const baseKeys = args.includeOutputs
     ? [
         args.operation.inputPackKey,
         args.operation.outputPackKey,
@@ -711,6 +1244,11 @@ async function deleteOperationObjects(args: {
         args.operation.outputRefsKey,
       ]
     : [args.operation.inputPackKey];
+  const keys = [
+    ...baseKeys,
+    args.operation.processorResult?.prerequisitePackKey,
+    args.operation.processorResult?.closureManifestKey,
+  ].filter((key, index, all): key is string => Boolean(key) && all.indexOf(key) === index);
   const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
   await limiter.run("r2:delete-native-receive-objects", () => args.env.REPO_BUCKET.delete(keys));
   args.logger.info("native-receive:cleanup", {
@@ -779,35 +1317,94 @@ async function reconcileFinalizingOperation(args: {
   claimId: string;
   logger: Logger;
 }): Promise<NativeReceiveOperation | null> {
-  const processorResult = args.operation.processorResult;
+  let operation = args.operation;
+  const processorResult = operation.processorResult;
   if (!processorResult) return null;
+  const onMilestone = operation.stockReceive
+    ? async (milestone: ReceiveFinalizeMilestone): Promise<void> => {
+        operation = await appendClaimedEvidenceEvents({
+          ctx: args.ctx,
+          operationId: operation.id,
+          claimId: args.claimId,
+          events: [milestone],
+        });
+      }
+    : undefined;
   const finalized = await finalizeReceiveState({
     ctx: args.ctx,
     env: args.env,
-    token: args.operation.leaseToken,
-    commands: args.operation.commands,
+    token: operation.leaseToken,
+    commands: operation.commands,
     stagedPack: {
-      packKey: args.operation.outputPackKey,
+      packKey: operation.outputPackKey,
       packBytes: processorResult.packBytes,
       idxBytes: processorResult.idxBytes,
       objectCount: processorResult.objectCount,
+      integrity: operation.stockReceive
+        ? {
+            packSha256: processorResult.packSha256!,
+            idxSha256: processorResult.idxSha256!,
+            refsSha256: processorResult.refsSha256!,
+            refsBytes: processorResult.refsBytes,
+          }
+        : undefined,
     },
-    acceptedWrites:
-      args.operation.acceptedWrites.length > 0 ? args.operation.acceptedWrites : undefined,
+    acceptedWrites: operation.acceptedWrites.length > 0 ? operation.acceptedWrites : undefined,
     logger: args.logger,
+    onMilestone,
   });
   if (finalized.status === "committed") {
+    const committedProcessorResult: NativeReceiveProcessResult = {
+      ...processorResult,
+      outputValidationBytes: finalized.outputValidationBytes,
+      outputValidationRequests: finalized.outputValidationRequests,
+      outputPackEtag: finalized.outputEtags?.pack,
+      outputIdxEtag: finalized.outputEtags?.idx,
+      outputRefsEtag: finalized.outputEtags?.refs,
+    };
+    let committedOperation: NativeReceiveOperation = {
+      ...operation,
+      processorResult: committedProcessorResult,
+    };
+    const authorityPublication = operation.stockReceive
+      ? await publishStockAuthority({
+          env: args.env,
+          operation: committedOperation,
+          processorResult: committedProcessorResult,
+        })
+      : undefined;
+    if (authorityPublication) {
+      const operationWithReceipt = await appendClaimedEvidenceEvents({
+        ctx: args.ctx,
+        operationId: operation.id,
+        claimId: args.claimId,
+        events: [
+          {
+            phase: "receipt-committed",
+            durable: true,
+            digest: authorityPublication.receipt.digest,
+          },
+        ],
+      });
+      committedOperation = {
+        ...operationWithReceipt,
+        processorResult: committedProcessorResult,
+      };
+    }
     const committed = await markTerminal({
       ctx: args.ctx,
-      operation: args.operation,
+      operation: committedOperation,
       claimId: args.claimId,
       state: "committed",
       result: {
         statuses: finalized.statuses,
         changed: finalized.changed,
         empty: finalized.empty,
-        packKey: args.operation.outputPackKey,
+        packKey: operation.outputPackKey,
         packBytes: processorResult.packBytes,
+        receivePackResponse: processorResult.receivePackResponse,
+        stockTrace: processorResult.stockTrace,
+        authorityPublication,
       },
     });
     return await completeOperationCleanup({
@@ -821,7 +1418,7 @@ async function reconcileFinalizingOperation(args: {
 
   const aborted = await markTerminal({
     ctx: args.ctx,
-    operation: args.operation,
+    operation,
     claimId: args.claimId,
     state: "aborted",
     result: {
@@ -846,6 +1443,13 @@ export async function runNativeReceiveOperationState(args: {
   operationId: string;
   logger: Logger;
 }): Promise<NativeReceiveOperationView | null> {
+  const retained = await getNativeReceiveOperationState(args.ctx, args.operationId);
+  if (retained?.stockReceive) {
+    args.logger.warn("native-receive:legacy-stock-dispatch-rejected", {
+      operationId: args.operationId,
+    });
+    return nativeReceiveOperationView(retained);
+  }
   const claim = await claimOperationAttempt(args.ctx, args.operationId);
   if (claim.status === "missing") return null;
   if (claim.status === "current") {
@@ -854,13 +1458,57 @@ export async function runNativeReceiveOperationState(args: {
     }
     return nativeReceiveOperationView(claim.operation);
   }
-  const { operation, claimId } = claim;
+  let operation = claim.operation;
+  const { claimId } = claim;
 
   if (operation.state === "finalizing") {
     try {
       const reconciled = await reconcileFinalizingOperation({ ...args, operation, claimId });
       if (reconciled) return nativeReceiveOperationView(reconciled);
-    } catch {
+    } catch (error) {
+      if (error instanceof ReceiveOutputIntegrityError) {
+        const failedProcessorResult = operation.processorResult
+          ? {
+              ...operation.processorResult,
+              outputValidationBytes: error.bytes,
+              outputValidationRequests: error.requests,
+              outputIntegrityRejectedRole: error.role,
+            }
+          : undefined;
+        if (operation.stockReceive) {
+          operation = await appendClaimedEvidenceEvents({
+            ctx: args.ctx,
+            operationId: operation.id,
+            claimId,
+            events: [
+              {
+                phase: "output-integrity-rejected",
+                bytes: error.bytes,
+                detailCode: `${error.role}-digest-mismatch`,
+              },
+            ],
+          });
+        }
+        if (failedProcessorResult) {
+          operation = { ...operation, processorResult: failedProcessorResult };
+        }
+        const failed = await markTerminal({
+          ctx: args.ctx,
+          operation,
+          claimId,
+          state: "failed",
+          errorCode: "stock_output_integrity_rejected",
+        });
+        await abortReceiveLease(args.ctx, operation.leaseToken);
+        const cleaned = await completeOperationCleanup({
+          ctx: args.ctx,
+          env: args.env,
+          operation: failed,
+          includeOutputs: true,
+          logger: args.logger,
+        });
+        return nativeReceiveOperationView(cleaned);
+      }
       // The durable operation and finalize intent contain everything needed
       // for recovery. Keep ordinary logs closed over bounded state only.
     }
@@ -940,6 +1588,14 @@ export async function runNativeReceiveOperationState(args: {
     await scheduleNativeWake(args.ctx, args.env, Date.now() + 1_000);
     return nativeReceiveOperationView(released);
   }
+  if (operation.stockReceive) {
+    operation = await appendClaimedEvidenceEvents({
+      ctx: args.ctx,
+      operationId: operation.id,
+      claimId,
+      events: [{ phase: "go-processor-start" }],
+    });
+  }
   let heartbeatFailure: Error | undefined;
   let heartbeatTail = Promise.resolve();
   const heartbeat = setInterval(() => {
@@ -975,6 +1631,68 @@ export async function runNativeReceiveOperationState(args: {
       code: processorError.code,
       retryable: processorError.retryable,
     });
+    if (
+      operation.stockReceive &&
+      processorError.retryable &&
+      processorError.code === "r2-transient"
+    ) {
+      operation = await appendClaimedEvidenceEvents({
+        ctx: args.ctx,
+        operationId: operation.id,
+        claimId,
+        events: [
+          {
+            phase: "r2-read-retryable",
+            detailCode: "r2-transient",
+          },
+        ],
+      });
+      const retryable = await markTerminal({
+        ctx: args.ctx,
+        operation,
+        claimId,
+        state: "failed",
+        errorCode: "r2-transient",
+      });
+      await abortReceiveLease(args.ctx, operation.leaseToken);
+      const cleaned = await completeOperationCleanup({
+        ctx: args.ctx,
+        env: args.env,
+        operation: retryable,
+        includeOutputs: true,
+        logger: args.logger,
+      });
+      return nativeReceiveOperationView(cleaned);
+    }
+    if (operation.stockReceive && processorError.code === "stock-plan-wrong-range") {
+      operation = await appendClaimedEvidenceEvents({
+        ctx: args.ctx,
+        operationId: operation.id,
+        claimId,
+        events: [
+          {
+            phase: "replacement-closure-rejected",
+            detailCode: "wrong-prerequisite-range",
+          },
+        ],
+      });
+      const rejected = await markTerminal({
+        ctx: args.ctx,
+        operation,
+        claimId,
+        state: "failed",
+        errorCode: "wrong-prerequisite-range",
+      });
+      await abortReceiveLease(args.ctx, operation.leaseToken);
+      const cleaned = await completeOperationCleanup({
+        ctx: args.ctx,
+        env: args.env,
+        operation: rejected,
+        includeOutputs: true,
+        logger: args.logger,
+      });
+      return nativeReceiveOperationView(cleaned);
+    }
     if (processorError.retryable && operation.attempts < MAX_PROCESS_ATTEMPTS) {
       const retrying: NativeReceiveOperation = {
         ...operation,
@@ -1023,6 +1741,79 @@ export async function runNativeReceiveOperationState(args: {
     cacheHitBytes: nativeResult.cacheHitBytes,
   });
 
+  if (operation.stockReceive) {
+    const expectedTrace = [
+      "receive_pack_invoked",
+      "pre_receive_started",
+      "pre_receive_quarantine_nonempty",
+      "logical_closure_started_ref_still_old",
+      "incoming_oid_visible_in_quarantine",
+      "logical_closure_completed",
+      "pre_receive_succeeded",
+      "disposable_ref_update_observed",
+    ];
+    if (
+      nativeResult.inputRequestSha256 !== operation.stockReceive.inputRequestSha256 ||
+      !nativeResult.receivePackResponse ||
+      !nativeResult.packSha256 ||
+      !nativeResult.idxSha256 ||
+      !nativeResult.refsSha256 ||
+      nativeResult.quarantinePathInsideOwnedWorkRoot !== true ||
+      nativeResult.quarantineRemovedAfterReceive !== true ||
+      !validateStockProcessorProof(operation, nativeResult) ||
+      nativeResult.stockTrace?.length !== expectedTrace.length ||
+      nativeResult.stockTrace.some(
+        (entry, index) => entry.sequence !== index + 1 || entry.event !== expectedTrace[index]
+      )
+    ) {
+      operation = await appendClaimedEvidenceEvents({
+        ctx: args.ctx,
+        operationId: operation.id,
+        claimId,
+        events: [
+          {
+            phase: "replacement-closure-rejected",
+            detailCode: "stock-proof-invalid",
+          },
+        ],
+      });
+      const failed = await markTerminal({
+        ctx: args.ctx,
+        operation,
+        claimId,
+        state: "failed",
+        errorCode: "stock_receive_proof_invalid",
+      });
+      await abortReceiveLease(args.ctx, operation.leaseToken);
+      const cleaned = await completeOperationCleanup({
+        ctx: args.ctx,
+        env: args.env,
+        operation: failed,
+        includeOutputs: true,
+        logger: args.logger,
+      });
+      return nativeReceiveOperationView(cleaned);
+    }
+    const tracePhases = new Map<string, string>([
+      ["receive_pack_invoked", "receive-pack-start"],
+      ["pre_receive_started", "pre-receive-start"],
+      ["pre_receive_quarantine_nonempty", "quarantine-visible"],
+      ["logical_closure_started_ref_still_old", "replacement-closure-start"],
+      ["logical_closure_completed", "replacement-closure-complete"],
+      ["pre_receive_succeeded", "pre-receive-complete"],
+      ["disposable_ref_update_observed", "disposable-ref-updated"],
+    ]);
+    operation = await appendClaimedEvidenceEvents({
+      ctx: args.ctx,
+      operationId: operation.id,
+      claimId,
+      events: nativeResult.stockTrace
+        .map((entry) => tracePhases.get(entry.event))
+        .filter((phase): phase is string => phase !== undefined)
+        .map((phase) => ({ phase })),
+    });
+  }
+
   const ready: NativeReceiveOperation = {
     ...operation,
     state: "ready",
@@ -1033,6 +1824,8 @@ export async function runNativeReceiveOperationState(args: {
       empty: false,
       packKey: operation.outputPackKey,
       packBytes: nativeResult.packBytes,
+      receivePackResponse: nativeResult.receivePackResponse,
+      stockTrace: nativeResult.stockTrace,
     },
     processorResult: nativeResult,
     claimId: undefined,
@@ -1062,6 +1855,9 @@ export async function resumeNativeReceiveFromAlarm(args: {
     if (!operationId) continue;
     const operation = await store.get(nativeReceiveOperationKey(operationId));
     if (!operation) continue;
+    // The exact stock path is Worker-owned. Its state-only recovery runs before
+    // this legacy alarm and must never cross from RepoDO into R2 or Container.
+    if (operation.stockReceive) continue;
     if (isNativeReceiveTerminal(operation.state)) {
       if (!operation.cleanupPending) continue;
       await completeOperationCleanup({

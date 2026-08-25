@@ -199,6 +199,11 @@ export function lookupPushAuth(owner: string, repo: string): string | undefined 
   return pushAuthByRepo.get(`${owner}/${repo}`);
 }
 
+/** E1/test-only teardown for credentials registered by setupRepoForTests(). */
+export function forgetPushAuth(owner: string, repo: string): boolean {
+  return pushAuthByRepo.delete(`${owner}/${repo}`);
+}
+
 export async function mintSessionCookie(env: Env, userId: string): Promise<string> {
   const secret = env.SESSION_SECRET;
   if (!secret) throw new Error("mintSessionCookie: SESSION_SECRET not set");

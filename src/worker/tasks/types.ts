@@ -51,6 +51,22 @@ export const NativeReceiveQueueMessageSchema = z.object({
 
 export type NativeReceiveQueueMessage = z.infer<typeof NativeReceiveQueueMessageSchema>;
 
+export const SnapshotMaterializeQueueMessageSchema = z
+  .object({
+    kind: z.literal("snapshot-materialize"),
+    doName: z.string().min(1).max(512),
+    repositoryId: z.string().min(1).max(128),
+    ref: z.string().min(1).max(1024),
+    beforeSha: z.string().regex(/^[0-9a-f]{40}$/),
+    afterSha: z.string().regex(/^[0-9a-f]{40}$/),
+    actor: z.string().min(1).max(256),
+    sourceSurface: z.enum(["git-push", "ingestion", "import"]),
+    idempotencyKey: z.string().min(1).max(256).nullable(),
+  })
+  .strict();
+
+export type SnapshotMaterializeQueueMessage = z.infer<typeof SnapshotMaterializeQueueMessageSchema>;
+
 export const RouteCacheSyncMessageSchema = z.object({
   kind: z.literal("route-cache-sync"),
   repositoryId: z.string(),
@@ -80,6 +96,7 @@ export const RepoTaskQueueMessageSchema = z.discriminatedUnion("kind", [
   ReachabilityGcQueueMessageSchema,
   PackRefBackfillQueueMessageSchema,
   NativeReceiveQueueMessageSchema,
+  SnapshotMaterializeQueueMessageSchema,
   RouteCacheSyncMessageSchema,
   RepositoryDeleteMessageSchema,
 ]);

@@ -8,6 +8,8 @@ import {
   type MatchNativeReceiveOperationResult,
   type NativeReceiveOperation,
   type NativeReceiveOperationView,
+  type NativeReceivePrepared,
+  type NativeReceiveAuthorityPublication,
 } from "@/worker/git/nativeReceive/types";
 
 import { DurableObject } from "cloudflare:workers";
@@ -18,6 +20,8 @@ import { clearRepositoryStorage, removePack, type RemovePackResult } from "./pac
 import {
   abortCompactionLease,
   abortReceiveLease,
+  beginStockReceiveRecoveryLease,
+  completeStockReceiveRecoveryLease,
   type BeginCompactionResult,
   beginCompactionState,
   beginReceiveLease,
@@ -102,10 +106,19 @@ import {
   enqueueNativeReceiveState,
   getNativeReceiveOperationState,
   matchNativeReceiveOperationState,
+  recordNativeReceiveClientAckState,
   resumeNativeReceiveFromAlarm,
   runNativeReceiveOperationState,
   stopNativeReceiveContainerState,
 } from "./nativeReceive";
+import {
+  admitStockReceiveState,
+  completeStockReceiveCleanupState,
+  confirmStockReceivePublicationState,
+  finalizeStockReceiveState,
+  rejectStockReceiveExecutionState,
+  resumeStockReceiveAuthorityFromAlarm,
+} from "./stockReceiveAuthority";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -158,6 +171,15 @@ export class RepoDurableObject extends DurableObject {
     if (await this.ctx.storage.get<boolean>("repositoryDeleting")) {
       await this.ctx.storage.deleteAlarm();
       this.logger.info("alarm:repository-deleted-tombstone-preserved", {});
+      return;
+    }
+
+    if (
+      await resumeStockReceiveAuthorityFromAlarm({
+        ctx: this.ctx,
+        logger: this.logger,
+      })
+    ) {
       return;
     }
 
@@ -258,6 +280,14 @@ export class RepoDurableObject extends DurableObject {
     return await beginReceiveLease(this.ctx, this.logger);
   }
 
+  public async beginStockReceiveRecovery(operationId: string) {
+    return await beginStockReceiveRecoveryLease(this.ctx, operationId);
+  }
+
+  public async completeStockReceiveRecovery(operationId: string, token: string): Promise<boolean> {
+    return await completeStockReceiveRecoveryLease(this.ctx, operationId, token);
+  }
+
   public async abortReceive(token: string): Promise<boolean> {
     return await abortReceiveLease(this.ctx, token);
   }
@@ -270,6 +300,61 @@ export class RepoDurableObject extends DurableObject {
       env: this.env,
       operation,
       logger: this.logger,
+    });
+  }
+
+  /** Tagged, state-only admission for the stock Smart HTTP qualification path. */
+  public async admitStockReceive(operation: NativeReceiveOperation) {
+    return await admitStockReceiveState({
+      ctx: this.ctx,
+      operation,
+      logger: this.logger,
+    });
+  }
+
+  /** Exact-old authority CAS over Worker-verified immutable output proof. */
+  public async finalizeStockReceive(
+    executionToken: string,
+    prepared?: NativeReceivePrepared | undefined
+  ) {
+    return await finalizeStockReceiveState({
+      ctx: this.ctx,
+      executionToken,
+      prepared,
+      logger: this.logger,
+    });
+  }
+
+  /** Confirm the Worker-observed R2 publication without crossing into R2. */
+  public async confirmStockReceivePublication(
+    publicationToken: string,
+    proof: NativeReceiveAuthorityPublication
+  ) {
+    return await confirmStockReceivePublicationState({
+      ctx: this.ctx,
+      publicationToken,
+      proof,
+      logger: this.logger,
+    });
+  }
+
+  public async rejectStockReceiveExecution(
+    executionToken: string,
+    rejection: import("@/worker/git/nativeReceive/types").NativeReceiveExecutionRejection | string
+  ) {
+    return await rejectStockReceiveExecutionState({
+      ctx: this.ctx,
+      executionToken,
+      rejection,
+      logger: this.logger,
+    });
+  }
+
+  public async completeStockReceiveCleanup(operationId: string, fingerprint: string) {
+    return await completeStockReceiveCleanupState({
+      ctx: this.ctx,
+      operationId,
+      fingerprint,
     });
   }
 
@@ -298,6 +383,11 @@ export class RepoDurableObject extends DurableObject {
       operationId,
       logger: this.logger,
     });
+  }
+
+  public async recordNativeReceiveClientAck(operationId: string): Promise<boolean> {
+    await this.ensureAccessAndAlarm();
+    return await recordNativeReceiveClientAckState(this.ctx, operationId);
   }
 
   public async canDeleteSupersededGeneration(

@@ -1,6 +1,7 @@
 import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 import type { ReceiveCommand, ReceiveStatus } from "@/worker/git/operations/validation";
 import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
+import type { StockPhysicalDependencyEdge, StockPhysicalNode } from "./physicalDependencyPlan";
 
 export type NativeReceiveOperationState =
   | "staged"
@@ -17,6 +18,88 @@ export type NativeReceiveTerminalResult = {
   empty: boolean;
   packKey?: string | undefined;
   packBytes?: number | undefined;
+  receivePackResponse?: string | undefined;
+  stockTrace?: NativeReceiveStockTraceEvent[] | undefined;
+  authorityPublication?: NativeReceiveAuthorityPublication | undefined;
+};
+
+export type NativeReceiveAuthorityR2Object = {
+  key: string;
+  bytes: number;
+  sha256: string;
+  etag: string;
+};
+
+export type NativeReceiveAuthorityPublication = {
+  refs: Array<
+    NativeReceiveAuthorityR2Object & {
+      name: string;
+      oid: string;
+    }
+  >;
+  receipt: NativeReceiveAuthorityR2Object & {
+    disposition: "committed";
+    refName: string;
+    newOid: string;
+    digest: string;
+  };
+};
+
+export type NativeReceiveStockTraceEvent = { sequence: number; event: string };
+
+export type NativeReceiveEvidenceEvent = {
+  sequence: number;
+  phase: string;
+  durable?: boolean | undefined;
+  bytes?: number | undefined;
+  digest?: string | undefined;
+  detailCode?: string | undefined;
+};
+
+export type NativeReceiveStockRange = {
+  entryId?: string | undefined;
+  packChecksum: string;
+  start: number;
+  end: number;
+  reason: "required-object";
+  requiredOid: string;
+  semanticRootOids?: string[] | undefined;
+};
+
+export type NativeReceiveStockActivePackRead =
+  | {
+      packChecksum: string;
+      start: number;
+      end: number;
+      returnedBytes: number;
+      kind: "trailer";
+    }
+  | {
+      packChecksum: string;
+      start: number;
+      end: number;
+      returnedBytes: number;
+      kind: "required-object";
+      requiredOid: string;
+    };
+
+export type NativeReceiveStockClosureProof = {
+  planSha256: string;
+  incomingOids: string[];
+  semanticExternalOids: string[];
+  visitedIncomingObjectCount: number;
+  logicalEdgeCount: number;
+  internalEdgeCount: number;
+  externalEdgeCount: number;
+  missingObjectCount: number;
+  objectTypeCounts: { commit: number; tree: number; blob: number; tag: number };
+};
+
+export type NativeReceiveStockInput = {
+  inputRequestSha256: string;
+  packOffset: number;
+  packBytes: number;
+  advertisedRefs: Array<{ name: string; oid: string }>;
 };
 
 export type NativeReceiveOperation = {
@@ -28,6 +111,7 @@ export type NativeReceiveOperation = {
   inputPackKey: string;
   inputBytes: number;
   inputEtag: string;
+  stockReceive?: NativeReceiveStockInput | undefined;
   outputPackKey: string;
   outputIdxKey: string;
   outputRefsKey: string;
@@ -39,24 +123,201 @@ export type NativeReceiveOperation = {
   updatedAt: number;
   attempts: number;
   cleanupPending: boolean;
+  events?: NativeReceiveEvidenceEvent[] | undefined;
+  clientAckReadyAt?: number | undefined;
   finalizeAttempts?: number | undefined;
   finalizeEscalated?: boolean | undefined;
   claimId?: string | undefined;
   claimExpiresAt?: number | undefined;
   errorCode?: string | undefined;
   processorResult?: NativeReceiveProcessResult | undefined;
+  rejectionMetrics?: NativeReceiveOperationMetrics | undefined;
+  publicationPlan?: NativeReceiveAuthorityPublicationPlan | undefined;
   result?: NativeReceiveTerminalResult | undefined;
 };
 
+/**
+ * Immutable R2 authority objects planned by RepoDO after its exact-old CAS.
+ * The Worker writes these bytes and returns the observed object proof; RepoDO
+ * never receives an R2 binding or a callback capable of crossing that bound.
+ */
+export type NativeReceiveAuthorityPublicationObjectPlan = {
+  key: string;
+  bytes: number;
+  sha256: string;
+  json: string;
+};
+
+export type NativeReceiveAuthorityPublicationPlan = {
+  token: string;
+  operationId: string;
+  fingerprint: string;
+  refs: Array<
+    NativeReceiveAuthorityPublicationObjectPlan & {
+      name: string;
+      oid: string;
+    }
+  >;
+  receipt: NativeReceiveAuthorityPublicationObjectPlan & {
+    disposition: "committed";
+    refName: string;
+    newOid: string;
+    digest: string;
+  };
+};
+
+export type NativeReceivePrepared = {
+  operationId: string;
+  fingerprint: string;
+  processorResult: NativeReceiveProcessResult;
+};
+
+export type NativeReceiveExecutionRejection = {
+  code:
+    | "r2-transient"
+    | "replacement-closure-invalid"
+    | "output-integrity-invalid"
+    | "native-data-plane-failed"
+    | "finalize-rejected";
+  processorResult?: NativeReceiveProcessResult | undefined;
+  metrics?: NativeReceiveOperationMetrics | undefined;
+};
+
+export type NativeReceiveCleanupDescriptor = {
+  operationId: string;
+  fingerprint: string;
+  inputPackKey: string;
+  inputRequestSha256: string;
+  outputPackKey: string;
+  outputIdxKey: string;
+  outputRefsKey: string;
+};
+
+export type AdmitStockReceiveResult =
+  | { status: "admitted"; executionToken: string; operation: NativeReceiveOperation }
+  | { status: "finalize_pending"; executionToken: string }
+  | {
+      status: "cleanup_pending";
+      operation: NativeReceiveOperationView;
+      cleanup: NativeReceiveCleanupDescriptor;
+      includeOutputs: boolean;
+    }
+  | {
+      status: "publication_pending";
+      publicationToken: string;
+      publication: NativeReceiveAuthorityPublicationPlan;
+      cleanup: NativeReceiveCleanupDescriptor;
+    }
+  | {
+      status: "replayed";
+      operation: NativeReceiveOperationView;
+      cleanup: NativeReceiveCleanupDescriptor;
+    }
+  | { status: "conflict"; code: "operation-id-conflict" }
+  | {
+      status: "rejected";
+      code: "lease-mismatch" | "repository-deleting" | "operation-ledger-full" | string;
+    };
+
+export type FinalizeStockReceiveResult =
+  | {
+      status: "publication_pending";
+      publicationToken: string;
+      publication: NativeReceiveAuthorityPublicationPlan;
+      cleanup: NativeReceiveCleanupDescriptor;
+    }
+  | {
+      status: "replayed";
+      operation: NativeReceiveOperationView;
+      cleanup: NativeReceiveCleanupDescriptor;
+    }
+  | {
+      status: "ref_conflict";
+      code: "exact-old-ref-conflict";
+      cleanup: NativeReceiveCleanupDescriptor;
+    }
+  | { status: "rejected"; code: string; cleanup?: NativeReceiveCleanupDescriptor | undefined };
+
+export type ConfirmStockReceivePublicationResult =
+  | {
+      status: "committed";
+      operation: NativeReceiveOperationView;
+      cleanup: NativeReceiveCleanupDescriptor;
+    }
+  | {
+      status: "replayed";
+      operation: NativeReceiveOperationView;
+      cleanup: NativeReceiveCleanupDescriptor;
+    }
+  | { status: "rejected"; code: string };
+
+export type RejectStockReceiveExecutionResult =
+  | { status: "failed"; operation: NativeReceiveOperationView }
+  | { status: "replayed"; operation: NativeReceiveOperationView }
+  | { status: "rejected"; code: string };
+
+export type CompleteStockReceiveCleanupResult =
+  | { status: "complete"; operation: NativeReceiveOperationView }
+  | { status: "rejected"; code: string };
+
 export type NativeReceiveOperationMetrics = Pick<
   NativeReceiveProcessResult,
-  "elapsedMs" | "scratchBytes" | "hydratedBytes" | "downloadedBytes" | "cacheHitBytes"
+  | "elapsedMs"
+  | "scratchBytes"
+  | "hydratedBytes"
+  | "downloadedBytes"
+  | "cacheHitBytes"
+  | "metadataBytes"
+  | "metadataRequests"
+  | "inputBytesRead"
+  | "inputRequests"
+  | "rangeBytes"
+  | "rangeRequests"
+  | "packsTouched"
+  | "ranges"
+  | "activePackReads"
+  | "activePackTrailerBytes"
+  | "activePackTrailerRequests"
+  | "activePackRangeBytes"
+  | "activePackRangeRequests"
+  | "activePackWholeBytes"
+  | "activePackWholeRequests"
+  | "activePackUnattributedBytes"
+  | "activePackUnattributedRequests"
+  | "selectedPackBytes"
+  | "activePackCount"
+  | "outputValidationBytes"
+  | "outputValidationRequests"
+  | "outputBytesWritten"
+  | "outputRequests"
 >;
 
 export type NativeReceiveOperationView = Pick<
   NativeReceiveOperation,
-  "id" | "state" | "createdAt" | "updatedAt" | "attempts" | "errorCode" | "result"
+  | "id"
+  | "state"
+  | "createdAt"
+  | "updatedAt"
+  | "attempts"
+  | "errorCode"
+  | "result"
+  | "clientAckReadyAt"
+  | "events"
 > & { metrics?: NativeReceiveOperationMetrics | undefined };
+
+export type NativeReceiveOperationEvidenceView = Pick<
+  NativeReceiveOperationView,
+  | "id"
+  | "state"
+  | "createdAt"
+  | "updatedAt"
+  | "attempts"
+  | "errorCode"
+  | "clientAckReadyAt"
+  | "events"
+  | "result"
+  | "metrics"
+>;
 
 export type EnqueueNativeReceiveResult =
   | { status: "queued"; operation: NativeReceiveOperationView }
@@ -80,6 +341,7 @@ export type NativeReceiveProcessRequest = {
   outputPackKey: string;
   outputIdxKey: string;
   outputRefsKey: string;
+  stockReceive?: NativeReceiveStockInput | undefined;
 };
 
 export type NativeReceiveProcessResult = {
@@ -88,23 +350,133 @@ export type NativeReceiveProcessResult = {
   idxBytes: number;
   refsBytes: number;
   objectCount: number;
+  inputPackObjectCount?: number | undefined;
   packSha1: string;
   elapsedMs: number;
   scratchBytes: number;
   hydratedBytes: number;
   downloadedBytes: number;
   cacheHitBytes: number;
+  receivePackResponse?: string | undefined;
+  inputRequestSha256?: string | undefined;
+  packSha256?: string | undefined;
+  idxSha256?: string | undefined;
+  refsSha256?: string | undefined;
+  stockTrace?: NativeReceiveStockTraceEvent[] | undefined;
+  metadataBytes?: number | undefined;
+  metadataRequests?: number | undefined;
+  inputBytesRead?: number | undefined;
+  inputRequests?: number | undefined;
+  rangeBytes?: number | undefined;
+  rangeRequests?: number | undefined;
+  packsTouched?: number | undefined;
+  quarantinePathInsideOwnedWorkRoot?: boolean | undefined;
+  quarantineRemovedAfterReceive?: boolean | undefined;
+  quarantinePathNonEmpty?: boolean | undefined;
+  freshWorkDirectory?: boolean | undefined;
+  repositoryPackBytesBeforeHydration?: number | undefined;
+  sharedObjectCacheDisabled?: boolean | undefined;
+  skipConnectivityCheck?: boolean | undefined;
+  planSha256?: string | undefined;
+  closureProof?: NativeReceiveStockClosureProof | undefined;
+  semanticExternalOids?: string[] | undefined;
+  thinDeltaBaseOids?: string[] | undefined;
+  requiredRootOids?: string[] | undefined;
+  prerequisiteObjectOids?: string[] | undefined;
+  physicalNodes?: StockPhysicalNode[] | undefined;
+  physicalDependencies?: StockPhysicalDependencyEdge[] | undefined;
+  topologicalEntryIds?: string[] | undefined;
+  selectedPackChecksums?: string[] | undefined;
+  activePackBindings?: NativeReceiveActivePackBinding[] | undefined;
+  ranges?: NativeReceiveStockRange[] | undefined;
+  activePackReads?: NativeReceiveStockActivePackRead[] | undefined;
+  activePackTrailerBytes?: number | undefined;
+  activePackTrailerRequests?: number | undefined;
+  activePackRangeBytes?: number | undefined;
+  activePackRangeRequests?: number | undefined;
+  activePackWholeBytes?: number | undefined;
+  activePackWholeRequests?: number | undefined;
+  activePackUnattributedBytes?: number | undefined;
+  activePackUnattributedRequests?: number | undefined;
+  closureManifestKey?: string | undefined;
+  closureManifestBytes?: number | undefined;
+  closureManifestSha256?: string | undefined;
+  closureManifestEtag?: string | undefined;
+  prerequisitePackKey?: string | undefined;
+  prerequisitePackBytes?: number | undefined;
+  prerequisitePackSha256?: string | undefined;
+  prerequisitePackEtag?: string | undefined;
+  incomingObjectCount?: number | undefined;
+  visitedIncomingObjectCount?: number | undefined;
+  logicalEdgeCount?: number | undefined;
+  internalEdgeCount?: number | undefined;
+  externalEdgeCount?: number | undefined;
+  missingObjectCount?: number | undefined;
+  objectTypeCounts?: { commit: number; tree: number; blob: number; tag: number } | undefined;
+  selectedPackBytes?: number | undefined;
+  activePackCount?: number | undefined;
+  outputValidationBytes?: number | undefined;
+  outputValidationRequests?: number | undefined;
+  outputBytesWritten?: number | undefined;
+  outputRequests?: number | undefined;
+  outputPackEtag?: string | undefined;
+  outputIdxEtag?: string | undefined;
+  outputRefsEtag?: string | undefined;
+  outputIntegrityRejectedRole?: "pack" | "index" | "references" | undefined;
+  outputIntegrityRejectedAt?: "body" | "head" | undefined;
+};
+
+export type NativeReceiveActivePackBinding = {
+  packKey: string;
+  packBytes: number;
+  idxBytes: number;
+  packChecksum: string;
+  idxSha256: string;
+  prefSha256: string;
 };
 
 export type RepositoryContainerBridgeProps = {
   operationId: string;
   readKeys: Array<{ key: string; expectedBytes: number; expectedEtag?: string | undefined }>;
   writeKeys: Array<{ key: string; maxBytes: number }>;
+  requireWriteSha256?: boolean | undefined;
 };
 
 export function nativeReceiveOperationView(
   operation: NativeReceiveOperation
 ): NativeReceiveOperationView {
+  const processorMetrics: NativeReceiveOperationMetrics | undefined = operation.processorResult
+    ? {
+        elapsedMs: operation.processorResult.elapsedMs,
+        scratchBytes: operation.processorResult.scratchBytes,
+        hydratedBytes: operation.processorResult.hydratedBytes,
+        downloadedBytes: operation.processorResult.downloadedBytes,
+        cacheHitBytes: operation.processorResult.cacheHitBytes,
+        metadataBytes: operation.processorResult.metadataBytes,
+        metadataRequests: operation.processorResult.metadataRequests,
+        inputBytesRead: operation.processorResult.inputBytesRead,
+        inputRequests: operation.processorResult.inputRequests,
+        rangeBytes: operation.processorResult.rangeBytes,
+        rangeRequests: operation.processorResult.rangeRequests,
+        packsTouched: operation.processorResult.packsTouched,
+        ranges: operation.processorResult.ranges,
+        activePackReads: operation.processorResult.activePackReads,
+        activePackTrailerBytes: operation.processorResult.activePackTrailerBytes,
+        activePackTrailerRequests: operation.processorResult.activePackTrailerRequests,
+        activePackRangeBytes: operation.processorResult.activePackRangeBytes,
+        activePackRangeRequests: operation.processorResult.activePackRangeRequests,
+        activePackWholeBytes: operation.processorResult.activePackWholeBytes,
+        activePackWholeRequests: operation.processorResult.activePackWholeRequests,
+        activePackUnattributedBytes: operation.processorResult.activePackUnattributedBytes,
+        activePackUnattributedRequests: operation.processorResult.activePackUnattributedRequests,
+        selectedPackBytes: operation.processorResult.selectedPackBytes,
+        activePackCount: operation.processorResult.activePackCount,
+        outputValidationBytes: operation.processorResult.outputValidationBytes,
+        outputValidationRequests: operation.processorResult.outputValidationRequests,
+        outputBytesWritten: operation.processorResult.outputBytesWritten,
+        outputRequests: operation.processorResult.outputRequests,
+      }
+    : operation.rejectionMetrics;
   return {
     id: operation.id,
     state: operation.state,
@@ -112,17 +484,55 @@ export function nativeReceiveOperationView(
     updatedAt: operation.updatedAt,
     attempts: operation.attempts,
     errorCode: operation.errorCode,
+    clientAckReadyAt: operation.clientAckReadyAt,
+    events: operation.events,
     result: operation.result,
-    metrics: operation.processorResult
-      ? {
-          elapsedMs: operation.processorResult.elapsedMs,
-          scratchBytes: operation.processorResult.scratchBytes,
-          hydratedBytes: operation.processorResult.hydratedBytes,
-          downloadedBytes: operation.processorResult.downloadedBytes,
-          cacheHitBytes: operation.processorResult.cacheHitBytes,
-        }
-      : undefined,
+    metrics: processorMetrics,
   };
+}
+
+/**
+ * Canonical evidence projection shared by the authenticated operation route
+ * and direct Durable Object inspection in the disposable qualification lane.
+ * The terminal timestamps are included so the authenticated route must expose
+ * the exact same durable operation projection as direct qualification access.
+ */
+export function nativeReceiveOperationEvidenceView(
+  operation: NativeReceiveOperationView
+): NativeReceiveOperationEvidenceView {
+  return {
+    id: operation.id,
+    state: operation.state,
+    createdAt: operation.createdAt,
+    updatedAt: operation.updatedAt,
+    attempts: operation.attempts,
+    errorCode: operation.errorCode,
+    clientAckReadyAt: operation.clientAckReadyAt,
+    events: operation.events,
+    result: operation.result,
+    metrics: operation.metrics,
+  };
+}
+
+function canonicalEvidenceValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalEvidenceValue);
+  if (!value || typeof value !== "object") return value;
+  const canonical: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    const member = (value as Record<string, unknown>)[key];
+    if (member !== undefined) canonical[key] = canonicalEvidenceValue(member);
+  }
+  return canonical;
+}
+
+export function nativeReceiveOperationEvidenceMatches(
+  route: NativeReceiveOperationView,
+  durable: NativeReceiveOperationView
+): boolean {
+  return (
+    JSON.stringify(canonicalEvidenceValue(nativeReceiveOperationEvidenceView(route))) ===
+    JSON.stringify(canonicalEvidenceValue(nativeReceiveOperationEvidenceView(durable)))
+  );
 }
 
 export function isNativeReceiveTerminal(state: NativeReceiveOperationState): boolean {

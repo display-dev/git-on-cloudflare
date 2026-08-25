@@ -43,7 +43,8 @@ async function collectExternalBaseSources(
 async function materializeExternalBaseCandidate(
   opts: ResolveOptions,
   candidate: PackedObjectCandidate,
-  visited: Set<string>
+  visited: Set<string>,
+  requiredOid: string
 ): Promise<PackedObjectResult | undefined> {
   return await materializePackedObjectCandidate({
     env: opts.env,
@@ -58,6 +59,10 @@ async function materializeExternalBaseCandidate(
     visited,
     signal: opts.signal,
     checkAborted: (stage) => throwIfAborted(opts.signal, opts.log, stage),
+    maxEntryBytes: opts.maxObjectBytes,
+    maxInflatedBytes: opts.maxObjectBytes,
+    maxDeltaResultBytes: opts.maxObjectBytes,
+    onRange: (range) => opts.onExternalBaseRange?.(requiredOid, range),
   });
 }
 
@@ -76,6 +81,9 @@ export async function readExternalBaseObject(
   visited = new Set<string>()
 ): Promise<PackedObjectResult | undefined> {
   const oidHex = normalizeOidHex(oid);
+  if (opts.resolveExternalBase) {
+    return await opts.resolveExternalBase(oidHex);
+  }
   const cached = opts.cacheCtx?.memo?.packedObjects?.get(oidHex);
   if (cached) return cached;
 
@@ -96,7 +104,7 @@ export async function readExternalBaseObject(
   });
 
   for (const candidate of candidates) {
-    const object = await materializeExternalBaseCandidate(opts, candidate, visited);
+    const object = await materializeExternalBaseCandidate(opts, candidate, visited, oidHex);
     if (!object) continue;
 
     if (opts.cacheCtx?.memo) {

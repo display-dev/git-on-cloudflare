@@ -19,6 +19,37 @@ const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 const MAX_PATH_BYTES = 4096;
 const MAX_PATH_SEGMENTS = 128;
 
+export type SnapshotLimitReason =
+  | "snapshot-file-count-limit"
+  | "snapshot-total-bytes-limit"
+  | "snapshot-path-bytes-limit"
+  | "snapshot-path-segments-limit";
+
+export type SnapshotLimitObservation = {
+  fileCount: number;
+  totalBytes: number;
+  maxPathBytes: number;
+  maxSegments: number;
+};
+
+export class SnapshotLimitError extends Error {
+  public readonly reason: SnapshotLimitReason;
+  public readonly observed: SnapshotLimitObservation;
+  public readonly limits = {
+    maxFiles: MAX_FILES,
+    maxBytes: MAX_TOTAL_BYTES,
+    maxPathBytes: MAX_PATH_BYTES,
+    maxSegments: MAX_PATH_SEGMENTS,
+  };
+
+  public constructor(reason: SnapshotLimitReason, observed: SnapshotLimitObservation) {
+    super("Snapshot exceeds benchmark limits");
+    this.name = "SnapshotLimitError";
+    this.reason = reason;
+    this.observed = observed;
+  }
+}
+
 export type SnapshotManifest = {
   version: 1;
   repositoryId: string;
@@ -132,11 +163,29 @@ export async function materializeAcceptedWrite(args: {
     const commit = await readCommit(args.env, args.repoId, args.fact.afterSha, cacheCtx);
     const files: Array<{ path: string; bytes: Uint8Array; sha256: string }> = [];
     let totalBytes = 0;
+    let maxPathBytes = 0;
+    let maxSegments = 0;
 
     const visitTree = async (treeOid: string, basePath: string): Promise<void> => {
       const entries = await readTree(args.env, args.repoId, treeOid, cacheCtx);
       for (const entry of entries) {
         const path = joinTreePath(basePath, entry.name);
+        const pathBytes = new TextEncoder().encode(path).byteLength;
+        const pathSegments = path.split("/").length;
+        maxPathBytes = Math.max(maxPathBytes, pathBytes);
+        maxSegments = Math.max(maxSegments, pathSegments);
+        const observed = (): SnapshotLimitObservation => ({
+          fileCount: files.length + 1,
+          totalBytes,
+          maxPathBytes,
+          maxSegments,
+        });
+        if (pathBytes > MAX_PATH_BYTES) {
+          throw new SnapshotLimitError("snapshot-path-bytes-limit", observed());
+        }
+        if (pathSegments > MAX_PATH_SEGMENTS) {
+          throw new SnapshotLimitError("snapshot-path-segments-limit", observed());
+        }
         validateSnapshotPath(path);
         if (isTreeMode(entry.mode)) {
           await visitTree(entry.oid, path);
@@ -148,8 +197,11 @@ export async function materializeAcceptedWrite(args: {
         const blob = await readBlob(args.env, args.repoId, entry.oid, cacheCtx);
         if (blob.type !== "blob" || !blob.content) throw new Error("Snapshot blob is unavailable");
         totalBytes += blob.content.byteLength;
-        if (files.length >= MAX_FILES || totalBytes > MAX_TOTAL_BYTES) {
-          throw new Error("Snapshot exceeds benchmark limits");
+        if (files.length >= MAX_FILES) {
+          throw new SnapshotLimitError("snapshot-file-count-limit", observed());
+        }
+        if (totalBytes > MAX_TOTAL_BYTES) {
+          throw new SnapshotLimitError("snapshot-total-bytes-limit", observed());
         }
         files.push({ path, bytes: blob.content, sha256: await digest(blob.content) });
       }

@@ -3,5 +3,10 @@
   "compilerOptions": {
     "types": ["@cloudflare/vitest-pool-workers/types", "vite/client", "node"]
   },
-  "include": ["**/*.ts", "**/*.d.ts", "../worker-configuration.d.ts"]
+  "include": [
+    "**/*.ts",
+    "**/*.d.ts",
+    "../worker-configuration.d.ts",
+    "../src/worker/stockReceiveEnvironment.d.ts"
+  ]
 }

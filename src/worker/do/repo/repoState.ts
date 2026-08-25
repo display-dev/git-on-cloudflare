@@ -28,6 +28,10 @@ export type RepoLease = {
     | "generation-publication";
 };
 
+export type StockReceiveRecoveryLease = RepoLease & {
+  operationId: string;
+};
+
 export type SnapshotMaterializationLease = RepoLease & {
   prefix: string;
 };
@@ -72,6 +76,9 @@ export type ReceiveCommitOutcome = {
   changed: boolean;
   empty: boolean;
   shouldQueueCompaction: boolean;
+  outputValidationBytes?: number;
+  outputValidationRequests?: number;
+  outputEtags?: { pack: string; idx: string; refs: string };
 };
 
 export type ReceiveFinalizeIntent = {
@@ -85,6 +92,15 @@ export type ReceiveFinalizeIntent = {
     packBytes: number;
     idxBytes: number;
     objectCount: number;
+    integrity?: {
+      packSha256: string;
+      idxSha256: string;
+      refsSha256: string;
+      refsBytes: number;
+      packEtag?: string;
+      idxEtag?: string;
+      refsEtag?: string;
+    };
   };
   packSequence?: number;
   nextPacksetVersion?: number;
@@ -137,6 +153,7 @@ export type RepoStateSchema = {
   nativeCatalogReaderGenerationFloor: number | undefined;
   nextPackSeq: number;
   receiveLease: RepoLease | undefined;
+  stockReceiveRecoveryLease: StockReceiveRecoveryLease | undefined;
   receiveOutcomeIndex: string[] | undefined;
   nativeReceiveOperationIndex: string[] | undefined;
   nativeCatalogReaderLease: NativeCatalogReaderLease | undefined;

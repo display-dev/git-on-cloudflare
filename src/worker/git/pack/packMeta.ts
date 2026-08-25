@@ -7,6 +7,7 @@ export type PackReadOptions = {
   signal?: AbortSignal;
   log?: Logger;
   exactLength?: boolean;
+  onRead?: (read: { offset: number; length: number }) => void;
 };
 
 const RANGE_READ_ATTEMPTS = 3;
@@ -81,7 +82,9 @@ export async function readPackRange(
     const run = async () => {
       const obj = await env.REPO_BUCKET.get(key, { range: { offset, length } });
       if (!obj) return undefined;
-      return new Uint8Array(await obj.arrayBuffer());
+      const bytes = new Uint8Array(await obj.arrayBuffer());
+      options?.onRead?.({ offset, length: bytes.byteLength });
+      return bytes;
     };
     options?.countSubrequest?.();
     return options?.limiter ? await options.limiter.run("r2:get-range", run) : await run();
@@ -150,7 +153,8 @@ export function readPackHeaderExFromBuf(buf: Uint8Array, offset: number): PackHe
     while (byte & 0x80) {
       if (p >= buf.length) return undefined;
       byte = buf[p++];
-      distance = ((distance + 1) << 7) | (byte & 0x7f);
+      distance = (distance + 1) * 128 + (byte & 0x7f);
+      if (!Number.isSafeInteger(distance)) return undefined;
     }
 
     return {

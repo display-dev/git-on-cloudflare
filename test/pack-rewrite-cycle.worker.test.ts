@@ -41,6 +41,51 @@ async function readStreamBytes(stream: ReadableStream<Uint8Array>): Promise<Uint
 }
 
 describe("pack rewrite cycles", () => {
+  it("continues a partial rewrite after a slow reader applies backpressure", async () => {
+    const firstPayload = new TextEncoder().encode("first object\n");
+    const secondPayload = new TextEncoder().encode("second object\n");
+    const firstOid = await computeOid("blob", firstPayload);
+    const packBytes = await buildPack([
+      { type: "blob", payload: firstPayload },
+      { type: "blob", payload: secondPayload },
+    ]);
+    const packKey = `test/rewrite-slow-reader-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(packKey, packBytes);
+    const indexed = await indexTestPack(env, packKey, packBytes.byteLength);
+    const stream = await rewritePack(
+      env,
+      { packs: [{ packKey, packBytes: packBytes.byteLength, idx: indexed.idxView }] },
+      [firstOid],
+      {
+        limiter: { run: async (_label, fn) => await fn() },
+        countSubrequest: () => {},
+      }
+    );
+    expect(stream).toBeDefined();
+
+    const reader = stream!.getReader();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const chunks = first.value ? [first.value] : [];
+    while (true) {
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("slow rewrite reader stalled")), 1_000)
+        ),
+      ]);
+      if (next.done) break;
+      if (next.value) chunks.push(next.value);
+    }
+    const rewritten = concatChunks(chunks);
+    const verifyKey = `test/rewrite-slow-reader-verify-${Date.now()}.pack`;
+    await env.REPO_BUCKET.put(verifyKey, rewritten);
+    const verified = await indexTestPack(env, verifyKey, rewritten.byteLength);
+    expect(verified.idxView.count).toBe(1);
+  });
+
   it("preserves a single pack byte-for-byte across multiple exact R2 ranges", async () => {
     const payload = new Uint8Array(9 * 1024 * 1024);
     let state = 0x6d2b79f5;

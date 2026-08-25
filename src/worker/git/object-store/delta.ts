@@ -1,4 +1,8 @@
-export function applyGitDelta(base: Uint8Array, delta: Uint8Array): Uint8Array {
+export function applyGitDelta(
+  base: Uint8Array,
+  delta: Uint8Array,
+  options: { maxResultBytes?: number } = {}
+): Uint8Array {
   let pos = 0;
 
   const readVarint = () => {
@@ -16,6 +20,9 @@ export function applyGitDelta(base: Uint8Array, delta: Uint8Array): Uint8Array {
   const baseSize = readVarint();
   const resultSize = readVarint();
   if (baseSize !== base.length) throw new Error("delta:base-size-mismatch");
+  if (options.maxResultBytes !== undefined && resultSize > options.maxResultBytes) {
+    throw new Error("delta:result-size-limit");
+  }
 
   const out = new Uint8Array(resultSize);
   let outPos = 0;

@@ -4,7 +4,11 @@ import type { PackedObjectResult } from "./types";
 import type { PackedObjectCandidate } from "./candidates";
 
 import { inflate } from "@/worker/common";
-import { readPackHeaderExFromBuf, readPackRange } from "@/worker/git/pack/packMeta";
+import {
+  decodePackObjectSize,
+  readPackHeaderExFromBuf,
+  readPackRange,
+} from "@/worker/git/pack/packMeta";
 import { applyGitDelta } from "./delta";
 import { findOffsetIndex, getNextOffsetByIndex, getOidHexAt } from "./idxView";
 import { toPackedObjectResult, typeCodeToObjectType } from "./support";
@@ -17,6 +21,10 @@ export type PackedRefBaseResolver = (
 ) => Promise<PackedObjectResult | undefined>;
 
 export type PackedMaterializerAbortCheck = (stage: string) => void;
+export type PackedMaterializerRangeObserver = (range: {
+  candidate: PackedObjectCandidate;
+  length: number;
+}) => void;
 
 export type PackedMaterializerOptions = {
   env: Env;
@@ -29,6 +37,13 @@ export type PackedMaterializerOptions = {
   visited: Set<string>;
   signal?: AbortSignal;
   checkAborted?: PackedMaterializerAbortCheck;
+  /** Reject an entry span before issuing its R2 range request. */
+  maxEntryBytes?: number;
+  /** Reject the declared inflated payload size before allocating during inflate. */
+  maxInflatedBytes?: number;
+  /** Reject a delta result size before allocating its output buffer. */
+  maxDeltaResultBytes?: number;
+  onRange?: PackedMaterializerRangeObserver;
 };
 
 function makeVisitKey(candidate: PackedObjectCandidate): string {
@@ -85,6 +100,9 @@ async function materializeCandidate(
       });
       return undefined;
     }
+    if (options.maxEntryBytes !== undefined && entryLength > options.maxEntryBytes) {
+      throw new Error("packed-materialize:entry-size-limit");
+    }
 
     options.log.debug("packed-materialize:read-entry", {
       packKey: candidate.source.packKey,
@@ -114,6 +132,7 @@ async function materializeCandidate(
       });
       return undefined;
     }
+    options.onRange?.({ candidate, length: entryLength });
 
     options.checkAborted?.("packed-materialize:inflate");
     const header = readPackHeaderExFromBuf(entry, 0);
@@ -125,8 +144,18 @@ async function materializeCandidate(
       });
       return undefined;
     }
+    const inflatedSize = decodePackObjectSize(header.sizeVarBytes);
+    if (inflatedSize === undefined) {
+      throw new Error("packed-materialize:invalid-inflated-size");
+    }
+    if (options.maxInflatedBytes !== undefined && inflatedSize > options.maxInflatedBytes) {
+      throw new Error("packed-materialize:inflated-size-limit");
+    }
 
     const payload = await inflate(entry.subarray(header.headerLen));
+    if (payload.byteLength !== inflatedSize) {
+      throw new Error("packed-materialize:inflated-size-mismatch");
+    }
     const objectType = typeCodeToObjectType(header.type);
     if (objectType) return toPackedObjectResult(candidate, objectType, payload);
 
@@ -168,7 +197,13 @@ async function materializeCandidate(
     }
 
     options.checkAborted?.("packed-materialize:delta");
-    return toPackedObjectResult(candidate, base.type, applyGitDelta(base.payload, payload));
+    return toPackedObjectResult(
+      candidate,
+      base.type,
+      applyGitDelta(base.payload, payload, {
+        maxResultBytes: options.maxDeltaResultBytes,
+      })
+    );
   } finally {
     options.visited.delete(visitKey);
   }

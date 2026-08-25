@@ -206,6 +206,7 @@ class BufferedPackReader {
   private countSub: IndexerOptions["countSubrequest"];
   private log: IndexerOptions["log"];
   private signal?: AbortSignal;
+  private onRead?: IndexerOptions["onRead"];
 
   /** Current in-memory buffer. */
   buf: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
@@ -223,6 +224,7 @@ class BufferedPackReader {
     this.countSub = opts.countSubrequest;
     this.log = opts.log;
     this.signal = opts.signal;
+    this.onRead = opts.onRead;
   }
 
   /** Absolute offset of the current read position in the pack. */
@@ -257,6 +259,7 @@ class BufferedPackReader {
         signal: this.signal,
         exactLength: true,
         log: this.log,
+        onRead: this.onRead,
       });
       if (!chunk) throw new Error("scan: unexpected R2 read failure");
 
@@ -348,6 +351,9 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
 
     const header = parseEntryHeader(reader.buf, reader.pos);
     if (!header) throw new Error(`scan: failed to parse header at offset ${entryStart}`);
+    if (opts.maxObjectBytes !== undefined && header.size > opts.maxObjectBytes) {
+      throw new Error(`scan: object at offset ${entryStart} exceeds operation size limit`);
+    }
 
     // Record basic metadata.
     table.offsets[i] = entryStart;
@@ -442,6 +448,9 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
       // final post-apply object size. The apply step needs the latter, so we
       // read the delta's declared result size here and stash it for resolve().
       const resultSize = readDeltaResultSize(inflator.capturedOutput);
+      if (opts.maxObjectBytes !== undefined && resultSize > opts.maxObjectBytes) {
+        throw new Error(`scan: delta result at offset ${entryStart} exceeds operation size limit`);
+      }
       table.decompressedSizes[i] = resultSize;
       table.resolved[i] = 0;
     }
@@ -477,6 +486,7 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
     signal: opts.signal,
     exactLength: true,
     log: opts.log,
+    onRead: opts.onRead,
   });
   if (!trailer || trailer.length !== PACK_TRAILER_BYTES) {
     throw new Error("scan: failed to read pack trailer checksum");

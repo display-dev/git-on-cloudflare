@@ -1,5 +1,8 @@
 import { assert, test } from "vitest";
-import { encodeOfsDeltaDistance } from "@/worker/git";
+import {
+  encodeOfsDeltaDistance,
+  readPackHeaderExFromBuf,
+} from "@/worker/git/pack/packMeta";
 
 function decodeOfsDeltaDistance(bytes: Uint8Array): number {
   let p = 0;
@@ -26,4 +29,14 @@ test("encodeOfsDeltaDistance round-trips typical values", () => {
         .join(",")})`
     );
   }
+});
+
+test("pack header decoder preserves OFS distances above signed 32-bit range", () => {
+  const distance = 2_500_000_000;
+  const encoded = encodeOfsDeltaDistance(distance);
+  const header = new Uint8Array(1 + encoded.length);
+  header[0] = 6 << 4;
+  header.set(encoded, 1);
+
+  assert.strictEqual(readPackHeaderExFromBuf(header, 0)?.baseRel, distance);
 });

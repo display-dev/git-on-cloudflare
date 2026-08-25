@@ -14,6 +14,16 @@ export type StagedPackUpload = {
   cleanup(): Promise<void>;
 };
 
+export type StagedStockReceiveUpload = {
+  requestKey: string;
+  requestBytes: number;
+  requestSha256: string;
+  packOffset: number;
+  packBytes: number;
+};
+
+const MAX_STOCK_RECEIVE_REQUEST_BYTES = 16 * 1024 * 1024;
+
 function formatProgressBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) {
     return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
@@ -74,9 +84,9 @@ function emitStreamingUploadProgress(args: {
 
 function parseContentLength(request: Request): number | undefined {
   const raw = request.headers.get("Content-Length");
-  if (!raw) return undefined;
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return undefined;
   return parsed;
 }
 
@@ -442,6 +452,99 @@ export async function stagePackToR2(args: {
     countSubrequest: args.countSubrequest,
     onProgress: args.onProgress,
   });
+}
+
+/**
+ * Stages the exact command pkt-lines and pack bytes consumed from the client.
+ * The strict Content-Length bound is checked before allocating or writing.
+ */
+export async function stageStockReceiveRequestToR2(args: {
+  env: Env;
+  request: Request;
+  rawPrefix: Uint8Array;
+  packStream: ReadableStream<Uint8Array>;
+  requestKey: string;
+  limiter: Limiter;
+  countSubrequest(op: string, n?: number): void;
+}): Promise<StagedStockReceiveUpload> {
+  const expectedLength = parseContentLength(args.request);
+  if (
+    expectedLength === undefined ||
+    expectedLength <= args.rawPrefix.byteLength ||
+    expectedLength > MAX_STOCK_RECEIVE_REQUEST_BYTES
+  ) {
+    throw new Error("Stock receive requires a bounded exact Content-Length.");
+  }
+
+  const fixed = new FixedLengthStream(expectedLength);
+  const writer = fixed.writable.getWriter();
+  const requestDigest = createDigestStream("SHA-256");
+  const requestDigestWriter = requestDigest.getWriter();
+  const packDigest = createDigestStream("SHA-1");
+  const packDigestWriter = packDigest.getWriter();
+  const reader = args.packStream.getReader();
+  let totalBytes = args.rawPrefix.byteLength;
+  let packBytes = 0;
+  let packHeader: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  let packTail: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+
+  args.countSubrequest("r2:put-stock-receive-request");
+  const putPromise = args.limiter.run("r2:put-stock-receive-request", () =>
+    args.env.REPO_BUCKET.put(args.requestKey, fixed.readable)
+  );
+  try {
+    await writer.write(args.rawPrefix);
+    await requestDigestWriter.write(args.rawPrefix);
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      if (next.value.byteLength > expectedLength - totalBytes) {
+        throw new Error("Stock receive body exceeded Content-Length.");
+      }
+      const chunk = cloneBytes(next.value);
+      totalBytes += chunk.byteLength;
+      packBytes += chunk.byteLength;
+      if (packHeader.byteLength < PACK_HEADER_BYTES) {
+        const needed = PACK_HEADER_BYTES - packHeader.byteLength;
+        packHeader = appendBytes(packHeader, chunk.subarray(0, needed));
+        validatePackHeader(packHeader);
+      }
+      packTail = await updateTrailerWindow(packDigestWriter, packTail, chunk);
+      await requestDigestWriter.write(chunk);
+      await writer.write(chunk);
+    }
+    if (totalBytes !== expectedLength || packBytes < PACK_HEADER_BYTES + PACK_TRAILER_BYTES) {
+      throw new Error("Stock receive body length did not match Content-Length.");
+    }
+    await packDigestWriter.close();
+    const computedPackDigest = new Uint8Array(await packDigest.digest);
+    if (bytesToHex(computedPackDigest) !== bytesToHex(packTail)) {
+      throw new Error("Received pack trailer SHA-1 did not match the streamed body.");
+    }
+    await requestDigestWriter.close();
+    const requestSha256 = bytesToHex(new Uint8Array(await requestDigest.digest));
+    await writer.close();
+    await putPromise;
+    return {
+      requestKey: args.requestKey,
+      requestBytes: totalBytes,
+      requestSha256,
+      packOffset: args.rawPrefix.byteLength,
+      packBytes,
+    };
+  } catch (error) {
+    await writer.abort(error).catch(() => {});
+    await reader.cancel(error).catch(() => {});
+    // R2 PUT is atomic, but it may still be consuming the fixed-length stream
+    // when validation fails. Settle it before deleting the lease-owned key so
+    // a late successful PUT cannot recreate staged input after cleanup.
+    await putPromise.catch(() => {});
+    args.countSubrequest("r2:delete-stock-receive-request");
+    await args.limiter
+      .run("r2:delete-stock-receive-request", () => args.env.REPO_BUCKET.delete(args.requestKey))
+      .catch(() => {});
+    throw error;
+  }
 }
 
 export async function deleteStagedPack(upload: StagedPackUpload | undefined): Promise<void> {

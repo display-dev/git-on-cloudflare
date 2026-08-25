@@ -15,6 +15,7 @@ export class SequentialReader {
   private countSub: ResolveOptions["countSubrequest"];
   private log: ResolveOptions["log"];
   private signal?: AbortSignal;
+  private onRead?: ResolveOptions["onRead"];
 
   constructor(
     env: Env,
@@ -24,7 +25,8 @@ export class SequentialReader {
     limiter: ResolveOptions["limiter"],
     countSub: ResolveOptions["countSubrequest"],
     log: ResolveOptions["log"],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onRead?: ResolveOptions["onRead"]
   ) {
     this.env = env;
     this.packKey = packKey;
@@ -34,6 +36,7 @@ export class SequentialReader {
     this.countSub = countSub;
     this.log = log;
     this.signal = signal;
+    this.onRead = onRead;
   }
 
   throwIfAborted(stage: string): void {
@@ -59,6 +62,7 @@ export class SequentialReader {
         signal: this.signal,
         exactLength: true,
         log: this.log,
+        onRead: this.onRead,
       });
       if (!data) {
         this.throwIfAborted("reader:read-range");
@@ -80,6 +84,7 @@ export class SequentialReader {
       signal: this.signal,
       exactLength: true,
       log: this.log,
+      onRead: this.onRead,
     });
     if (!data) {
       this.throwIfAborted("reader:read-range");
@@ -111,6 +116,7 @@ export class SequentialReader {
         signal: this.signal,
         exactLength: true,
         log: this.log,
+        onRead: this.onRead,
       });
       if (!data) {
         this.throwIfAborted("reader:read-window");
@@ -136,6 +142,7 @@ export class SequentialReader {
       signal: this.signal,
       exactLength: true,
       log: this.log,
+      onRead: this.onRead,
     });
     if (!chunk) {
       this.throwIfAborted("reader:preload");

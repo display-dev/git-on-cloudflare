@@ -4,14 +4,14 @@ import {
   type NativeReceiveOperation,
 } from "@/worker/git/nativeReceive/types";
 import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits";
-import { doPrefix, nativeReceiveInputPackKey } from "@/worker/keys";
+import { doPrefix, nativeReceiveInputPackKey, nativeReceiveInputRequestKey } from "@/worker/keys";
 
 import { asTypedStorage, nativeReceiveOperationKey, receiveFinalizeIntentKey } from "../repoState";
-import type { RepoLease, RepoStateSchema } from "../repoState";
+import type { RepoLease, RepoStateSchema, StockReceiveRecoveryLease } from "../repoState";
 import { scheduleAlarmIfSooner } from "../scheduler";
 import { getActivePackCatalogSnapshot } from "./state";
 import { activeLeaseOrUndefined } from "./activity";
-import type { BeginReceiveResult } from "./shared";
+import type { BeginReceiveResult, BeginStockReceiveRecoveryResult } from "./shared";
 import {
   DEFAULT_HEAD,
   LEASE_RETRY_AFTER_SECONDS,
@@ -59,9 +59,11 @@ export async function clearExpiredLeases(
         const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
         try {
           await limiter.run("r2:delete-orphan-native-receive-input", async () => {
-            await env.REPO_BUCKET.delete(
-              nativeReceiveInputPackKey(doPrefix(ctx.id.toString()), receiveLease.token)
-            );
+            const prefix = doPrefix(ctx.id.toString());
+            await env.REPO_BUCKET.delete([
+              nativeReceiveInputPackKey(prefix, receiveLease.token),
+              nativeReceiveInputRequestKey(prefix, receiveLease.token),
+            ]);
           });
           logger?.info("lease:orphan-input-cleaned", { kind: "receive" });
         } catch {
@@ -143,8 +145,93 @@ export async function beginReceiveLease(
   };
 }
 
+const STOCK_RECEIVE_RECOVERY_LEASE_TTL_MS = 5 * 60_000;
+
+/**
+ * Issues a bounded retry-only staging lease for the exact retained stock
+ * operation. It never relaxes the generic authority lease: other operation
+ * IDs and every ordinary/legacy receive remain fenced by beginReceiveLease.
+ */
+export async function beginStockReceiveRecoveryLease(
+  ctx: DurableObjectState,
+  operationId: string
+): Promise<BeginStockReceiveRecoveryResult> {
+  const now = Date.now();
+  const selected = await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    if (await store.get("repositoryDeleting")) {
+      return { status: "busy", retryAfter: LEASE_RETRY_AFTER_SECONDS } as const;
+    }
+    const operation = await store.get(nativeReceiveOperationKey(operationId));
+    if (
+      !operation?.stockReceive ||
+      (operation.state !== "ready" && operation.state !== "finalizing")
+    ) {
+      return { status: "not_found" } as const;
+    }
+    const retained = await store.get("stockReceiveRecoveryLease");
+    if (retained) {
+      if (retained.expiresAt <= now) {
+        return {
+          status: "cleanup_required",
+          operationId: retained.operationId,
+          token: retained.token,
+        } as const;
+      }
+      return { status: "busy", retryAfter: LEASE_RETRY_AFTER_SECONDS } as const;
+    }
+    const lease: StockReceiveRecoveryLease = {
+      token: crypto.randomUUID(),
+      operationId,
+      operation: "receive",
+      createdAt: now,
+      expiresAt: now + STOCK_RECEIVE_RECOVERY_LEASE_TTL_MS,
+    };
+    await store.put("stockReceiveRecoveryLease", lease);
+    return { status: "selected", operation, lease } as const;
+  });
+  if (selected.status !== "selected") return selected;
+
+  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  await ensureRepoMetadataDefaults(store);
+  return {
+    status: "recovery",
+    begin: {
+      ok: true,
+      lease: selected.lease,
+      refs: selected.operation.stockReceive!.advertisedRefs,
+      head: (await store.get("head")) ?? DEFAULT_HEAD,
+      refsVersion: (await store.get("refsVersion")) ?? 0,
+      packsetVersion: selected.operation.catalogGeneration,
+      nextPackSeq: (await store.get("nextPackSeq")) ?? 1,
+      activeCatalog: selected.operation.activeCatalog,
+      stockRecovery: { operationId, token: selected.lease.token },
+    },
+  };
+}
+
+export async function completeStockReceiveRecoveryLease(
+  ctx: DurableObjectState,
+  operationId: string,
+  token: string
+): Promise<boolean> {
+  return await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const retained = await store.get("stockReceiveRecoveryLease");
+    if (!retained) return true;
+    if (retained.operationId !== operationId || retained.token !== token) return false;
+    await store.delete("stockReceiveRecoveryLease");
+    return true;
+  });
+}
+
 export async function abortReceiveLease(ctx: DurableObjectState, token: string): Promise<boolean> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const recovery = await store.get("stockReceiveRecoveryLease");
+  if (recovery?.token === token) {
+    await store.delete("stockReceiveRecoveryLease");
+    return true;
+  }
   const existing = await store.get("receiveLease");
   if (!existing || existing.token !== token) return false;
   await store.delete("receiveLease");

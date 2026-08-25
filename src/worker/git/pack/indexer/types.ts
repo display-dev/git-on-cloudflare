@@ -8,9 +8,10 @@
 
 import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
-import type { IdxView, PackCatalogRow } from "@/worker/git/object-store/types";
+import type { IdxView, PackedObjectResult, PackCatalogRow } from "@/worker/git/object-store/types";
 import type { Limiter } from "@/worker/git/operations/limits";
 import type { PackRefsBuilder } from "@/worker/git/pack/refIndex";
+import type { PackedObjectCandidate } from "@/worker/git/object-store/candidates";
 
 // ---------------------------------------------------------------------------
 // Entry table – struct-of-arrays backed by typed arrays
@@ -146,6 +147,10 @@ export interface IndexerOptions {
   log: Logger;
   signal?: AbortSignal;
   onProgress?: (message: string) => void;
+  /** Operation-scoped hard cap for any inflated object or delta result. */
+  maxObjectBytes?: number;
+  /** Successful R2 pack reads, for exact per-operation byte attribution. */
+  onRead?: (read: { offset: number; length: number }) => void;
 }
 
 export interface ResolveOptions extends IndexerOptions {
@@ -164,6 +169,17 @@ export interface ResolveOptions extends IndexerOptions {
   writeIdx?: boolean;
   /** Existing idx view required when `writeIdx` is false. */
   existingIdxView?: IdxView;
+  /** Bounded exact-range evidence for active-catalog objects needed by a thin pack. */
+  onExternalBaseRange?: (
+    requiredOid: string,
+    range: { candidate: PackedObjectCandidate; length: number }
+  ) => void;
+  /**
+   * Operation-scoped external base authority. When supplied, true thin-pack
+   * roots discovered after in-pack promotion resolve through this callback;
+   * the caller can share one physical dependency graph across all roots.
+   */
+  resolveExternalBase?: (requiredOid: string) => Promise<PackedObjectResult | undefined>;
 }
 
 export interface ConnectivityCheckOptions {

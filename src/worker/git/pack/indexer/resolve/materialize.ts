@@ -94,7 +94,9 @@ async function materializeEntry(
     const deltaIndex = pending.pop()!;
     const deltaPayload = await inflateFromReader(reader, table, deltaIndex);
     throwIfAborted(opts.signal, opts.log, "materialize:replay");
-    const result = applyGitDelta(base.payload, deltaPayload);
+    const result = applyGitDelta(base.payload, deltaPayload, {
+      maxResultBytes: opts.maxObjectBytes,
+    });
     if (result.length !== table.decompressedSizes[deltaIndex]) {
       throw new Error(
         `materialize: delta result size mismatch at offset ${table.offsets[deltaIndex]} (expected ${table.decompressedSizes[deltaIndex]}, got ${result.length})`
