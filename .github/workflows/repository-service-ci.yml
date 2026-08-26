@@ -4,6 +4,7 @@ permissions:
   contents: read
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -43,7 +44,7 @@ jobs:
         run: docker build --target test --file container/Dockerfile container
 
   container:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: [test, container-test]
     runs-on: ubuntu-latest
     timeout-minutes: 20
