@@ -158,6 +158,7 @@ describe("qualification repository controls", () => {
           token: "drained-qualification-lease",
           expiresAt: Date.now() - 5 * 60_000 - 1,
         });
+        await state.storage.put("compactionWantedAt", Date.now());
       }
     );
 
@@ -187,7 +188,7 @@ describe("qualification repository controls", () => {
         targetRevision: "1".repeat(40),
         containerImageDigest: `sha256:${"2".repeat(64)}`,
       });
-      expect(inventory.repository.transientStateCount).toBe(2);
+      expect(inventory.repository.transientStateCount).toBe(3);
       expect(inventory.repository.refStateDigest).toMatch(/^[a-f0-9]{64}$/);
       expect(inventory.storage.complete).toBe(true);
       expect(inventory.storage.durableGenerationMetadata).toEqual({
@@ -247,6 +248,7 @@ describe("qualification repository controls", () => {
             await state.storage.get("snapshotCurrent:refs%2Fheads%2Fqual-snapshot")
           ).toBeUndefined();
           expect(await state.storage.get(`materializedSnapshot:${projectedOid}`)).toBeUndefined();
+          expect(await state.storage.get("compactionWantedAt")).toBeUndefined();
         }
       );
 

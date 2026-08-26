@@ -106,8 +106,9 @@ flag or the applicable secret returns 404 for that qualification surface.
    unreachable objects.
 5. It invokes reset with the freshly observed ref digest and R2 object count.
    A parser failure, incomplete inventory, active repository, or mismatched
-   operand blocks reset. Reset also waits for reachability/compaction work and
-   removes accepted-write and snapshot projections owned by disposable
+   operand blocks reset. Reset also waits for active reachability/compaction
+   work, transactionally cancels an idle queued compaction request, and removes
+   accepted-write and snapshot projections owned by disposable
    `refs/heads/qual-*` refs without disturbing projections retained by fixed
    refs.
 6. It rereads inventory. Cleanup is conclusive only when refs, packs, transient

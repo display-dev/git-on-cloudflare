@@ -92,12 +92,13 @@ export async function resetQualificationRepositoryState(
     if (!(await pruneRepositoryActivityLeases(asTypedStorage<RepoStateSchema>(transaction)))) {
       return { schemaVersion: 1, status: "conflict", reason: "active" };
     }
-    if (
-      (await transaction.get("reachabilityGcPending")) !== undefined ||
-      (await transaction.get("compactionWantedAt")) !== undefined
-    ) {
+    if ((await transaction.get("reachabilityGcPending")) !== undefined) {
       return { schemaVersion: 1, status: "conflict", reason: "active" };
     }
+    // A queued request has no authority once every repository lease is idle.
+    // Clear it in this exact-ref transaction so a waiting queue message sees
+    // no work; an already-started worker would have held a lease above.
+    await transaction.delete("compactionWantedAt");
     const deletedProjectionCount = await clearQualificationSnapshotProjectionState(
       transaction,
       refs
