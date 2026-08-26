@@ -9,6 +9,7 @@ import { runDOWithRetry, withEnvOverrides } from "./util/test-helpers";
 const namespace = `qual-${"a".repeat(32)}`;
 const repository = `repo-${"b".repeat(24)}`;
 const secret = "qualification-control-test-secret";
+const observerSecret = "qualification-observer-test-secret";
 
 async function qualificationRequest(
   path = "",
@@ -29,6 +30,7 @@ async function enabled<T>(fn: () => Promise<T>): Promise<T> {
       QUALIFICATION_NAMESPACE: namespace,
       QUALIFICATION_REPOSITORY: repository,
       QUALIFICATION_SECRET: secret,
+      QUALIFICATION_OBSERVER_SECRET: observerSecret,
       QUALIFICATION_TARGET_REVISION: "1".repeat(40),
       QUALIFICATION_CONTAINER_IMAGE_DIGEST: `sha256:${"2".repeat(64)}`,
     },
@@ -37,10 +39,65 @@ async function enabled<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe("qualification repository controls", () => {
+  it("exposes a separately authenticated bounded operation observation", async () => {
+    const seeded = await setupRepoForTests(env, namespace, repository, {
+      doName: `repo:qualification-observer-${crypto.randomUUID()}`,
+    });
+    const stub = getRepoStub(env, seeded.doName);
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        await state.storage.put("nativeReceiveOperation:qualification-observed", {
+          id: "qualification-observed",
+          state: "committed",
+          createdAt: 1787731200000,
+          updatedAt: 1787731201000,
+          attempts: 1,
+        });
+      }
+    );
+    await enabled(async () => {
+      const path = `/operations/qualification-observed`;
+      const controlCredential = await qualificationRequest(path);
+      expect(controlCredential.status).toBe(401);
+      const response = await qualificationRequest(path, {}, observerSecret);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(await response.json()).toEqual({
+        schemaVersion: 1,
+        id: "qualification-observed",
+        state: "committed",
+        createdAt: 1787731200000,
+        updatedAt: 1787731201000,
+        attempts: 1,
+      });
+      const missing = await qualificationRequest(
+        "/operations/qualification-missing",
+        {},
+        observerSecret
+      );
+      expect(missing.status).toBe(404);
+      expect(missing.headers.get("Cache-Control")).toBe("no-store");
+    });
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        await state.storage.delete("nativeReceiveOperation:qualification-observed");
+      }
+    );
+  });
+
   it("is absent by default and authenticates before repository lookup", async () => {
     const disabled = await qualificationRequest();
     expect(disabled.status).toBe(404);
     expect(disabled.headers.get("Cache-Control")).toBe("no-store");
+    const disabledObserver = await qualificationRequest(
+      "/operations/qualification-missing",
+      {},
+      observerSecret
+    );
+    expect(disabledObserver.status).toBe(404);
+    expect(disabledObserver.headers.get("Cache-Control")).toBe("no-store");
     await enabled(async () => {
       const denied = await qualificationRequest("", {}, "wrong-secret");
       expect(denied.status).toBe(401);

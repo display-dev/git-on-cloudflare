@@ -3,6 +3,7 @@ import { getRepoStub, json } from "@/worker/common";
 import { doPrefix } from "@/worker/keys";
 import { resolveRepositoryRoute } from "@/worker/repositories/route";
 import type { QualificationResetResult } from "@/worker/do/repo/qualification";
+import { isValidNativeReceiveOperationId } from "@/worker/git/nativeReceive/types";
 import type { AppContext, AppRouter } from "./hono";
 
 const QUALIFICATION_SCHEMA_VERSION = 2;
@@ -36,6 +37,19 @@ async function authorizeQualification(c: AppContext): Promise<Response | null> {
   }
   const match = /^Bearer (.+)$/.exec(c.req.header("Authorization") ?? "");
   if (!match || !(await constantTimeEquals(c.env.QUALIFICATION_SECRET, match[1]!))) {
+    return json({ schemaVersion: 1, status: "denied", reason: "unauthorized" }, 401, {
+      "Cache-Control": "no-store",
+    });
+  }
+  return null;
+}
+
+async function authorizeQualificationObserver(c: AppContext): Promise<Response | null> {
+  if (c.env.QUALIFICATION_MODE !== "1" || !c.env.QUALIFICATION_OBSERVER_SECRET) {
+    return new Response("Not found\n", { status: 404, headers: { "Cache-Control": "no-store" } });
+  }
+  const match = /^Bearer (.+)$/.exec(c.req.header("Authorization") ?? "");
+  if (!match || !(await constantTimeEquals(c.env.QUALIFICATION_OBSERVER_SECRET, match[1]!))) {
     return json({ schemaVersion: 1, status: "denied", reason: "unauthorized" }, 401, {
       "Cache-Control": "no-store",
     });
@@ -170,6 +184,45 @@ async function readResetRequest(request: Request): Promise<{
 }
 
 export function registerQualificationRoutes(router: AppRouter): void {
+  router.get("/_internal/qualification/:owner/:repo/operations/:operationId", async (c) => {
+    const denied = await authorizeQualificationObserver(c);
+    if (denied) return denied;
+    const operationId = c.req.param("operationId") ?? "";
+    if (!isValidNativeReceiveOperationId(operationId)) {
+      return new Response("Not found\n", { status: 404, headers: { "Cache-Control": "no-store" } });
+    }
+    const route = await resolveQualificationTarget(c);
+    if (!route)
+      return new Response("Not found\n", { status: 404, headers: { "Cache-Control": "no-store" } });
+    const stub = getRepoStub(c.env, route.doName);
+    let operation;
+    try {
+      operation = await c.var.limiter.run("do:qualification-operation", () =>
+        stub.getNativeReceiveOperation(operationId)
+      );
+    } catch {
+      return json(
+        { schemaVersion: 1, status: "inconclusive", reason: "operation_observer_unavailable" },
+        503,
+        { "Cache-Control": "no-store" }
+      );
+    }
+    if (!operation)
+      return new Response("Not found\n", { status: 404, headers: { "Cache-Control": "no-store" } });
+    return json(
+      {
+        schemaVersion: 1,
+        id: operation.id,
+        state: operation.state,
+        createdAt: operation.createdAt,
+        updatedAt: operation.updatedAt,
+        attempts: operation.attempts,
+      },
+      ["committed", "aborted", "failed"].includes(operation.state) ? 200 : 202,
+      { "Cache-Control": "no-store" }
+    );
+  });
+
   router.get("/_internal/qualification/:owner/:repo", async (c) => {
     const denied = await authorizeQualification(c);
     if (denied) return denied;

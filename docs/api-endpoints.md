@@ -77,6 +77,12 @@ lookup. The `:owner` must exactly match the configured high-entropy
 `QUALIFICATION_NAMESPACE`, and `:repo` must match `repo-[a-f0-9]{16,64}`. Every
 response is `Cache-Control: no-store`.
 
+- **`GET /_internal/qualification/:owner/:repo/operations/:operationId`** uses
+  the separate read-only `QUALIFICATION_OBSERVER_SECRET`. It returns only the
+  operation schema, ID, state, timestamps, and attempt count: `202` while
+  active, `200` when terminal, and `404` when absent. The control credential
+  cannot authorize this route.
+
 - **`GET /_internal/qualification/:owner/:repo`** returns a bounded,
   identity-free inventory plus the exact configured target revision and
   Container image digest: ref count and ref-state digest, active pack count,

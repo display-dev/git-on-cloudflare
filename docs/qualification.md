@@ -57,6 +57,7 @@ Supply these values outside source control:
 - `QUALIFICATION_NAMESPACE=qual-<32–64 lowercase hex>`;
 - `QUALIFICATION_REPOSITORY=repo-<16–64 lowercase hex>`;
 - `QUALIFICATION_SECRET` as an independent secret;
+- `QUALIFICATION_OBSERVER_SECRET` as a separate read-only operation-observer secret;
 - `QUALIFICATION_TARGET_REVISION` as the exact deployed 40-character commit;
 - `QUALIFICATION_CONTAINER_IMAGE_DIGEST` as the exact `sha256:` image digest;
 - the synthetic Git credential for the exact repository; and
@@ -83,10 +84,11 @@ bucket with bucket-scoped S3 credentials, commits the import with the existing
 internal bearer, polls its terminal operation view, and verifies the resulting
 base ref. The multi-gigabyte pack does not cross the Worker request body.
 
-`QUALIFICATION_SECRET` must be installed with `wrangler secret put`; it must not
-appear in Wrangler vars, generated configuration, arguments, evidence, or
-ForgeMark input. A deployment lacking either the mode flag or secret returns
-404 for the qualification surface.
+`QUALIFICATION_SECRET` and `QUALIFICATION_OBSERVER_SECRET` must be installed
+with `wrangler secret put`; neither may appear in Wrangler vars, generated
+configuration, arguments, or evidence. Only the observer secret enters
+ForgeMark over its bounded JSON stdin request. A deployment lacking the mode
+flag or the applicable secret returns 404 for that qualification surface.
 
 ## Readiness and reset sequence
 
