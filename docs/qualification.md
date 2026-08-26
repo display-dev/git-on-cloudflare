@@ -7,7 +7,8 @@ credential, resource, or data set with production.
 ## Frozen candidate composition
 
 Schema v1 qualifies this repository's normal Worker entrypoint, repository
-route lookup, `RepoDurableObject`, native receive Container image, R2 object
+route lookup, `RepoDurableObject`, the zero-authority
+`StockReceiveContainerHost`, native receive Container image, R2 object
 store, D1 route authority, ROUTES KV candidate cache, and repository task
 Queue. Git push, clone, fetch, operation receipts, pack publication, and
 reachability cleanup use the same modules as ordinary service traffic. The
@@ -15,9 +16,9 @@ qualification routes add observation and exact reset operands; they do not add
 a benchmark Git implementation.
 
 Every runtime edge remains one hop: Worker to Durable Object, Worker to R2,
-Worker to D1/KV, or Worker to Queue. The Durable Object-owned Container binding
-is the candidate's existing native-receive boundary. No qualification handler
-chains a Durable Object call through to R2.
+Worker to D1/KV, or Worker to Queue. The dedicated zero-authority Durable
+Object-owned Container binding is the candidate's native-receive boundary. No
+qualification handler chains a Durable Object call through to R2.
 
 ## Required deployment inputs
 
@@ -37,7 +38,8 @@ deployment identity.
 Use a dedicated Cloudflare account scope or exact qualification resources. The
 generated Wrangler configuration must bind one qualification-only Worker, D1
 database, KV namespace, R2 bucket, Queue producer/consumer, `RepoDurableObject`,
-and the Container image built from `container/Dockerfile`.
+`StockReceiveContainerHost`, and the Container image built from
+`container/Dockerfile`.
 
 [`qualification/wrangler.template.jsonc`](../qualification/wrangler.template.jsonc)
 freezes that composition. The external orchestrator must replace every
@@ -69,10 +71,11 @@ echoed by the Worker endpoint alone are not accepted as provenance.
 Set the deployed version's `workers/tag` annotation to the exact target commit.
 Freeze the returned script ETag and SHA-256 of the complete canonical typed
 binding array in the run plan; the maintained orchestrator rejects extra or
-changed bindings and verifies the `RepoDurableObject` export names the expected
-Container. Cloudflare version detail exposes that Container by configuration
-name rather than image digest, so the follow-on deployment spike must prove the
-pinned digest reached the running rollout before scale qualification is accepted.
+changed bindings and verifies the `StockReceiveContainerHost` export names the
+expected Container. Cloudflare version detail exposes that Container by
+configuration name rather than image digest, so the follow-on deployment spike
+must prove the pinned digest reached the running rollout before scale
+qualification is accepted.
 
 Scale setup uses the existing native-import endpoint: the orchestrator prepares
 an exact operation, uploads one bounded pack directly to the qualification R2

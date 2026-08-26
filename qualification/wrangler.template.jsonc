@@ -7,18 +7,27 @@
   "workers_dev": true,
   "limits": { "cpu_ms": 300000 },
   "durable_objects": {
-    "bindings": [{ "name": "REPO_DO", "class_name": "RepoDurableObject" }],
+    "bindings": [
+      { "name": "REPO_DO", "class_name": "RepoDurableObject" },
+      {
+        "name": "STOCK_RECEIVE_CONTAINER_HOST",
+        "class_name": "StockReceiveContainerHost",
+      },
+    ],
   },
   "containers": [
     {
       "name": "repository-native-git",
-      "class_name": "RepoDurableObject",
+      "class_name": "StockReceiveContainerHost",
       "image": "__CONTAINER_IMAGE_REFERENCE__",
       "max_instances": 1,
       "instance_type": "standard-4",
     },
   ],
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RepoDurableObject"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RepoDurableObject"] },
+    { "tag": "v4", "new_sqlite_classes": ["StockReceiveContainerHost"] },
+  ],
   "kv_namespaces": [{ "binding": "ROUTES", "id": "__QUALIFICATION_KV_ID__" }],
   "d1_databases": [
     {

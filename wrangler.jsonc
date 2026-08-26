@@ -25,13 +25,17 @@
       {
         "name": "REPO_DO",
         "class_name": "RepoDurableObject"
+      },
+      {
+        "name": "STOCK_RECEIVE_CONTAINER_HOST",
+        "class_name": "StockReceiveContainerHost"
       }
     ]
   },
   "containers": [
     {
       "name": "repository-native-git",
-      "class_name": "RepoDurableObject",
+      "class_name": "StockReceiveContainerHost",
       "image": "./container/Dockerfile",
       "max_instances": 500,
       "instance_type": "standard-4"
@@ -54,6 +58,12 @@
       "tag": "v3",
       "deleted_classes": [
         "AuthDurableObject"
+      ]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": [
+        "StockReceiveContainerHost"
       ]
     }
   ],
