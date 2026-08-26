@@ -72,7 +72,7 @@ function indeterminateMessage(hasStableOperationId: boolean): string {
 
 function stockReceiveDiagnosticCode(error: unknown): string {
   if (!(error instanceof Error)) return "unclassified";
-  return /^(?:stock-plan|stock-data-plane):[a-z0-9-]{1,80}$/.test(error.message)
+  return /^(?:stock-plan|stock-physical-plan|stock-data-plane):[a-z0-9-]{1,80}$/.test(error.message)
     ? error.message
     : "unclassified";
 }

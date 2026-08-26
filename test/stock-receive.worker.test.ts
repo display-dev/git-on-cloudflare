@@ -102,6 +102,8 @@ describe("stock Smart HTTP receive spike", () => {
 
     const existing = new Error("stock-data-plane:input-authority-mismatch");
     expect(stockDataPlaneTest.streamingContainerPhaseError("bundle-read", existing)).toBe(existing);
+    const physical = new Error("stock-physical-plan:dependency-missing");
+    expect(stockDataPlaneTest.streamingContainerPhaseError("bundle-read", physical)).toBe(physical);
   });
 
   it("plans the first push into a repository with no active packs", async () => {

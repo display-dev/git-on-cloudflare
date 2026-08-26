@@ -327,6 +327,74 @@ async function cleanupFixture(fixture: FrozenFixture): Promise<void> {
 }
 
 describe("stock physical dependency plan", () => {
+  it("accepts byte-identical packs stored under different keys", async () => {
+    const fixture = await baseNotRootFixture();
+    const duplicatePackKey = `${fixture.boundSource.source.packKey}.duplicate`;
+    await env.REPO_BUCKET.put(duplicatePackKey, fixture.packBytes);
+    const duplicateSource: StockBoundPackSource = {
+      ...fixture.boundSource,
+      source: {
+        ...fixture.boundSource.source,
+        packKey: duplicatePackKey,
+      },
+    };
+    const readPackKeys: string[] = [];
+    try {
+      const plan = await planStockPhysicalDependencies({
+        sources: [duplicateSource, fixture.boundSource],
+        semanticRootOids: fixture.semanticRootOids,
+        maxEntryBytes: MAX_TEST_OBJECT_BYTES,
+        maxInflatedBytes: MAX_TEST_OBJECT_BYTES,
+        maxDeltaResultBytes: MAX_TEST_OBJECT_BYTES,
+        readEntry: async (candidate) => {
+          readPackKeys.push(candidate.source.packKey);
+          const object = await env.REPO_BUCKET.get(candidate.source.packKey, {
+            range: {
+              offset: candidate.offset,
+              length: candidate.nextOffset - candidate.offset,
+            },
+          });
+          return object ? new Uint8Array(await object.arrayBuffer()) : undefined;
+        },
+      });
+
+      expect(plan.physicalNodes).toHaveLength(fixture.expectedPhysicalNodes);
+      expect(new Set(readPackKeys)).toEqual(
+        new Set([[fixture.boundSource.source.packKey, duplicatePackKey].sort()[0]!])
+      );
+    } finally {
+      await env.REPO_BUCKET.delete(duplicatePackKey);
+      await cleanupFixture(fixture);
+    }
+  });
+
+  it("rejects duplicate physical ranges with different integrity bindings", async () => {
+    const fixture = await baseNotRootFixture();
+    const duplicatePackKey = `${fixture.boundSource.source.packKey}.mismatched`;
+    const duplicateSource: StockBoundPackSource = {
+      ...fixture.boundSource,
+      idxSha256: "f".repeat(64),
+      source: {
+        ...fixture.boundSource.source,
+        packKey: duplicatePackKey,
+      },
+    };
+    try {
+      await expect(
+        planStockPhysicalDependencies({
+          sources: [fixture.boundSource, duplicateSource],
+          semanticRootOids: fixture.semanticRootOids,
+          maxEntryBytes: MAX_TEST_OBJECT_BYTES,
+          maxInflatedBytes: MAX_TEST_OBJECT_BYTES,
+          maxDeltaResultBytes: MAX_TEST_OBJECT_BYTES,
+          readEntry: async () => undefined,
+        })
+      ).rejects.toThrow(/duplicate-ambiguous/);
+    } finally {
+      await cleanupFixture(fixture);
+    }
+  });
+
   it("is root-order independent across the exact five-fixture, 34-permutation gate", async () => {
     const fixtures = [
       { fixture: await reverseOrderFixture(), orders: 2 },

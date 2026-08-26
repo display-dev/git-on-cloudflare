@@ -147,6 +147,28 @@ function internalPhysicalNodeId(packChecksum: string, candidate: PackedObjectCan
   return `${packChecksum}:${candidate.offset}:${candidate.nextOffset}`;
 }
 
+function candidatesBindEquivalentBytes(
+  sourceByPackKey: ReadonlyMap<string, StockBoundPackSource>,
+  left: PackedObjectCandidate,
+  right: PackedObjectCandidate
+): boolean {
+  const leftBound = sourceByPackKey.get(left.source.packKey);
+  const rightBound = sourceByPackKey.get(right.source.packKey);
+  if (!leftBound || !rightBound) {
+    throw new Error("stock-physical-plan:unbound-candidate");
+  }
+  return (
+    leftBound.packChecksum === rightBound.packChecksum &&
+    leftBound.idxSha256 === rightBound.idxSha256 &&
+    leftBound.prefSha256 === rightBound.prefSha256 &&
+    left.source.packBytes === right.source.packBytes &&
+    left.objectIndex === right.objectIndex &&
+    left.offset === right.offset &&
+    left.nextOffset === right.nextOffset &&
+    left.oid === right.oid
+  );
+}
+
 async function sha256Text(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
   return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", asBufferSource(bytes))));
@@ -285,20 +307,15 @@ export function createStockPhysicalDependencyPlanner(
     if (candidates.length === 0) {
       throw new Error("stock-physical-plan:dependency-missing");
     }
-    for (let index = 1; index < candidates.length; index++) {
-      const previous = candidates[index - 1]!;
-      const current = candidates[index]!;
-      const previousChecksum = checksumByPackKey.get(previous.source.packKey)!;
-      const currentChecksum = checksumByPackKey.get(current.source.packKey)!;
-      if (
-        internalPhysicalNodeId(previousChecksum, previous) ===
-          internalPhysicalNodeId(currentChecksum, current) &&
-        (previous.source.packKey !== current.source.packKey ||
-          previous.objectIndex !== current.objectIndex ||
-          previous.oid !== current.oid)
-      ) {
+    const candidateByPhysicalId = new Map<string, PackedObjectCandidate>();
+    for (const candidate of candidates) {
+      const checksum = checksumByPackKey.get(candidate.source.packKey)!;
+      const physicalId = internalPhysicalNodeId(checksum, candidate);
+      const previous = candidateByPhysicalId.get(physicalId);
+      if (previous && !candidatesBindEquivalentBytes(sourceByPackKey, previous, candidate)) {
         throw new Error("stock-physical-plan:duplicate-ambiguous");
       }
+      candidateByPhysicalId.set(physicalId, previous ?? candidate);
     }
     const candidate = candidates[0]!;
     selectedCandidateByOid.set(oid, candidate);

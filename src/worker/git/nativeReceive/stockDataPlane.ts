@@ -113,7 +113,7 @@ type StreamingContainerPhase =
 function streamingContainerPhaseError(phase: StreamingContainerPhase, error: unknown): Error {
   if (
     error instanceof Error &&
-    /^(?:stock-plan|stock-data-plane):[a-z0-9-]{1,80}$/.test(error.message)
+    /^(?:stock-plan|stock-physical-plan|stock-data-plane):[a-z0-9-]{1,80}$/.test(error.message)
   ) {
     return error;
   }
