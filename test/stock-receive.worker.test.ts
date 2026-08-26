@@ -91,6 +91,19 @@ afterEach(() => {
 });
 
 describe("stock Smart HTTP receive spike", () => {
+  it("classifies streaming Container failures without exposing provider details", () => {
+    const privateDetail = "private-resource-name signed-url credential-value";
+    const classified = stockDataPlaneTest.streamingContainerPhaseError(
+      "container-rpc",
+      new TypeError(privateDetail)
+    );
+    expect(classified.message).toBe("stock-data-plane:container-rpc-failed");
+    expect(classified.message).not.toContain(privateDetail);
+
+    const existing = new Error("stock-data-plane:input-authority-mismatch");
+    expect(stockDataPlaneTest.streamingContainerPhaseError("bundle-read", existing)).toBe(existing);
+  });
+
   it("plans the first push into a repository with no active packs", async () => {
     const seeded = await setupRepoForTests(env, "o", uniqueRepoId("stock-plan-empty"));
     const stub = getRepoStub(env, seeded.doName);

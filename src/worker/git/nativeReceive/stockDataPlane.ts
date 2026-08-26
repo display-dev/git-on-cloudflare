@@ -100,6 +100,23 @@ type StockWorkerExecutor = (args: {
   logger: Logger;
 }) => Promise<NativeReceiveProcessResult>;
 
+type StreamingContainerPhase =
+  | "bundle-read"
+  | "bundle-request"
+  | "container-rpc"
+  | "bundle-write"
+  | "response-header";
+
+function streamingContainerPhaseError(phase: StreamingContainerPhase, error: unknown): Error {
+  if (
+    error instanceof Error &&
+    /^(?:stock-plan|stock-data-plane):[a-z0-9-]{1,80}$/.test(error.message)
+  ) {
+    return error;
+  }
+  return new Error(`stock-data-plane:${phase}-failed`, { cause: error });
+}
+
 let workerExecutorForTesting: StockWorkerExecutor | undefined;
 
 type OutputMutationRole = "pack" | "index" | "references";
@@ -131,6 +148,7 @@ export const __test = {
       ? { ...outputMutationFaultForTesting }
       : undefined;
   },
+  streamingContainerPhaseError,
   reset(): void {
     workerExecutorForTesting = undefined;
     outputMutationFaultForTesting = undefined;
@@ -635,32 +653,39 @@ async function executeStreamingContainer(args: {
   countSubrequest(op: string, n?: number): void;
 }): Promise<HostResult> {
   const stock = args.operation.stockReceive!;
-  const [inputObject, prerequisiteObject, manifestObject] = await Promise.all([
-    readVerifiedR2Object({
-      ...args,
-      key: args.operation.inputPackKey,
-      bytes: args.operation.inputBytes,
-      sha256: stock.inputRequestSha256,
-      expectedEtag: args.operation.inputEtag,
-      role: "input",
-    }),
-    readVerifiedR2Object({
-      ...args,
-      key: args.plan.prerequisitePackKey,
-      bytes: args.plan.prerequisitePackBytes,
-      sha256: args.plan.prerequisitePackSha256,
-      expectedEtag: args.plan.prerequisitePackEtag,
-      role: "prerequisite",
-    }),
-    readVerifiedR2Object({
-      ...args,
-      key: args.plan.closureManifestKey,
-      bytes: args.plan.closureManifestBytes,
-      sha256: args.plan.closureManifestSha256,
-      expectedEtag: args.plan.closureManifestEtag,
-      role: "manifest",
-    }),
-  ]);
+  let inputObject: Awaited<ReturnType<typeof readVerifiedR2Object>>;
+  let prerequisiteObject: Awaited<ReturnType<typeof readVerifiedR2Object>>;
+  let manifestObject: Awaited<ReturnType<typeof readVerifiedR2Object>>;
+  try {
+    [inputObject, prerequisiteObject, manifestObject] = await Promise.all([
+      readVerifiedR2Object({
+        ...args,
+        key: args.operation.inputPackKey,
+        bytes: args.operation.inputBytes,
+        sha256: stock.inputRequestSha256,
+        expectedEtag: args.operation.inputEtag,
+        role: "input",
+      }),
+      readVerifiedR2Object({
+        ...args,
+        key: args.plan.prerequisitePackKey,
+        bytes: args.plan.prerequisitePackBytes,
+        sha256: args.plan.prerequisitePackSha256,
+        expectedEtag: args.plan.prerequisitePackEtag,
+        role: "prerequisite",
+      }),
+      readVerifiedR2Object({
+        ...args,
+        key: args.plan.closureManifestKey,
+        bytes: args.plan.closureManifestBytes,
+        sha256: args.plan.closureManifestSha256,
+        expectedEtag: args.plan.closureManifestEtag,
+        role: "manifest",
+      }),
+    ]);
+  } catch (error) {
+    throw streamingContainerPhaseError("bundle-read", error);
+  }
   const input = inputObject.bytes;
   const prerequisite = prerequisiteObject.bytes;
   const manifest = manifestObject.bytes;
@@ -672,23 +697,38 @@ async function executeStreamingContainer(args: {
   if (header.byteLength > BUNDLE_HEADER_MAX_BYTES || requestBytes > BUNDLE_REQUEST_MAX_BYTES) {
     throw new Error("stock-data-plane:request-bundle-limit");
   }
-  const fixed = new FixedLengthStream(requestBytes);
-  const writing = writeRequestBundle(fixed.writable, header, [input, prerequisite, manifest]);
+  let writing: Promise<void>;
+  let request: Request;
+  try {
+    const fixed = new FixedLengthStream(requestBytes);
+    writing = writeRequestBundle(fixed.writable, header, [input, prerequisite, manifest]);
+    request = new Request("https://stock-container.internal/stock-receive-bundle", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-display-stock-receive-bundle",
+        "Content-Length": String(requestBytes),
+      },
+      body: fixed.readable,
+    });
+  } catch (error) {
+    throw streamingContainerPhaseError("bundle-request", error);
+  }
   const stub = args.env.STOCK_RECEIVE_CONTAINER_HOST.getByName(args.operation.repositoryId);
-  const request = new Request("https://stock-container.internal/stock-receive-bundle", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-display-stock-receive-bundle",
-      "Content-Length": String(requestBytes),
-    },
-    body: fixed.readable,
-  });
   args.countSubrequest("do:stock-container-process");
-  const response = await args.limiter.run<Response>(
-    "do:stock-container-process",
-    async () => await stub.processStockReceive(request)
-  );
-  await writing;
+  let response: Response;
+  try {
+    response = await args.limiter.run<Response>(
+      "do:stock-container-process",
+      async () => await stub.processStockReceive(request)
+    );
+  } catch (error) {
+    throw streamingContainerPhaseError("container-rpc", error);
+  }
+  try {
+    await writing;
+  } catch (error) {
+    throw streamingContainerPhaseError("bundle-write", error);
+  }
   const declaredResponse = Number(response.headers.get("Content-Length"));
   if (
     !response.ok ||
@@ -717,9 +757,14 @@ async function executeStreamingContainer(args: {
   if (resultLength <= 0 || resultLength > HOST_RESULT_MAX_BYTES) {
     throw new Error("stock-data-plane:response-header-limit");
   }
-  const host = hostResultSchema.parse(
-    JSON.parse(new TextDecoder().decode(await reader.exact(resultLength)))
-  );
+  let host: HostResult;
+  try {
+    host = hostResultSchema.parse(
+      JSON.parse(new TextDecoder().decode(await reader.exact(resultLength)))
+    );
+  } catch (error) {
+    throw streamingContainerPhaseError("response-header", error);
+  }
   if (
     host.operationId !== args.operation.id ||
     host.inputRequestSha256 !== stock.inputRequestSha256 ||
