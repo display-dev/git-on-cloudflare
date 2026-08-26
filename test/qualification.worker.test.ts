@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { getRepoStub } from "@/worker/common";
+import { doPrefix } from "@/worker/keys";
 import { setupRepoForTests } from "./util/repoSeed";
 import { runDOWithRetry, withEnvOverrides } from "./util/test-helpers";
 
@@ -64,6 +65,10 @@ describe("qualification repository controls", () => {
     });
     const stub = getRepoStub(env, seeded.doName);
     await stub.seedMinimalRepo(true);
+    const r2Prefix = doPrefix(stub.id.toString());
+    await env.REPO_BUCKET.put(`${r2Prefix}/generation-index.json`, new Uint8Array(7));
+    await env.REPO_BUCKET.put(`${r2Prefix}/generations/7.json`, new Uint8Array(11));
+    await env.REPO_BUCKET.put(`${r2Prefix}/generations/not-a-generation.json`, new Uint8Array(13));
     const projectedOid = "3".repeat(40);
     await runDOWithRetry(
       () => stub,
@@ -111,10 +116,16 @@ describe("qualification repository controls", () => {
         schemaVersion: number;
         status: string;
         repository: { refStateDigest: string; transientStateCount: number };
-        storage: { objectCount: number; complete: boolean };
+        storage: {
+          objectCount: number;
+          objectBytes: number;
+          repositoryObjects: { objectCount: number; objectBytes: number };
+          durableGenerationMetadata: { objectCount: number; objectBytes: number };
+          complete: boolean;
+        };
       };
       expect(inventory).toMatchObject({
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: "ready",
         targetRevision: "1".repeat(40),
         containerImageDigest: `sha256:${"2".repeat(64)}`,
@@ -122,6 +133,18 @@ describe("qualification repository controls", () => {
       expect(inventory.repository.transientStateCount).toBe(2);
       expect(inventory.repository.refStateDigest).toMatch(/^[a-f0-9]{64}$/);
       expect(inventory.storage.complete).toBe(true);
+      expect(inventory.storage.durableGenerationMetadata).toEqual({
+        objectCount: 2,
+        objectBytes: 18,
+      });
+      expect(
+        inventory.storage.repositoryObjects.objectCount +
+          inventory.storage.durableGenerationMetadata.objectCount
+      ).toBe(inventory.storage.objectCount);
+      expect(
+        inventory.storage.repositoryObjects.objectBytes +
+          inventory.storage.durableGenerationMetadata.objectBytes
+      ).toBe(inventory.storage.objectBytes);
 
       const wrongBody = JSON.stringify({
         schemaVersion: 1,

@@ -90,8 +90,11 @@ ForgeMark input. A deployment lacking either the mode flag or secret returns
 1. The orchestrator validates the candidate revision and every resource
    binding, then checks the Worker readiness endpoint through the synthetic
    hostname.
-2. It reads the schema-v1 qualification inventory and retains only the bounded
-   counts and digest.
+2. It reads the schema-v2 qualification inventory and retains only the bounded
+   counts and digest. Storage totals are split between ordinary repository
+   objects and exact-key durable repository-generation metadata. Historical
+   generation manifests and the current generation index are service-owned
+   durable metadata; every other object remains in the exact cleanup baseline.
 3. ForgeMark performs normal stock-Git operations with one run-scoped ref.
 4. The orchestrator removes the run ref using an exact Git delete, verifies the
    expected baseline ref digest, and lets the normal reachability-GC path remove
@@ -102,8 +105,11 @@ ForgeMark input. A deployment lacking either the mode flag or secret returns
    removes accepted-write and snapshot projections owned by disposable
    `refs/heads/qual-*` refs without disturbing projections retained by fixed
    refs.
-6. It rereads inventory. Cleanup is conclusive only when the declared baseline
-   matches; otherwise the orchestrator retains a mode-0600 recovery record.
+6. It rereads inventory. Cleanup is conclusive only when refs, packs, transient
+   state, and ordinary repository object count and bytes match the declared
+   baseline. Durable repository-generation metadata remains separately
+   accounted and may advance; otherwise the orchestrator retains a mode-0600
+   recovery record.
 
 Fixed provider-resource teardown is a separate explicit operator action. An
 ordinary run never deletes the Worker, D1, KV, R2 bucket, Queue, or Container

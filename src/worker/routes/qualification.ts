@@ -5,15 +5,30 @@ import { resolveRepositoryRoute } from "@/worker/repositories/route";
 import type { QualificationResetResult } from "@/worker/do/repo/qualification";
 import type { AppContext, AppRouter } from "./hono";
 
-const QUALIFICATION_SCHEMA_VERSION = 1;
+const QUALIFICATION_SCHEMA_VERSION = 2;
 const SYNTHETIC_NAMESPACE = /^qual-[a-f0-9]{32,64}$/;
 const MAX_INVENTORY_OBJECTS = 10_000;
 
 type StorageInventory = {
   objectCount: number;
   objectBytes: number;
+  repositoryObjects: {
+    objectCount: number;
+    objectBytes: number;
+  };
+  durableGenerationMetadata: {
+    objectCount: number;
+    objectBytes: number;
+  };
   complete: boolean;
 };
+
+function isDurableGenerationMetadata(prefix: string, key: string): boolean {
+  return (
+    key === `${prefix}/generation-index.json` ||
+    new RegExp(`^${prefix}/generations/[0-9]+\\.json$`).test(key)
+  );
+}
 
 async function authorizeQualification(c: AppContext): Promise<Response | null> {
   if (c.env.QUALIFICATION_MODE !== "1" || !c.env.QUALIFICATION_SECRET) {
@@ -49,21 +64,56 @@ async function resolveQualificationTarget(c: AppContext) {
 }
 
 async function storageInventory(c: AppContext, doId: string): Promise<StorageInventory> {
+  const prefix = doPrefix(doId);
   let cursor: string | undefined;
   let objectCount = 0;
   let objectBytes = 0;
+  let repositoryObjectCount = 0;
+  let repositoryObjectBytes = 0;
+  let durableGenerationObjectCount = 0;
+  let durableGenerationObjectBytes = 0;
   do {
     const page = await c.var.limiter.run("r2:qualification-inventory", () =>
-      c.env.REPO_BUCKET.list({ prefix: `${doPrefix(doId)}/`, cursor, limit: 1000 })
+      c.env.REPO_BUCKET.list({ prefix: `${prefix}/`, cursor, limit: 1000 })
     );
-    objectCount += page.objects.length;
-    objectBytes += page.objects.reduce((sum, object) => sum + object.size, 0);
-    if (objectCount > MAX_INVENTORY_OBJECTS) {
-      return { objectCount: MAX_INVENTORY_OBJECTS, objectBytes, complete: false };
+    for (const object of page.objects) {
+      if (objectCount === MAX_INVENTORY_OBJECTS) {
+        return {
+          objectCount,
+          objectBytes,
+          repositoryObjects: {
+            objectCount: repositoryObjectCount,
+            objectBytes: repositoryObjectBytes,
+          },
+          durableGenerationMetadata: {
+            objectCount: durableGenerationObjectCount,
+            objectBytes: durableGenerationObjectBytes,
+          },
+          complete: false,
+        };
+      }
+      objectCount += 1;
+      objectBytes += object.size;
+      if (isDurableGenerationMetadata(prefix, object.key)) {
+        durableGenerationObjectCount += 1;
+        durableGenerationObjectBytes += object.size;
+      } else {
+        repositoryObjectCount += 1;
+        repositoryObjectBytes += object.size;
+      }
     }
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
-  return { objectCount, objectBytes, complete: true };
+  return {
+    objectCount,
+    objectBytes,
+    repositoryObjects: { objectCount: repositoryObjectCount, objectBytes: repositoryObjectBytes },
+    durableGenerationMetadata: {
+      objectCount: durableGenerationObjectCount,
+      objectBytes: durableGenerationObjectBytes,
+    },
+    complete: true,
+  };
 }
 
 async function inventoryResponse(

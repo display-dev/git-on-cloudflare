@@ -7,8 +7,8 @@ function contract(name: string): Record<string, unknown> {
 }
 
 describe("qualification contract fixtures", () => {
-  it("pins the schema-v1 inventory and reset boundaries", () => {
-    const inventory = contract("qualification-inventory-v1.json");
+  it("pins the schema-v2 inventory and schema-v1 reset boundaries", () => {
+    const inventory = contract("qualification-inventory-v2.json");
     expect(Object.keys(inventory).sort()).toEqual([
       "containerImageDigest",
       "repository",
@@ -17,7 +17,14 @@ describe("qualification contract fixtures", () => {
       "storage",
       "targetRevision",
     ]);
-    expect(inventory).toMatchObject({ schemaVersion: 1, status: "ready" });
+    expect(inventory).toMatchObject({
+      schemaVersion: 2,
+      status: "ready",
+      storage: {
+        repositoryObjects: { objectCount: 3, objectBytes: 1_048_576 },
+        durableGenerationMetadata: { objectCount: 2, objectBytes: 512 },
+      },
+    });
     expect(contract("qualification-reset-request-v1.json")).toEqual({
       schemaVersion: 1,
       expectedRefStateDigest: "3".repeat(64),
