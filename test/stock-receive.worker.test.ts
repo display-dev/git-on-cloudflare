@@ -587,6 +587,57 @@ describe("stock Smart HTTP receive spike", () => {
           packsTouched: plan.packsTouched,
         };
         expect(await validateStockReceivePreparedProof(operation, result)).toBe(true);
+        const [catalogRow] = operation.activeCatalog;
+        const [binding] = plan.activePackBindings;
+        const trailerRead = plan.activePackReads.find((read) => read.kind === "trailer");
+        expect(catalogRow).toBeDefined();
+        expect(binding).toBeDefined();
+        expect(trailerRead).toBeDefined();
+        const duplicatePackKey = `${catalogRow!.packKey}.duplicate`;
+        expect(
+          await validateStockReceivePreparedProof(
+            {
+              ...operation,
+              activeCatalog: [
+                ...operation.activeCatalog,
+                { ...catalogRow!, packKey: duplicatePackKey },
+              ],
+            },
+            {
+              ...result,
+              activePackBindings: [
+                ...plan.activePackBindings,
+                { ...binding!, packKey: duplicatePackKey },
+              ],
+              activePackReads: [...plan.activePackReads, trailerRead!],
+              activePackTrailerBytes: plan.activePackTrailerBytes + 20,
+              activePackTrailerRequests: plan.activePackTrailerRequests + 1,
+              activePackCount: plan.activePackCount + 1,
+            }
+          )
+        ).toBe(true);
+        expect(
+          await validateStockReceivePreparedProof(
+            {
+              ...operation,
+              activeCatalog: [
+                ...operation.activeCatalog,
+                { ...catalogRow!, packKey: duplicatePackKey },
+              ],
+            },
+            {
+              ...result,
+              activePackBindings: [
+                ...plan.activePackBindings,
+                { ...binding!, packKey: duplicatePackKey, idxSha256: "f".repeat(64) },
+              ],
+              activePackReads: [...plan.activePackReads, trailerRead!],
+              activePackTrailerBytes: plan.activePackTrailerBytes + 20,
+              activePackTrailerRequests: plan.activePackTrailerRequests + 1,
+              activePackCount: plan.activePackCount + 1,
+            }
+          )
+        ).toBe(false);
         expect(
           await validateStockReceivePreparedProof(operation, {
             ...result,

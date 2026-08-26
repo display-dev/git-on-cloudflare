@@ -178,18 +178,23 @@ async function physicalPlanValid(args: {
   const bindingKeys = new Set<string>();
   for (const binding of bindings) {
     const catalog = catalogByKey.get(binding.packKey);
+    const equivalent = bindingByChecksum.get(binding.packChecksum);
     if (
       !bindingValid(binding) ||
       bindingKeys.has(binding.packKey) ||
-      bindingByChecksum.has(binding.packChecksum) ||
       !catalog ||
       catalog.packBytes !== binding.packBytes ||
-      catalog.idxBytes !== binding.idxBytes
+      catalog.idxBytes !== binding.idxBytes ||
+      (equivalent !== undefined &&
+        (equivalent.packBytes !== binding.packBytes ||
+          equivalent.idxBytes !== binding.idxBytes ||
+          equivalent.idxSha256 !== binding.idxSha256 ||
+          equivalent.prefSha256 !== binding.prefSha256))
     ) {
       return false;
     }
     bindingKeys.add(binding.packKey);
-    bindingByChecksum.set(binding.packChecksum, binding);
+    bindingByChecksum.set(binding.packChecksum, equivalent ?? binding);
   }
   if (bindingKeys.size !== catalogByKey.size) return false;
   for (const node of nodes) {
@@ -362,11 +367,11 @@ async function physicalPlanValid(args: {
   );
 }
 
-/** Pure, bounded proof validation. It performs no I/O or runtime callbacks. */
-export async function validateStockReceivePreparedProof(
+/** Pure, bounded proof diagnosis. It performs no I/O or runtime callbacks. */
+export async function stockReceivePreparedProofFailure(
   operation: NativeReceiveOperation,
   result: NativeReceiveProcessResult
-): Promise<boolean> {
+): Promise<string | undefined> {
   const proof = result.closureProof;
   const semantic = result.semanticExternalOids;
   const thin = result.thinDeltaBaseOids;
@@ -431,13 +436,15 @@ export async function validateStockReceivePreparedProof(
     ranges.length > MAX_PHYSICAL_NODES ||
     reads.length > MAX_ACTIVE_PACK_READS
   ) {
-    return false;
+    return "identity-or-counts";
   }
   const semanticSet = new Set(semantic);
-  if (thin.some((oid) => semanticSet.has(oid))) return false;
+  if (thin.some((oid) => semanticSet.has(oid))) return "root-overlap";
   const rootUnion = [...new Set([...semantic, ...thin])].sort();
-  if (!equalStrings(rootUnion, roots)) return false;
-  if (!(await physicalPlanValid({ operation, result, roots, ranges, reads }))) return false;
+  if (!equalStrings(rootUnion, roots)) return "root-union";
+  if (!(await physicalPlanValid({ operation, result, roots, ranges, reads }))) {
+    return "physical-plan";
+  }
 
   const trailerReads = reads.filter((read) => read.kind === "trailer");
   const rangeReads = reads.filter((read) => read.kind === "required-object");
@@ -461,7 +468,7 @@ export async function validateStockReceivePreparedProof(
     result.activePackUnattributedBytes !== 0 ||
     result.activePackUnattributedRequests !== 0
   ) {
-    return false;
+    return "read-accounting";
   }
   const expectedTrace = [
     "receive_pack_invoked",
@@ -473,10 +480,18 @@ export async function validateStockReceivePreparedProof(
     "pre_receive_succeeded",
     "disposable_ref_update_observed",
   ];
-  return (
-    result.stockTrace?.length === expectedTrace.length &&
+  return result.stockTrace?.length === expectedTrace.length &&
     result.stockTrace.every(
       (event, index) => event.sequence === index + 1 && event.event === expectedTrace[index]
     )
-  );
+    ? undefined
+    : "trace";
+}
+
+/** Pure, bounded proof validation. It performs no I/O or runtime callbacks. */
+export async function validateStockReceivePreparedProof(
+  operation: NativeReceiveOperation,
+  result: NativeReceiveProcessResult
+): Promise<boolean> {
+  return (await stockReceivePreparedProofFailure(operation, result)) === undefined;
 }

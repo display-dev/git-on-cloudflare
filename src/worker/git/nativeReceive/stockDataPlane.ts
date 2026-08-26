@@ -16,7 +16,7 @@ import { z } from "zod";
 import { asBufferSource, bytesToHex, createDigestStream } from "@/worker/common";
 import { packIndexKey, packRefsKey } from "@/worker/keys";
 import { planStockReceive, stockReceivePlanKeys, StockReceivePlannerError } from "./stockPlanner";
-import { validateStockReceivePreparedProof } from "./stockProof";
+import { stockReceivePreparedProofFailure } from "./stockProof";
 
 const REQUEST_MAGIC = new TextEncoder().encode("STKREQ1\n");
 const RESPONSE_MAGIC = new TextEncoder().encode("STKOUT1\n");
@@ -856,14 +856,14 @@ export async function executeStockReceiveWorkerDataPlane(args: {
   } catch (error) {
     throw streamingContainerPhaseError("output-verification", error);
   }
-  let proofValid: boolean;
+  let proofFailure: string | undefined;
   try {
-    proofValid = await validateStockReceivePreparedProof(args.operation, result);
+    proofFailure = await stockReceivePreparedProofFailure(args.operation, result);
   } catch (error) {
     throw streamingContainerPhaseError("proof-validation", error);
   }
-  if (!proofValid) {
-    throw new Error("stock-data-plane:proof-invalid");
+  if (proofFailure) {
+    throw new Error(`stock-data-plane:proof-${proofFailure}`);
   }
   args.logger.info("stock-data-plane:prepared", {
     operationId: args.operation.id,
