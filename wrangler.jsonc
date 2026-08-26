@@ -35,6 +35,13 @@
   "containers": [
     {
       "name": "repository-native-git",
+      "class_name": "RepoDurableObject",
+      "image": "./container/Dockerfile",
+      "max_instances": 500,
+      "instance_type": "standard-4"
+    },
+    {
+      "name": "repository-stock-receive",
       "class_name": "StockReceiveContainerHost",
       "image": "./container/Dockerfile",
       "max_instances": 500,

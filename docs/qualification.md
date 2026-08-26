@@ -38,8 +38,8 @@ deployment identity.
 Use a dedicated Cloudflare account scope or exact qualification resources. The
 generated Wrangler configuration must bind one qualification-only Worker, D1
 database, KV namespace, R2 bucket, Queue producer/consumer, `RepoDurableObject`,
-`StockReceiveContainerHost`, and the Container image built from
-`container/Dockerfile`.
+`StockReceiveContainerHost`, and their two Container applications using the
+same image built from `container/Dockerfile`.
 
 [`qualification/wrangler.template.jsonc`](../qualification/wrangler.template.jsonc)
 freezes that composition. The external orchestrator must replace every

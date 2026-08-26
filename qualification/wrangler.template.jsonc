@@ -18,6 +18,13 @@
   "containers": [
     {
       "name": "repository-native-git",
+      "class_name": "RepoDurableObject",
+      "image": "__CONTAINER_IMAGE_REFERENCE__",
+      "max_instances": 1,
+      "instance_type": "standard-4",
+    },
+    {
+      "name": "repository-stock-receive",
       "class_name": "StockReceiveContainerHost",
       "image": "__CONTAINER_IMAGE_REFERENCE__",
       "max_instances": 1,
