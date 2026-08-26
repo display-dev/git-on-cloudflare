@@ -69,6 +69,32 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
   bounded `elapsedMs`, `scratchBytes`, `hydratedBytes`, `downloadedBytes`, and
   `cacheHitBytes` metrics; it never returns R2 keys or Container diagnostics.
 
+### Qualification controls (schema v1)
+
+These routes are absent unless `QUALIFICATION_MODE=1` and a separately supplied
+`QUALIFICATION_SECRET` is present. Bearer authentication runs before repository
+lookup. The `:owner` must exactly match the configured high-entropy
+`QUALIFICATION_NAMESPACE`, and `:repo` must match `repo-[a-f0-9]{16,64}`. Every
+response is `Cache-Control: no-store`.
+
+- **`GET /_internal/qualification/:owner/:repo`** returns a bounded,
+  identity-free inventory plus the exact configured target revision and
+  Container image digest: ref count and ref-state digest, active pack count,
+  transient-state count, and bounded R2 object count/bytes. It returns
+  `status: "over_budget"` instead of an incomplete absence claim after 10,000
+  objects.
+- **`POST /_internal/qualification/:owner/:repo/reset`** accepts only the exact
+  schema-v1 operands `expectedRefStateDigest` and `expectedObjectCount`. It
+  clears bounded transient operation/receipt state only when the repository is
+  idle and both operands still match, then returns `202` after queuing the
+  service's ordinary reachability GC; otherwise it returns `409`. Ref cleanup
+  remains a normal authenticated Git update and unreachable-object cleanup
+  remains the owned reachability-GC path. The control never accepts refs, OIDs,
+  object keys, Durable Object names, URLs, or provider resource identities.
+
+See [Qualification deployment and operation](qualification.md) for the
+deployment boundary and reset sequence.
+
 ## Web UI Routes
 
 - **`GET /`**  

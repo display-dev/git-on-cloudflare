@@ -18,6 +18,12 @@ import { doPrefix } from "@/worker/keys";
 import { text, createLogger } from "@/worker/common";
 import { clearRepositoryStorage, removePack, type RemovePackResult } from "./packOperations";
 import {
+  getQualificationRepositoryInventory,
+  resetQualificationRepositoryState,
+  type QualificationRepositoryInventory,
+  type QualificationResetResult,
+} from "./qualification";
+import {
   abortCompactionLease,
   abortReceiveLease,
   beginStockReceiveRecoveryLease,
@@ -274,6 +280,16 @@ export class RepoDurableObject extends DurableObject {
       startedAt: snapshot.lease.createdAt,
       expiresAt: snapshot.lease.expiresAt,
     };
+  }
+
+  public async getQualificationInventory(): Promise<QualificationRepositoryInventory> {
+    return await getQualificationRepositoryInventory(this.ctx);
+  }
+
+  public async resetQualificationState(
+    expectedRefStateDigest: string
+  ): Promise<QualificationResetResult> {
+    return await resetQualificationRepositoryState(this.ctx, expectedRefStateDigest);
   }
 
   public async beginReceive() {

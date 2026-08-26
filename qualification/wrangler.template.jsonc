@@ -1,0 +1,50 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "__QUALIFICATION_WORKER_NAME__",
+  "main": "../src/worker/index.ts",
+  "compatibility_date": "2026-05-13",
+  "compatibility_flags": ["nodejs_als"],
+  "workers_dev": true,
+  "limits": { "cpu_ms": 300000 },
+  "durable_objects": {
+    "bindings": [{ "name": "REPO_DO", "class_name": "RepoDurableObject" }],
+  },
+  "containers": [
+    {
+      "name": "repository-native-git",
+      "class_name": "RepoDurableObject",
+      "image": "__CONTAINER_IMAGE_REFERENCE__",
+      "max_instances": 1,
+      "instance_type": "standard-4",
+    },
+  ],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RepoDurableObject"] }],
+  "kv_namespaces": [{ "binding": "ROUTES", "id": "__QUALIFICATION_KV_ID__" }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "__QUALIFICATION_D1_NAME__",
+      "database_id": "__QUALIFICATION_D1_ID__",
+      "migrations_dir": "../drizzle/d1",
+    },
+  ],
+  "r2_buckets": [{ "binding": "REPO_BUCKET", "bucket_name": "__QUALIFICATION_R2_NAME__" }],
+  "queues": {
+    "producers": [{ "binding": "REPO_TASKS_QUEUE", "queue": "__QUALIFICATION_QUEUE_NAME__" }],
+    "consumers": [
+      { "queue": "__QUALIFICATION_QUEUE_NAME__", "max_batch_size": 1, "max_batch_timeout": 1 },
+    ],
+  },
+  "assets": { "binding": "ASSETS", "directory": "../dist/client", "html_handling": "none" },
+  "vars": {
+    "REPO_DO_IDLE_MINUTES": "30",
+    "LOG_LEVEL": "info",
+    "NATIVE_RECEIVE_CONTAINER": "1",
+    "QUALIFICATION_MODE": "1",
+    "QUALIFICATION_NAMESPACE": "__QUALIFICATION_NAMESPACE__",
+    "QUALIFICATION_REPOSITORY": "__QUALIFICATION_REPOSITORY__",
+    "QUALIFICATION_TARGET_REVISION": "__TARGET_REVISION__",
+    "QUALIFICATION_CONTAINER_IMAGE_DIGEST": "__CONTAINER_IMAGE_DIGEST__",
+    "TESSERA_OIDC_ISSUER": "https://qualification.invalid",
+  },
+}

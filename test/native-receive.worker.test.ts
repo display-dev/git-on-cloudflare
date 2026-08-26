@@ -251,11 +251,13 @@ describe("durable native receive and import", () => {
 
   it("streams exact Container output through the workerd R2 bridge", async () => {
     const allowedKey = "do/test/objects/pack/output.pack";
+    const shortKey = "do/test/objects/pack/short.pack";
+    const oversizedKey = "do/test/objects/pack/oversized.pack";
     const bridge = workerExports.RepositoryContainerBridge({
       props: {
         operationId: "bridge-fixed-length",
         readKeys: [],
-        writeKeys: [{ key: allowedKey, maxBytes: 8 }],
+        writeKeys: [allowedKey, shortKey, oversizedKey].map((key) => ({ key, maxBytes: 8 })),
       },
     });
     const exact = new Uint8Array([1, 2, 3, 4]);
@@ -281,24 +283,24 @@ describe("durable native receive and import", () => {
     expect(denied.status).toBe(403);
 
     const short = await bridge.fetch(
-      new Request(bridgeUrl(allowedKey), {
+      new Request(bridgeUrl(shortKey), {
         method: "PUT",
         headers: { "Content-Length": "5" },
         body: streamedBody(exact),
       })
     );
     expect(short.status).toBe(400);
-    expect(await env.REPO_BUCKET.head(allowedKey)).toBeNull();
+    expect(await env.REPO_BUCKET.head(shortKey)).toBeNull();
 
     const oversized = await bridge.fetch(
-      new Request(bridgeUrl(allowedKey), {
+      new Request(bridgeUrl(oversizedKey), {
         method: "PUT",
         headers: { "Content-Length": "3" },
         body: streamedBody(exact),
       })
     );
     expect(oversized.status).toBe(400);
-    expect(await env.REPO_BUCKET.head(allowedKey)).toBeNull();
+    expect(await env.REPO_BUCKET.head(oversizedKey)).toBeNull();
   });
 
   it("reads native Git pack, index, and PREF artifacts through the Worker object path", async () => {

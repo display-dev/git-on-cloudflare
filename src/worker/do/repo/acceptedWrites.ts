@@ -120,6 +120,43 @@ export async function getSnapshotProjectionState(
   };
 }
 
+/**
+ * Removes snapshot projections owned by disposable qualification refs. The
+ * accepted-write journal is the canonical link between a run ref and every
+ * commit projection it may have created, including after the current pointer
+ * has advanced to the deletion OID.
+ */
+export async function clearQualificationSnapshotProjectionState(
+  storage: DurableObjectTransaction,
+  authoritativeRefs: Array<{ name: string; oid: string }>
+): Promise<number> {
+  const qualificationPrefix = "refs/heads/qual-";
+  const journal = await storage.list<AcceptedWriteJournalEntry>({ prefix: "acceptedWrite:" });
+  const disposableOids = new Set(
+    [...journal.values()]
+      .filter((entry) => entry.fact.ref.startsWith(qualificationPrefix))
+      .map((entry) => entry.fact.afterSha)
+      .filter((oid) => oid !== zeroOid())
+  );
+  const currents = await storage.list<SnapshotCurrent>({ prefix: "snapshotCurrent:" });
+  const deletedCurrentKeys: string[] = [];
+  const retainedOids = new Set(authoritativeRefs.map((ref) => ref.oid));
+  for (const [key, current] of currents) {
+    if (current.ref.startsWith(qualificationPrefix)) {
+      deletedCurrentKeys.push(key);
+      if (current.commitSha !== zeroOid()) disposableOids.add(current.commitSha);
+    } else if (current.commitSha !== zeroOid()) {
+      retainedOids.add(current.commitSha);
+    }
+  }
+  const snapshotKeys = [...disposableOids]
+    .filter((oid) => !retainedOids.has(oid))
+    .map((oid) => materializedSnapshotKey(oid));
+  const keys = [...deletedCurrentKeys, ...snapshotKeys];
+  if (keys.length > 0) await storage.delete(keys);
+  return keys.length;
+}
+
 export async function projectAcceptedWriteState(
   ctx: DurableObjectState,
   args: { entryId: string; commitSha: string; materializedAt: number }

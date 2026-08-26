@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "qualification-operation-failed-v1",
+  "state": "failed",
+  "createdAt": 1787731200000,
+  "updatedAt": 1787731201000,
+  "attempts": 1,
+  "errorCode": "output-integrity-invalid",
+  "events": []
+}

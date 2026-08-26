@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "id": "qualification-operation-aborted-v1",
+  "state": "aborted",
+  "createdAt": 1787731200000,
+  "updatedAt": 1787731201000,
+  "attempts": 1,
+  "errorCode": "exact-old-ref-conflict",
+  "events": []
+}

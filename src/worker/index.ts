@@ -5,6 +5,7 @@ import { registerNativeImportRoutes } from "./routes/nativeImport";
 import { registerSnapshotRoutes } from "./routes/snapshot";
 import { registerReadBenchmarkRoutes } from "./routes/readBenchmark";
 import { registerEventProbeRoutes } from "./routes/eventProbe";
+import { registerQualificationRoutes } from "./routes/qualification";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerUiRoutes } from "./routes/ui";
 import { registerAuthRoutes } from "./routes/auth";
@@ -22,6 +23,7 @@ registerNativeImportRoutes(app);
 registerSnapshotRoutes(app);
 registerReadBenchmarkRoutes(app);
 registerEventProbeRoutes(app);
+registerQualificationRoutes(app);
 // Register Git protocol routes (info/refs, upload-pack, receive-pack)
 registerGitRoutes(app);
 // Register Admin routes

@@ -59,6 +59,49 @@ function activeReadLeases(
   return (leases ?? []).filter((lease) => lease.expiresAt > now);
 }
 
+export async function pruneRepositoryActivityLeases(
+  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
+  now: number = Date.now()
+): Promise<boolean> {
+  const snapshotLeases = activeSnapshotLeases(
+    await store.get("snapshotMaterializationLeases"),
+    now
+  );
+  const maintenanceLeases = activeMaintenanceLeases(
+    await store.get("repositoryMaintenanceLeases"),
+    now
+  );
+  const readLeases = activeReadLeases(await store.get("repositoryReadLeases"), now);
+  const nativeReaderLease = await store.get("nativeCatalogReaderLease");
+  const recoveryLease = await store.get("stockReceiveRecoveryLease");
+  const nativeReaderActive = !!nativeReaderLease && nativeReaderLease.expiresAt > now;
+  const recoveryActive = !!recoveryLease && recoveryLease.expiresAt > now;
+  const receiveActive = writerMayStillBeDraining(await store.get("receiveLease"), now);
+  const compactActive = writerMayStillBeDraining(await store.get("compactLease"), now);
+
+  if (snapshotLeases.length > 0) await store.put("snapshotMaterializationLeases", snapshotLeases);
+  else await store.delete("snapshotMaterializationLeases");
+  if (maintenanceLeases.length > 0)
+    await store.put("repositoryMaintenanceLeases", maintenanceLeases);
+  else await store.delete("repositoryMaintenanceLeases");
+  if (readLeases.length > 0) await store.put("repositoryReadLeases", readLeases);
+  else await store.delete("repositoryReadLeases");
+  if (!nativeReaderActive) await store.delete("nativeCatalogReaderLease");
+  if (!recoveryActive) await store.delete("stockReceiveRecoveryLease");
+  if (!receiveActive) await store.delete("receiveLease");
+  if (!compactActive) await store.delete("compactLease");
+
+  return (
+    !receiveActive &&
+    !compactActive &&
+    !nativeReaderActive &&
+    !recoveryActive &&
+    readLeases.length === 0 &&
+    snapshotLeases.length === 0 &&
+    maintenanceLeases.length === 0
+  );
+}
+
 export async function beginRepositoryReadState(
   ctx: DurableObjectState
 ): Promise<BeginRepositoryReadResult> {
@@ -241,41 +284,10 @@ export async function beginRepositoryDeletionState(
   return await ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
     const now = Date.now();
-    const snapshotLeases = activeSnapshotLeases(
-      await store.get("snapshotMaterializationLeases"),
-      now
-    );
-    const maintenanceLeases = activeMaintenanceLeases(
-      await store.get("repositoryMaintenanceLeases"),
-      now
-    );
-    const nativeReaderLease = await store.get("nativeCatalogReaderLease");
-    const nativeReaderActive = !!nativeReaderLease && nativeReaderLease.expiresAt > now;
-    const readLeases = activeReadLeases(await store.get("repositoryReadLeases"), now);
-    if (snapshotLeases.length > 0) {
-      await store.put("snapshotMaterializationLeases", snapshotLeases);
-    } else {
-      await store.delete("snapshotMaterializationLeases");
-    }
-    if (maintenanceLeases.length > 0) {
-      await store.put("repositoryMaintenanceLeases", maintenanceLeases);
-    } else {
-      await store.delete("repositoryMaintenanceLeases");
-    }
-    if (readLeases.length > 0) {
-      await store.put("repositoryReadLeases", readLeases);
-    } else {
-      await store.delete("repositoryReadLeases");
-    }
+    const ready = await pruneRepositoryActivityLeases(store, now);
     await store.put("repositoryDeleting", true);
     return {
-      ready:
-        !writerMayStillBeDraining(await store.get("receiveLease"), now) &&
-        !writerMayStillBeDraining(await store.get("compactLease"), now) &&
-        !nativeReaderActive &&
-        readLeases.length === 0 &&
-        snapshotLeases.length === 0 &&
-        maintenanceLeases.length === 0,
+      ready,
       snapshotPrefixes: (await store.get("snapshotPrefixes")) ?? [],
     };
   });

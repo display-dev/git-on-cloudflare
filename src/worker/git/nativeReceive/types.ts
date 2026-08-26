@@ -303,10 +303,11 @@ export type NativeReceiveOperationView = Pick<
   | "result"
   | "clientAckReadyAt"
   | "events"
-> & { metrics?: NativeReceiveOperationMetrics | undefined };
+> & { schemaVersion: 1; metrics?: NativeReceiveOperationMetrics | undefined };
 
 export type NativeReceiveOperationEvidenceView = Pick<
   NativeReceiveOperationView,
+  | "schemaVersion"
   | "id"
   | "state"
   | "createdAt"
@@ -478,6 +479,7 @@ export function nativeReceiveOperationView(
       }
     : operation.rejectionMetrics;
   return {
+    schemaVersion: 1,
     id: operation.id,
     state: operation.state,
     createdAt: operation.createdAt,
@@ -501,6 +503,7 @@ export function nativeReceiveOperationEvidenceView(
   operation: NativeReceiveOperationView
 ): NativeReceiveOperationEvidenceView {
   return {
+    schemaVersion: 1,
     id: operation.id,
     state: operation.state,
     createdAt: operation.createdAt,

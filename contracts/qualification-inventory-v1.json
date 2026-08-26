@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "status": "ready",
+  "targetRevision": "1111111111111111111111111111111111111111",
+  "containerImageDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "repository": {
+    "schemaVersion": 1,
+    "state": "idle",
+    "refCount": 1,
+    "refStateDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+    "activePackCount": 1,
+    "transientStateCount": 0
+  },
+  "storage": {
+    "objectCount": 3,
+    "objectBytes": 1048576,
+    "complete": true
+  }
+}

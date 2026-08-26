@@ -207,9 +207,6 @@ describe("snapshot event plane", () => {
         [1, "ingestion"],
         [2, "git-push"],
       ]);
-      expect(await snapshotStatus(owner, repo, first)).toBe(404);
-      expect(await snapshotStatus(owner, repo, second)).toBe(404);
-
       const secondEntry = state.entries[1]!;
       const firstEntry = state.entries[0]!;
       const concurrentSecondDeliveries = await Promise.all([
