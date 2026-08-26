@@ -105,7 +105,10 @@ type StreamingContainerPhase =
   | "bundle-request"
   | "container-rpc"
   | "bundle-write"
-  | "response-header";
+  | "response-header"
+  | "output-upload"
+  | "output-verification"
+  | "proof-validation";
 
 function streamingContainerPhaseError(phase: StreamingContainerPhase, error: unknown): Error {
   if (
@@ -773,34 +776,38 @@ async function executeStreamingContainer(args: {
   ) {
     throw new Error("stock-data-plane:response-binding-invalid");
   }
-  await receiveArtifact({
-    ...args,
-    reader,
-    operationId: args.operation.id,
-    key: args.operation.outputPackKey,
-    bytes: host.packBytes,
-    sha256: host.packSha256,
-    role: "pack",
-  });
-  await receiveArtifact({
-    ...args,
-    reader,
-    operationId: args.operation.id,
-    key: args.operation.outputIdxKey,
-    bytes: host.idxBytes,
-    sha256: host.idxSha256,
-    role: "index",
-  });
-  await receiveArtifact({
-    ...args,
-    reader,
-    operationId: args.operation.id,
-    key: args.operation.outputRefsKey,
-    bytes: host.refsBytes,
-    sha256: host.refsSha256,
-    role: "references",
-  });
-  await reader.expectEof();
+  try {
+    await receiveArtifact({
+      ...args,
+      reader,
+      operationId: args.operation.id,
+      key: args.operation.outputPackKey,
+      bytes: host.packBytes,
+      sha256: host.packSha256,
+      role: "pack",
+    });
+    await receiveArtifact({
+      ...args,
+      reader,
+      operationId: args.operation.id,
+      key: args.operation.outputIdxKey,
+      bytes: host.idxBytes,
+      sha256: host.idxSha256,
+      role: "index",
+    });
+    await receiveArtifact({
+      ...args,
+      reader,
+      operationId: args.operation.id,
+      key: args.operation.outputRefsKey,
+      bytes: host.refsBytes,
+      sha256: host.refsSha256,
+      role: "references",
+    });
+    await reader.expectEof();
+  } catch (error) {
+    throw streamingContainerPhaseError("output-upload", error);
+  }
   return host;
 }
 
@@ -844,8 +851,18 @@ export async function executeStockReceiveWorkerDataPlane(args: {
       elapsedMs: Date.now() - startedAt,
     });
   }
-  result = await verifyOutputArtifacts({ ...args, result });
-  if (!(await validateStockReceivePreparedProof(args.operation, result))) {
+  try {
+    result = await verifyOutputArtifacts({ ...args, result });
+  } catch (error) {
+    throw streamingContainerPhaseError("output-verification", error);
+  }
+  let proofValid: boolean;
+  try {
+    proofValid = await validateStockReceivePreparedProof(args.operation, result);
+  } catch (error) {
+    throw streamingContainerPhaseError("proof-validation", error);
+  }
+  if (!proofValid) {
     throw new Error("stock-data-plane:proof-invalid");
   }
   args.logger.info("stock-data-plane:prepared", {
