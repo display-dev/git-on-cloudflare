@@ -21,6 +21,19 @@ chains a Durable Object call through to R2.
 
 ## Required deployment inputs
 
+Every push to `main` must pass the repository TypeScript and Worker tests and
+the Go tests in the pinned Container build stage before CI publishes
+`ghcr.io/display-dev/git-on-cloudflare:<40-character-commit>`. The Container
+job emits one `REPOSITORY_SERVICE_IMAGE=<json>` record in its log and run
+summary and uploads the same schema-v1 record as
+`repository-service-image-<40-character-commit>`. The record binds the source
+revision, workflow run/attempt, and pinned BuildKit image to the registry's
+immutable `sha256:` digest and `name@sha256:` reference. Step 0 must extend the
+strict plan/evidence validators to freeze that complete record before the first
+provider mutation. Until then, the emitted identity is build evidence rather
+than an accepted plan field. A tag, including the commit tag, is not a
+deployment identity.
+
 Use a dedicated Cloudflare account scope or exact qualification resources. The
 generated Wrangler configuration must bind one qualification-only Worker, D1
 database, KV namespace, R2 bucket, Queue producer/consumer, `RepoDurableObject`,

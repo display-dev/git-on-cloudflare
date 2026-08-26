@@ -1,0 +1,123 @@
+name: Repository service CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run unit tests
+        run: npm run test
+
+      - name: Run Worker tests
+        # The workerd suite shares one runtime and must not contend across files.
+        run: npm run test:workers -- --no-file-parallelism
+
+  container-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Test the pinned Container build
+        run: docker build --target test --file container/Dockerfile container
+
+  container:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, container-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-digest: ${{ steps.identity.outputs.image-digest }}
+      image-reference: ${{ steps.identity.outputs.image-reference }}
+    env:
+      BUILDKIT_IMAGE: moby/buildkit@sha256:28a898719c18a33f4e8000685287fa36fd0dd9560c6440227d3a732d79bb41d8
+      IMAGE_NAME: ghcr.io/display-dev/git-on-cloudflare
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Authenticate to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Create isolated BuildKit builder
+        run: |
+          docker buildx create \
+            --driver docker-container \
+            --driver-opt "image=${BUILDKIT_IMAGE}" \
+            --name repository-service-builder \
+            --use
+          docker buildx inspect --bootstrap
+
+      - name: Build and publish commit image
+        run: |
+          docker buildx build \
+            --file container/Dockerfile \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --metadata-file image-metadata.json \
+            --platform linux/amd64 \
+            --provenance=false \
+            --push \
+            --tag "${IMAGE_NAME}:${GITHUB_SHA}" \
+            container
+
+      - name: Expose immutable image identity
+        id: identity
+        run: |
+          image_digest="$(jq -er '."containerimage.digest" | select(test("^sha256:[0-9a-f]{64}$"))' image-metadata.json)"
+          image_reference="${IMAGE_NAME}@${image_digest}"
+
+          docker buildx imagetools inspect "$image_reference" >/dev/null
+
+          identity="$(jq -cn \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg revision "$GITHUB_SHA" \
+            --arg runId "$GITHUB_RUN_ID" \
+            --argjson runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg buildkitImage "$BUILDKIT_IMAGE" \
+            --arg imageName "$IMAGE_NAME" \
+            --arg imageDigest "$image_digest" \
+            --arg imageReference "$image_reference" \
+            '{schemaVersion: 1, repository: $repository, revision: $revision, workflowRunId: $runId, workflowRunAttempt: $runAttempt, buildkitImage: $buildkitImage, imageName: $imageName, imageDigest: $imageDigest, imageReference: $imageReference}')"
+
+          printf '%s\n' "$identity" > repository-service-image.json
+          printf 'image-digest=%s\n' "$image_digest" >> "$GITHUB_OUTPUT"
+          printf 'image-reference=%s\n' "$image_reference" >> "$GITHUB_OUTPUT"
+          printf 'REPOSITORY_SERVICE_IMAGE=%s\n' "$identity"
+          {
+            printf '## Immutable repository-service image\n\n'
+            printf '`REPOSITORY_SERVICE_IMAGE=%s`\n' "$identity"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload image identity manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: repository-service-image-${{ github.sha }}
+          path: repository-service-image.json
+          if-no-files-found: error
+          retention-days: 30

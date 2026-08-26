@@ -5,6 +5,11 @@ COPY go.mod ./
 COPY cmd ./cmd
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/repository-git ./cmd/repository-git
 
+FROM build AS test
+
+RUN apk add --no-cache git \
+  && CGO_ENABLED=0 go test ./...
+
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
 RUN apk add --no-cache git ca-certificates \
