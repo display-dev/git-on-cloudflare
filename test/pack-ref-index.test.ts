@@ -611,6 +611,134 @@ test("sidecar closure returns a retryable budget result at the missing ref cap",
   assert.strictEqual(closure.stats.missing, 1024);
 });
 
+test("common-have closure excludes unchanged subtrees and shared blobs across packs", async () => {
+  const encoder = new TextEncoder();
+  const [base, oldRoot, sharedTree, sharedBlob, next, newRoot, newBlob] = Array.from(
+    { length: 7 },
+    (_, index) => oidFromNumber(index + 1)
+  );
+  const older = buildPackRefSnapshotEntry({
+    packKey: "base.pack",
+    objects: [
+      { oid: base!, type: "commit", payload: encoder.encode(`tree ${oldRoot}\n\nbase\n`) },
+      {
+        oid: oldRoot!,
+        type: "tree",
+        payload: treePayload([{ mode: "40000", name: "data", oid: sharedTree! }]),
+      },
+      {
+        oid: sharedTree!,
+        type: "tree",
+        payload: treePayload([{ mode: "100644", name: "same", oid: sharedBlob! }]),
+      },
+      { oid: sharedBlob!, type: "blob", payload: encoder.encode("unchanged") },
+    ],
+  });
+  const newer = buildPackRefSnapshotEntry({
+    packKey: "checkpoint.pack",
+    objects: [
+      {
+        oid: next!,
+        type: "commit",
+        payload: encoder.encode(`tree ${newRoot}\nparent ${base}\n\nnext\n`),
+      },
+      {
+        oid: newRoot!,
+        type: "tree",
+        payload: treePayload([
+          { mode: "40000", name: "data", oid: sharedTree! },
+          { mode: "100644", name: "copy", oid: sharedBlob! },
+          { mode: "100644", name: "new", oid: newBlob! },
+        ]),
+      },
+      { oid: newBlob!, type: "blob", payload: encoder.encode("new") },
+      // A duplicate packed copy must not escape canonical have subtraction.
+      { oid: sharedBlob!, type: "blob", payload: encoder.encode("unchanged") },
+    ],
+  });
+  for (const packs of [
+    [newer, older],
+    [older, newer],
+  ]) {
+    const result = await computeNeededFromPackRefs({
+      repoId: "test/shared",
+      packs,
+      wants: [next!],
+      haves: [base!],
+    });
+    assert.strictEqual(result.type, "Ready");
+    assert.deepEqual(new Set(result.neededOids), new Set([next, newRoot, newBlob]));
+    const fresh = await computeNeededFromPackRefs({
+      repoId: "test/fresh",
+      packs,
+      wants: [next!],
+      haves: [],
+    });
+    assert.strictEqual(fresh.type, "Ready");
+    assert.deepEqual(
+      new Set(fresh.neededOids),
+      new Set([base, oldRoot, sharedTree, sharedBlob, next, newRoot, newBlob])
+    );
+  }
+});
+
+test("multiple common commits subtract all parents and shared ancestry once", async () => {
+  const encoder = new TextEncoder();
+  const root = oid("10"),
+    left = oid("20"),
+    right = oid("30"),
+    merge = oid("40"),
+    next = oid("50");
+  const tree = oid("60"),
+    blob = oid("70");
+  const pack = buildPackRefSnapshotEntry({
+    packKey: "merge.pack",
+    objects: [
+      { oid: root, type: "commit", payload: encoder.encode(`tree ${tree}\n\nroot\n`) },
+      {
+        oid: left,
+        type: "commit",
+        payload: encoder.encode(`tree ${tree}\nparent ${root}\n\nleft\n`),
+      },
+      {
+        oid: right,
+        type: "commit",
+        payload: encoder.encode(`tree ${tree}\nparent ${root}\n\nright\n`),
+      },
+      {
+        oid: merge,
+        type: "commit",
+        payload: encoder.encode(`tree ${tree}\nparent ${left}\nparent ${right}\n\nmerge\n`),
+      },
+      {
+        oid: next,
+        type: "commit",
+        payload: encoder.encode(`tree ${tree}\nparent ${merge}\n\nnext\n`),
+      },
+      {
+        oid: tree,
+        type: "tree",
+        payload: treePayload([{ mode: "100644", name: "same", oid: blob }]),
+      },
+      { oid: blob, type: "blob", payload: encoder.encode("shared") },
+    ],
+  });
+  for (const haves of [[left, right, left], [merge]]) {
+    const result = await computeNeededFromPackRefs({
+      repoId: "test/merge",
+      packs: [pack],
+      wants: [next],
+      haves,
+    });
+    assert.strictEqual(result.type, "Ready");
+    assert.deepEqual(
+      new Set(result.neededOids),
+      new Set(haves.includes(merge) ? [next] : [next, merge])
+    );
+    assert.deepEqual(result.ackOids, [...new Set(haves)]);
+  }
+});
+
 test("pack ref sidecar parser rejects invalid artifacts", () => {
   const { built, idx } = buildSampleRefIndex();
   const cases: Array<{ name: string; mutate: (bytes: Uint8Array) => Uint8Array; reason: string }> =

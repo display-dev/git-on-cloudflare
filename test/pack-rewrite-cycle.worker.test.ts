@@ -8,6 +8,9 @@ import { buildOutputOrder, buildSelection } from "@/worker/git/pack/rewrite/plan
 import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
 import { buildAppendOnlyDelta, buildPack } from "./util/test-helpers";
 import { indexTestPack } from "./util/test-indexer";
+import { computeNeededFromPackRefs } from "@/worker/git/operations/fetch/refClosure";
+import { parsePackRefView } from "@/worker/git/pack/refIndex";
+import { packRefsKey } from "@/worker/keys";
 
 function encodeDeltaVarint(value: number): Uint8Array {
   const out: number[] = [];
@@ -41,6 +44,64 @@ async function readStreamBytes(stream: ReadableStream<Uint8Array>): Promise<Uint
 }
 
 describe("pack rewrite cycles", () => {
+  it("restores necessary encoding bases after common-object closure subtraction", async () => {
+    const base = new TextEncoder().encode("already-held base\n");
+    const suffix = new TextEncoder().encode("new suffix\n");
+    const baseOid = await computeOid("blob", base);
+    const targetOid = await computeOid("blob", concatChunks([base, suffix]));
+    const pack = await buildPack([
+      { type: "blob", payload: base },
+      { type: "ofs-delta", baseIndex: 0, delta: buildAppendOnlyDelta(base, suffix) },
+    ]);
+    const packKey = `test/subtracted-delta-base-${crypto.randomUUID()}.pack`;
+    await env.REPO_BUCKET.put(packKey, pack);
+    const indexed = await indexTestPack(env, packKey, pack.byteLength);
+    const sidecar = await env.REPO_BUCKET.get(packRefsKey(packKey));
+    expect(sidecar).not.toBeNull();
+    const refs = parsePackRefView(
+      packKey,
+      new Uint8Array(await sidecar!.arrayBuffer()),
+      indexed.idxView
+    );
+    if (refs.type !== "Ready") throw new Error("expected validated reference sidecar");
+    const entry = { packKey, packBytes: pack.byteLength, idx: indexed.idxView, refs: refs.view };
+    const closure = await computeNeededFromPackRefs({
+      repoId: "test/delta",
+      packs: [entry],
+      wants: [targetOid],
+      haves: [baseOid],
+    });
+    expect(closure.type).toBe("Ready");
+    expect(closure.neededOids).toEqual([targetOid]);
+    const selection = await buildSelection(
+      env,
+      { packs: [entry] },
+      closure.neededOids,
+      createLogger("error", { service: "test" }),
+      new Set(),
+      { limiter: { run: async (_label, fn) => await fn() }, countSubrequest: () => {} }
+    );
+    expect(selection?.table.count).toBe(2);
+    expect(selection?.addedDeltaBases).toBe(1);
+    const stream = await rewritePack(env, { packs: [entry] }, closure.neededOids, {
+      limiter: { run: async (_label, fn) => await fn() },
+      countSubrequest: () => {},
+    });
+    if (!stream) throw new Error("expected rewritten pack");
+    const output = await readStreamBytes(stream);
+    const outputKey = `test/subtracted-delta-output-${crypto.randomUUID()}.pack`;
+    await env.REPO_BUCKET.put(outputKey, output);
+    // Indexing the output without external storage proves a self-contained pack.
+    const verified = await indexTestPack(env, outputKey, output.byteLength);
+    expect(verified.objectCount).toBe(2);
+    expect(
+      new Set([
+        bytesToHex(verified.idxView.rawNames.subarray(0, 20)),
+        bytesToHex(verified.idxView.rawNames.subarray(20, 40)),
+      ])
+    ).toEqual(new Set([baseOid, targetOid]));
+  });
+
   it("does not probe the same delta encoding in an identical re-imported pack", async () => {
     const base = new TextEncoder().encode("base\n");
     const suffix = new TextEncoder().encode("suffix\n");

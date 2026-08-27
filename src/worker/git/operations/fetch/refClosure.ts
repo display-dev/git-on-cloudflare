@@ -2,14 +2,9 @@ import type { PackRefSnapshotEntry } from "@/worker/git/pack/refIndex";
 
 import { bytesToHex, createLogger, hexToBytes, isValidOid } from "@/worker/common";
 import { findOidIndexFromBytes } from "@/worker/git/object-store";
-import {
-  getPackRefRawRefAt,
-  getPackRefTypeCode,
-  visitPackRefRawRefsAt,
-} from "@/worker/git/pack/refIndex";
+import { visitPackRefRawRefsAt } from "@/worker/git/pack/refIndex";
 
 const HAVE_CAP = 128;
-const MAINLINE_ENRICHMENT_BUDGET = 20;
 const CLOSURE_TIMEOUT_MS = 49_000;
 const MISSING_REF_CAP = 1024;
 const OID_BYTES = 20;
@@ -58,14 +53,6 @@ type CommonHave = {
 type LocatedObjectQueue = {
   packSlots: Uint32Array;
   oidIndices: Uint32Array;
-  cursor: number;
-  count: number;
-};
-
-// Mainline enrichment is intentionally tiny, so raw OIDs keep that side walk
-// simple without affecting the bounded final closure queue below.
-type RawOidQueue = {
-  rawOids: Uint8Array;
   cursor: number;
   count: number;
 };
@@ -129,31 +116,6 @@ function pushLocatedObject(queue: LocatedObjectQueue, located: LocatedObject): v
   ensureLocatedObjectQueueCapacity(queue, queue.count + 1);
   queue.packSlots[queue.count] = located.packSlot;
   queue.oidIndices[queue.count] = located.oidIndex;
-  queue.count++;
-}
-
-function createRawOidQueue(initialEntries: number): RawOidQueue {
-  return {
-    rawOids: new Uint8Array(Math.max(initialEntries, 16) * OID_BYTES),
-    cursor: 0,
-    count: 0,
-  };
-}
-
-function ensureRawOidQueueCapacity(queue: RawOidQueue, nextCount: number): void {
-  if (nextCount * OID_BYTES <= queue.rawOids.byteLength) return;
-
-  let nextCapacity = queue.rawOids.byteLength / OID_BYTES;
-  while (nextCapacity < nextCount) nextCapacity *= 2;
-
-  const nextRawOids = new Uint8Array(nextCapacity * OID_BYTES);
-  nextRawOids.set(queue.rawOids);
-  queue.rawOids = nextRawOids;
-}
-
-function pushRawOid(queue: RawOidQueue, rawOid: Uint8Array, rawOidStart: number): void {
-  ensureRawOidQueueCapacity(queue, queue.count + 1);
-  queue.rawOids.set(rawOid.subarray(rawOidStart, rawOidStart + OID_BYTES), queue.count * OID_BYTES);
   queue.count++;
 }
 
@@ -299,61 +261,6 @@ export async function computeNeededFromPackRefs(args: {
   args.onProgress?.("Finding common commits...\n");
   const commonHaves = findCommonHavesInSnapshot(args.packs, closureIndex, args.haves);
   const ackOids = commonHaves.map((have) => have.oid);
-  for (const have of commonHaves) {
-    if (stopFlags[have.located.ordinal]) continue;
-    stopFlags[have.located.ordinal] = 1;
-    stopCount++;
-  }
-
-  if (commonHaves.length > 0 && commonHaves.length < 10) {
-    const mainlineQueue = createRawOidQueue(commonHaves.length + MAINLINE_ENRICHMENT_BUDGET);
-    for (const have of commonHaves) {
-      const rawNames = args.packs[have.located.packSlot]!.idx.rawNames;
-      pushRawOid(mainlineQueue, rawNames, have.located.oidIndex * OID_BYTES);
-    }
-
-    let walked = 0;
-    while (mainlineQueue.cursor < mainlineQueue.count && walked < MAINLINE_ENRICHMENT_BUDGET) {
-      if (Date.now() - startTime > 2_000) break;
-
-      const oidStart = mainlineQueue.cursor * OID_BYTES;
-      mainlineQueue.cursor++;
-      const located = locateObject(args.packs, closureIndex, mainlineQueue.rawOids, oidStart);
-      if (!located) continue;
-
-      // Commit sidecars store refs as [tree, first-parent, ...remaining-parents].
-      if (getPackRefTypeCode(args.packs[located.packSlot]!.refs, located.oidIndex) !== 1) {
-        continue;
-      }
-
-      const firstParent = getPackRefRawRefAt(
-        args.packs[located.packSlot]!.refs,
-        located.oidIndex,
-        1
-      );
-      if (!firstParent) continue;
-
-      const parentLocated = locateObject(args.packs, closureIndex, firstParent, 0);
-      if (parentLocated) {
-        if (stopFlags[parentLocated.ordinal]) continue;
-        stopFlags[parentLocated.ordinal] = 1;
-        stopCount++;
-        pushRawOid(mainlineQueue, firstParent, 0);
-        walked++;
-        continue;
-      }
-
-      const parentOid = bytesToHex(firstParent);
-      if (missingStop.has(parentOid)) continue;
-      missingStop.add(parentOid);
-      stopCount++;
-      walked++;
-    }
-
-    log.debug("stream:plan:mainline-enriched", { stopSize: stopCount, walked });
-  }
-
-  args.onProgress?.("Selecting objects to send...\n");
 
   const seenFlags = new Uint8Array(closureIndex.objectCount);
   const queuedFlags = new Uint8Array(closureIndex.objectCount);
@@ -395,6 +302,56 @@ export async function computeNeededFromPackRefs(args: {
     ackOids,
     stats: buildStats(),
   });
+
+  // A common commit proves possession of its complete logical closure, not
+  // only its parent commits. Walk the already validated reference sidecars:
+  // neither blob payloads nor pack delta dependencies belong in this walk.
+  // Canonical lookup and enqueue-time marking visit shared ancestry/objects once.
+  const haveQueue = createLocatedObjectQueue(commonHaves.length);
+  const haveDuplicateQueueSkips = { value: 0 };
+  for (const have of commonHaves) {
+    enqueueLocatedObject(haveQueue, stopFlags, have.located, haveDuplicateQueueSkips);
+  }
+  let haveEdgeVisits = 0;
+  while (haveQueue.cursor < haveQueue.count) {
+    if (Date.now() - startTime > CLOSURE_TIMEOUT_MS) {
+      return buildBudgetExceededResult("timeout");
+    }
+    const packSlot = haveQueue.packSlots[haveQueue.cursor]!;
+    const oidIndex = haveQueue.oidIndices[haveQueue.cursor]!;
+    haveQueue.cursor++;
+    let budgetExceeded = false;
+    visitPackRefRawRefsAt(args.packs[packSlot]!.refs, oidIndex, (rawRefs, start) => {
+      haveEdgeVisits++;
+      if (budgetExceeded) return;
+      const located = locateObject(args.packs, closureIndex, rawRefs, start);
+      if (located) {
+        enqueueLocatedObject(haveQueue, stopFlags, located, haveDuplicateQueueSkips);
+        return;
+      }
+      // A referenced object absent from the snapshot is still known to the
+      // client, but its unknown descendants cannot safely be excluded.
+      const oid = bytesToHex(rawRefs.subarray(start, start + OID_BYTES));
+      const result = recordMissingOid({
+        oid,
+        missingSeen,
+        missingNeeded: missingStop,
+        includeNeeded: true,
+      });
+      if (result === "budget-exceeded") budgetExceeded = true;
+    });
+    if (budgetExceeded) return buildBudgetExceededResult("missing-ref-budget");
+  }
+  stopCount = haveQueue.count + missingStop.size;
+  log.info("stream:plan:have-closure-complete", {
+    commonHaves: commonHaves.length,
+    stopSet: stopCount,
+    edgeVisits: haveEdgeVisits,
+    duplicateQueueSkips: haveDuplicateQueueSkips.value,
+    timeMs: Date.now() - startTime,
+  });
+
+  args.onProgress?.("Selecting objects to send...\n");
 
   for (const want of args.wants) {
     const normalized = want.toLowerCase();
