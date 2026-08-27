@@ -20,6 +20,7 @@ import { clearRepositoryStorage, removePack, type RemovePackResult } from "./pac
 import {
   getQualificationRepositoryInventory,
   resetQualificationRepositoryState,
+  beginQualificationStorageRecovery,
   type QualificationRepositoryInventory,
   type QualificationResetResult,
 } from "./qualification";
@@ -292,6 +293,10 @@ export class RepoDurableObject extends DurableObject {
     return await resetQualificationRepositoryState(this.ctx, expectedRefStateDigest);
   }
 
+  public async beginQualificationStorageRecovery(expectedRefStateDigest: string) {
+    return await beginQualificationStorageRecovery(this.ctx, expectedRefStateDigest);
+  }
+
   public async beginReceive() {
     return await beginReceiveLease(this.ctx, this.logger);
   }
@@ -525,6 +530,7 @@ export class RepoDurableObject extends DurableObject {
     refsVersion: number;
     packsetVersion: number;
     sourcePacks: PackCatalogRow[];
+    retainedPackKey?: string;
     stagedPack?: {
       packKey: string;
       packBytes: number;
@@ -538,6 +544,7 @@ export class RepoDurableObject extends DurableObject {
       refsVersion: args.refsVersion,
       packsetVersion: args.packsetVersion,
       sourcePacks: args.sourcePacks,
+      retainedPackKey: args.retainedPackKey,
       stagedPack: args.stagedPack,
       logger: this.logger,
     });

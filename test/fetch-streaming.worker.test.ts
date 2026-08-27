@@ -296,8 +296,22 @@ describe("git fetch streaming (default)", () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(pulls).toBeLessThan(totalChunks);
 
-    await response.arrayBuffer();
-    expect(pulls).toBe(totalChunks);
+    const reader = response.body!.getReader();
+    try {
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("backpressured fetch did not resume")), 1_000)
+          ),
+        ]);
+        if (next.done) break;
+      }
+      expect(pulls).toBe(totalChunks);
+    } finally {
+      await reader.cancel();
+    }
   });
 
   it("releases a backpressured read lease when the request aborts", async () => {

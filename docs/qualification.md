@@ -117,6 +117,28 @@ flag or the applicable secret returns 404 for that qualification surface.
    accounted and may advance; otherwise the orchestrator retains a mode-0600
    recovery record.
 
+### Interrupted-storage recovery
+
+Exact reachability GC reuses an immutable source pack when its complete indexed
+object set equals the authoritative closure. It still fences the entire source
+catalog and ref version, publishes the new generation, and delays deletion of
+the other packs for readers. A single already-exact pack is a no-op.
+
+After ordinary GC and reset have settled, `POST .../storage-recovery` accepts
+the same strict schema-v1 ref-digest/object-count operands as reset. This
+default-off, exact-synthetic-repository control never accepts object keys. It
+acquires the existing compaction fence only after every activity lease and
+writer drain period has ended, requires no transient operation or pending
+generation, and protects all catalogued and currently published pack triples.
+It removes only aged uncatalogued compaction/GC outputs and recognized native
+authority proofs for absent `refs/heads/qual-*` refs. Unknown objects, changed
+inventory, recent objects, or incomplete publication block the whole deletion
+plan. Generation metadata is retained. The response contains aggregate counts
+and bytes, and an independent inventory is still required before removing the
+private recovery record. The sweep is bounded to one 1,000-object inventory
+page and at most 100 deletions; these are recovery safety caps, not service
+storage limits.
+
 Fixed provider-resource teardown is a separate explicit operator action. An
 ordinary run never deletes the Worker, D1, KV, R2 bucket, Queue, or Container
 configuration.

@@ -283,6 +283,7 @@ export async function commitReachabilityGcState(args: {
   refsVersion: number;
   packsetVersion: number;
   sourcePacks: PackCatalogRow[];
+  retainedPackKey?: string;
   stagedPack?: {
     packKey: string;
     packBytes: number;
@@ -293,7 +294,15 @@ export async function commitReachabilityGcState(args: {
 }): Promise<CommitReachabilityGcResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
   const db = getDb(args.ctx.storage);
-  const sourcePackKeys = args.sourcePacks.map((row) => row.packKey);
+  const retainedSource = args.retainedPackKey
+    ? args.sourcePacks.find((row) => row.packKey === args.retainedPackKey)
+    : undefined;
+  if (args.retainedPackKey && (!retainedSource || args.stagedPack)) {
+    return { status: "retry", reason: "source-changed" };
+  }
+  const sourcePackKeys = args.sourcePacks
+    .map((row) => row.packKey)
+    .filter((key) => key !== args.retainedPackKey);
 
   // The SQL catalog is the durable outcome record. A Worker may lose the RPC
   // response after the atomic catalog replacement but before the lease and KV
@@ -305,16 +314,19 @@ export async function commitReachabilityGcState(args: {
     const row = await getPackCatalogRow(db, sourcePack.packKey);
     if (row) currentSourceRows.push(row);
   }
-  const expectedTargetKey = args.stagedPack?.packKey ?? null;
-  const targetRow = args.stagedPack
-    ? await getPackCatalogRow(db, args.stagedPack.packKey)
-    : undefined;
+  const expectedTargetKey = args.stagedPack?.packKey ?? args.retainedPackKey ?? null;
+  const targetRow = expectedTargetKey ? await getPackCatalogRow(db, expectedTargetKey) : undefined;
   const catalogAlreadyCommitted =
     currentSourceRows.length === args.sourcePacks.length &&
-    currentSourceRows.every(
-      (row) => row.state === "superseded" && row.supersededBy === expectedTargetKey
+    // With no superseded sources, the active target alone cannot prove a
+    // previous commit. Let the normal lease/version fence handle that case.
+    sourcePackKeys.length > 0 &&
+    currentSourceRows.every((row) =>
+      row.packKey === args.retainedPackKey
+        ? row.state === "active" && rowsMatchForCommit([retainedSource!], [row])
+        : row.state === "superseded" && row.supersededBy === expectedTargetKey
     ) &&
-    (args.stagedPack ? targetRow !== undefined : true);
+    (expectedTargetKey ? targetRow !== undefined : true);
   if (catalogAlreadyCommitted) {
     const currentVersion = (await store.get("packsetVersion")) || 0;
     const packCatalogVersion =
@@ -332,15 +344,15 @@ export async function commitReachabilityGcState(args: {
     }
     await clearGcAttemptState(args.ctx, args.token);
     args.logger?.info("reachability-gc:commit-reconciled", {
-      sourcePackCount: sourcePackKeys.length,
-      targetPackKey: args.stagedPack?.packKey,
+      sourcePackCount: args.sourcePacks.length,
+      targetPackKey: expectedTargetKey ?? undefined,
       packCatalogVersion,
     });
     return {
       status: "committed",
       packCatalogVersion,
       supersededPackKeys: sourcePackKeys,
-      targetPackKey: args.stagedPack?.packKey,
+      targetPackKey: expectedTargetKey ?? undefined,
     };
   }
 
@@ -402,7 +414,7 @@ export async function commitReachabilityGcState(args: {
     return { status: "retry", reason: "source-changed" };
   }
 
-  let targetPack: PackCatalogRow | undefined;
+  let targetPack: PackCatalogRow | undefined = retainedSource;
   if (args.stagedPack) {
     let seqLo = args.sourcePacks[0]?.seqLo ?? 0;
     let seqHi = args.sourcePacks[0]?.seqHi ?? 0;
@@ -439,7 +451,7 @@ export async function commitReachabilityGcState(args: {
     return { status: "retry", reason: "catalog-replacement-failed" };
   }
   const committedActiveCatalog = await listActivePackCatalog(db);
-  if (committedActiveCatalog.length !== (args.stagedPack ? 1 : 0)) {
+  if (committedActiveCatalog.length !== (targetPack ? 1 : 0)) {
     throw new Error("reachability GC catalog commit produced an invalid active pack count");
   }
   const packCatalogVersion = await bumpPacksetVersion(store);
@@ -450,15 +462,15 @@ export async function commitReachabilityGcState(args: {
   await store.delete("compactionWantedAt");
   await clearGcAttemptState(args.ctx, args.token);
   args.logger?.info("reachability-gc:commit", {
-    sourcePackCount: sourcePackKeys.length,
-    reachableObjectCount: args.stagedPack?.objectCount ?? 0,
-    targetPackKey: args.stagedPack?.packKey,
+    sourcePackCount: args.sourcePacks.length,
+    reachableObjectCount: targetPack?.objectCount ?? 0,
+    targetPackKey: targetPack?.packKey,
     packCatalogVersion,
   });
   return {
     status: "committed",
     packCatalogVersion,
     supersededPackKeys: sourcePackKeys,
-    targetPackKey: args.stagedPack?.packKey,
+    targetPackKey: targetPack?.packKey,
   };
 }

@@ -12,7 +12,7 @@ import {
   __test as reachabilityGcTest,
   runReachabilityGc,
 } from "@/worker/git/maintenance/reachabilityGc";
-import { readObject } from "@/worker/git/object-store";
+import { readObject, loadIdxView, getOidHexAt } from "@/worker/git/object-store";
 import { type Limiter, SubrequestLimiter } from "@/worker/git/operations/limits";
 import { stagePackToR2 } from "@/worker/git/receive/r2Upload";
 import { doPrefix, packRefsKey, r2PackKey } from "@/worker/keys";
@@ -100,7 +100,96 @@ async function listGcPackKeys(prefix: string): Promise<string[]> {
   return keys;
 }
 
+// Rewrite-specific recovery tests must contain no source pack that is already
+// the exact closure. Add one unreachable blob to each tiny synthetic pack.
+async function requireRewriteFixture(repoId: string): Promise<void> {
+  const stub = getRepoStub(env, repoId);
+  const packs: Array<{ name: string; packBytes: Uint8Array }> = [];
+  const context = gcContext(repoId);
+  for (const row of await stub.getActivePackCatalog()) {
+    const idx = await loadIdxView(env, row.packKey, context, row.packBytes);
+    if (!idx) throw new Error("missing fixture index");
+    const objects: Parameters<typeof buildPack>[0] = [];
+    for (let index = 0; index < idx.count; index++) {
+      const object = await readObject(env, repoId, getOidHexAt(idx, index), context);
+      if (!object) throw new Error("missing fixture object");
+      objects.push({ type: object.type, payload: object.payload });
+    }
+    objects.push({
+      type: "blob",
+      payload: new TextEncoder().encode("unreachable rewrite fixture\n"),
+    });
+    packs.push({ name: row.packKey.split("/").at(-1)!, packBytes: await buildPack(objects) });
+  }
+  const id = env.REPO_DO.idFromName(repoId);
+  await seedPackedRepoState({ env, repoId, getStub: () => env.REPO_DO.get(id), packs });
+}
+
 describe("candidate-native repository maintenance", () => {
+  it("reuses an exact-closure pack, reconciles a lost commit, and never deletes the retained source", async () => {
+    const owner = "maintenance";
+    const repo = uniqueRepoId("gc-reuse-closure");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const payload = new TextEncoder().encode("reachable\n");
+    const blob = await encodeGitObject("blob", payload);
+    const packBytes = await buildPack([{ type: "blob", payload }]);
+    const id = env.REPO_DO.idFromName(seeded.doName);
+    await seedPackedRepoState({
+      env,
+      repoId: seeded.doName,
+      getStub: () => env.REPO_DO.get(id),
+      packs: [
+        { name: "pack-original.pack", packBytes },
+        { name: "pack-duplicate.pack", packBytes },
+      ],
+      refs: [{ name: "refs/heads/main", oid: blob.oid }],
+      head: { target: "refs/heads/main", oid: blob.oid },
+    });
+    const stub = getRepoStub(env, seeded.doName);
+    const before = await stub.getActivePackCatalog();
+    const operations: string[] = [];
+    const queueSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    reachabilityGcTest.failNextCommitResponse();
+    try {
+      const result = await runReachabilityGc({
+        env,
+        repoId: seeded.doName,
+        cacheCtx: gcContext(seeded.doName),
+        limiter: new SubrequestLimiter(6),
+        log: createLogger("error", { service: "ReachabilityGcReuseTest" }),
+        countSubrequest: (op) => operations.push(op),
+      });
+      expect(result.status).toBe("completed");
+      const active = await stub.getActivePackCatalog();
+      expect(active).toHaveLength(1);
+      expect(before).toContainEqual(active[0]);
+      expect(operations).toContain("do:reconcile-reachability-gc");
+      expect(operations.some((op) => /rewrite-gc|scan-gc|index-gc|multipart/.test(op))).toBe(false);
+      const superseded = await stub.listSupersededGcPacks();
+      expect(superseded).toHaveLength(1);
+      expect(superseded[0]!.packKey).not.toBe(active[0]!.packKey);
+      expect(await listGcPackKeys(doPrefix(id.toString()))).toEqual([]);
+      const repeated = await runReachabilityGc({
+        env,
+        repoId: seeded.doName,
+        cacheCtx: gcContext(seeded.doName),
+        limiter: new SubrequestLimiter(6),
+        log: createLogger("error", { service: "ReachabilityGcReuseTest" }),
+        countSubrequest: () => {},
+      });
+      // Existing delayed deletion must reconcile before another GC attempt.
+      expect(repeated).toEqual({ status: "retry", reason: "cleanup-scheduled" });
+      expect(await stub.getActivePackCatalog()).toEqual(active);
+    } finally {
+      reachabilityGcTest.reset();
+      queueSpy.mockRestore();
+    }
+  });
+
   it("reserves cleanup capacity below the configured 10,000-subrequest limit", () => {
     const budget = new ReachabilityGcSubrequestBudget();
     budget.consume(5_000);
@@ -444,6 +533,7 @@ describe("candidate-native repository maintenance", () => {
     expect(beforeGc?.type).toBe("commit");
     expect(parseCommitRefs(epochCommit!.payload).parents).toEqual([]);
 
+    await requireRewriteFixture(seeded.doName);
     const stub = getRepoStub(env, seeded.doName);
     const sourceCatalog = await stub.getActivePackCatalog();
     expect(sourceCatalog).toHaveLength(3);
@@ -573,6 +663,7 @@ describe("candidate-native repository maintenance", () => {
       content: "new\n",
       historyMode: "epoch",
     });
+    await requireRewriteFixture(seeded.doName);
     const stub = getRepoStub(env, seeded.doName);
     const sourceCatalog = await stub.getActivePackCatalog();
     const queueSpy = vi
@@ -649,6 +740,7 @@ describe("candidate-native repository maintenance", () => {
       content: "new\n",
       historyMode: "epoch",
     });
+    await requireRewriteFixture(seeded.doName);
     const stub = getRepoStub(env, seeded.doName);
     const sourceCatalog = await stub.getActivePackCatalog();
     const prefix = doPrefix(env.REPO_DO.idFromName(seeded.doName).toString());
@@ -708,6 +800,7 @@ describe("candidate-native repository maintenance", () => {
       content: "new\n",
       historyMode: "epoch",
     });
+    await requireRewriteFixture(seeded.doName);
     const prefix = doPrefix(env.REPO_DO.idFromName(seeded.doName).toString());
     const queueSpy = vi
       .spyOn(env.REPO_TASKS_QUEUE, "send")
@@ -762,6 +855,7 @@ describe("candidate-native repository maintenance", () => {
       content: "new\n",
       historyMode: "epoch",
     });
+    await requireRewriteFixture(seeded.doName);
     const stub = getRepoStub(env, seeded.doName);
     const queueSpy = vi
       .spyOn(env.REPO_TASKS_QUEUE, "send")
@@ -817,6 +911,7 @@ describe("candidate-native repository maintenance", () => {
       content: "new\n",
       historyMode: "epoch",
     });
+    await requireRewriteFixture(seeded.doName);
     const stub = getRepoStub(env, seeded.doName);
     const sourceCatalog = await stub.getActivePackCatalog();
     const queueSpy = vi

@@ -1,10 +1,11 @@
-import { getDb } from "./db";
+import { getDb, listPackCatalog } from "./db";
 import { getActivePackCatalogCount } from "./db/dal/packCatalog";
 import { getRepoActivitySnapshot } from "./catalog/activity";
 import { getRefs } from "./refs";
 import { clearQualificationSnapshotProjectionState } from "./acceptedWrites";
 import { pruneRepositoryActivityLeases } from "./repositoryLifecycle";
 import { asTypedStorage, type RepoStateSchema } from "./repoState";
+import { COMPACT_LEASE_TTL_MS } from "./catalog/shared";
 
 export const QUALIFICATION_REPOSITORY_SCHEMA_VERSION = 1;
 
@@ -117,4 +118,35 @@ export async function resetQualificationRepositoryState(
       deletedStateCount: keys.length + deletedProjectionCount,
     };
   });
+}
+
+/** Fence a synthetic-only orphan sweep after all writer/reader drain windows. */
+export async function beginQualificationStorageRecovery(
+  ctx: DurableObjectState,
+  expectedRefStateDigest: string
+) {
+  const lease = await ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const refs = (await store.get("refs")) ?? [];
+    if ((await refStateDigest(refs)) !== expectedRefStateDigest) return null;
+    if (await store.get("repositoryDeleting")) return null;
+    if (!(await pruneRepositoryActivityLeases(store))) return null;
+    if ((await transientKeys(transaction)).length !== 0) return null;
+    if (await store.get("generationPublicationPending")) return null;
+    const now = Date.now();
+    const lease = {
+      token: crypto.randomUUID(),
+      operation: "reachability-gc" as const,
+      createdAt: now,
+      expiresAt: now + COMPACT_LEASE_TTL_MS,
+    };
+    await store.put("compactLease", lease);
+    return { lease, refs, packsetVersion: (await store.get("packsetVersion")) ?? 0 };
+  });
+  if (!lease) return { status: "conflict" as const };
+  return {
+    status: "held" as const,
+    ...lease,
+    catalog: await listPackCatalog(getDb(ctx.storage)),
+  };
 }

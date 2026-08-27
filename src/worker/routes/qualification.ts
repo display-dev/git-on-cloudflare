@@ -5,6 +5,7 @@ import { resolveRepositoryRoute } from "@/worker/repositories/route";
 import type { QualificationResetResult } from "@/worker/do/repo/qualification";
 import { isValidNativeReceiveOperationId } from "@/worker/git/nativeReceive/types";
 import type { AppContext, AppRouter } from "./hono";
+import { recoverQualificationStorage } from "@/worker/git/maintenance/qualificationStorageRecovery";
 
 const QUALIFICATION_SCHEMA_VERSION = 2;
 const SYNTHETIC_NAMESPACE = /^qual-[a-f0-9]{32,64}$/;
@@ -184,6 +185,26 @@ async function readResetRequest(request: Request): Promise<{
 }
 
 export function registerQualificationRoutes(router: AppRouter): void {
+  router.post("/_internal/qualification/:owner/:repo/storage-recovery", async (c) => {
+    const denied = await authorizeQualification(c);
+    if (denied) return denied;
+    const request = await readResetRequest(c.req.raw);
+    if (!request)
+      return json({ schemaVersion: 1, status: "rejected", reason: "invalid_request" }, 400);
+    const route = await resolveQualificationTarget(c);
+    if (!route) return new Response("Not found\n", { status: 404 });
+    const result = await recoverQualificationStorage({
+      env: c.env,
+      stub: getRepoStub(c.env, route.doName),
+      limiter: c.var.limiter,
+      expectedRefStateDigest: request.expectedRefStateDigest,
+      expectedObjectCount: request.expectedObjectCount,
+    });
+    return json({ schemaVersion: 1, ...result }, result.status === "recovered" ? 200 : 409, {
+      "Cache-Control": "no-store",
+    });
+  });
+
   router.get("/_internal/qualification/:owner/:repo/operations/:operationId", async (c) => {
     const denied = await authorizeQualificationObserver(c);
     if (denied) return denied;

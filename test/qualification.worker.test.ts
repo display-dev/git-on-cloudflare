@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { getRepoStub } from "@/worker/common";
@@ -39,6 +39,106 @@ async function enabled<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe("qualification repository controls", () => {
+  it("recovers only aged uncatalogued artifacts under an exact idle-state fence", async () => {
+    const seeded = await setupRepoForTests(env, namespace, repository, {
+      doName: `repo:qualification-storage-${crypto.randomUUID()}`,
+    });
+    const stub = getRepoStub(env, seeded.doName);
+    const prefix = doPrefix(stub.id.toString());
+    await env.REPO_BUCKET.put(
+      `${prefix}/generations/0.json`,
+      JSON.stringify({
+        schemaVersion: 1,
+        generation: 0,
+        packs: [],
+      })
+    );
+    await env.REPO_BUCKET.put(
+      `${prefix}/generation-index.json`,
+      JSON.stringify({
+        schemaVersion: 1,
+        generation: 0,
+        manifestKey: `${prefix}/generations/0.json`,
+        updatedAt: Date.now(),
+      })
+    );
+    const orphan = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
+    await env.REPO_BUCKET.put(orphan, new Uint8Array(17));
+    const authority = `${prefix}/native-receive/authority/qualification-test-${"a".repeat(64)}/ref-0.json`;
+    await env.REPO_BUCKET.put(
+      authority,
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "authoritative-ref",
+        name: "refs/heads/qual-finished",
+        oid: "a".repeat(40),
+      })
+    );
+    await enabled(async () => {
+      const inventory = await stub.getQualificationInventory();
+      const body = JSON.stringify({
+        schemaVersion: 1,
+        expectedRefStateDigest: inventory.refStateDigest,
+        expectedObjectCount: 4,
+      });
+      const init = {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": String(body.length) },
+        body,
+      };
+      expect((await qualificationRequest("/storage-recovery", init, "wrong")).status).toBe(401);
+      const young = await qualificationRequest("/storage-recovery", init);
+      expect(await young.json()).toMatchObject({
+        status: "conflict",
+        reason: "orphan_writer_drain",
+      });
+      expect(await env.REPO_BUCKET.head(orphan)).not.toBeNull();
+      const now = Date.now();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now + 26 * 60_000);
+      try {
+        const reader = await stub.beginRepositoryRead();
+        expect(reader.ok).toBe(true);
+        const active = await qualificationRequest("/storage-recovery", init);
+        expect(await active.json()).toMatchObject({
+          status: "conflict",
+          reason: "repository_active_or_changed",
+        });
+        if (reader.ok) await stub.finishRepositoryRead(reader.token);
+        const unknown = `${prefix}/unknown-object`;
+        await env.REPO_BUCKET.put(unknown, new Uint8Array(3));
+        const bodyWithUnknown = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 5 });
+        const refused = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: bodyWithUnknown,
+          headers: { ...init.headers, "Content-Length": String(bodyWithUnknown.length) },
+        });
+        expect(await refused.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_orphan",
+        });
+        expect(await env.REPO_BUCKET.head(orphan)).not.toBeNull();
+        await env.REPO_BUCKET.delete(unknown);
+        const recovered = await qualificationRequest("/storage-recovery", init);
+        expect(recovered.status).toBe(200);
+        expect(await recovered.json()).toMatchObject({
+          status: "recovered",
+          deletedObjectCount: 2,
+          remainingObjectCount: 2,
+        });
+        expect(await env.REPO_BUCKET.head(orphan)).toBeNull();
+        expect(await env.REPO_BUCKET.head(authority)).toBeNull();
+        const inventoryAfter = await stub.getQualificationInventory();
+        expect(inventoryAfter).toEqual(inventory);
+      } finally {
+        clock.mockRestore();
+        await env.REPO_BUCKET.delete([
+          `${prefix}/generations/0.json`,
+          `${prefix}/generation-index.json`,
+        ]);
+      }
+    });
+  });
+
   it("exposes a separately authenticated bounded operation observation", async () => {
     const seeded = await setupRepoForTests(env, namespace, repository, {
       doName: `repo:qualification-observer-${crypto.randomUUID()}`,

@@ -403,8 +403,32 @@ export async function runReachabilityGc(args: {
       sourcePacks: snapshotLoad.snapshot.packs.length,
     });
 
+    // An immutable source that already contains exactly the closure needs no
+    // rewrite, upload or re-indexing. Keep it through the same catalog CAS and
+    // generation publication as a new pack; never include it in deletion work.
+    const retainedPack =
+      closure.neededOids.length > 0
+        ? snapshotLoad.snapshot.packs.find((pack) =>
+            targetIdxMatchesClosure(pack.idx, closure.neededOids)
+          )
+        : undefined;
+    if (retainedPack) {
+      args.log.info("reachability-gc:reuse-exact-closure", {
+        reachableObjects: closure.neededOids.length,
+        packBytes: retainedPack.packBytes,
+      });
+      if (begin.activeCatalog.length === 1) {
+        return {
+          status: "completed",
+          reachableObjects: closure.neededOids.length,
+          sourcePacks: 1,
+          scheduledArtifacts: 0,
+          packCatalogVersion: begin.packsetVersion,
+        };
+      }
+    }
     let stagedIdxBytes: number | undefined;
-    if (closure.neededOids.length > 0) {
+    if (closure.neededOids.length > 0 && !retainedPack) {
       const rewrite = await rewritePackResult(args.env, snapshotLoad.snapshot, closure.neededOids, {
         limiter: args.limiter,
         countSubrequest: (n) => args.countSubrequest("r2:rewrite-gc-pack", n),
@@ -458,6 +482,7 @@ export async function runReachabilityGc(args: {
       refsVersion: begin.refsVersion,
       packsetVersion: begin.packsetVersion,
       sourcePacks: begin.activeCatalog,
+      retainedPackKey: retainedPack?.packKey,
       stagedPack: stagedUpload
         ? {
             packKey: stagedUpload.packKey,
@@ -507,14 +532,14 @@ export async function runReachabilityGc(args: {
     if (!cleanupScheduled) return retryResult(args.log, "cleanup-enqueue-failed");
     args.log.info("reachability-gc:complete", {
       reachableObjects: closure.neededOids.length,
-      sourcePacks: commit.supersededPackKeys.length,
+      sourcePacks: begin.activeCatalog.length,
       scheduledArtifacts: commit.supersededPackKeys.length * 3,
       packCatalogVersion: commit.packCatalogVersion,
     });
     return {
       status: "completed",
       reachableObjects: closure.neededOids.length,
-      sourcePacks: commit.supersededPackKeys.length,
+      sourcePacks: begin.activeCatalog.length,
       scheduledArtifacts: commit.supersededPackKeys.length * 3,
       packCatalogVersion: commit.packCatalogVersion,
     };
