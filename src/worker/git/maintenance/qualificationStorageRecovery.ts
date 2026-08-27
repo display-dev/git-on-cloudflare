@@ -2,7 +2,6 @@ import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
 import type { Limiter } from "@/worker/git/operations/limits";
 import { doPrefix, packIndexKey, packRefsKey } from "@/worker/keys";
 import { readPublishedRepositoryGenerationState } from "@/worker/git/generation/publish";
-import { COMPACT_LEASE_TTL_MS } from "@/worker/do/repo/catalog/shared";
 import { EXPIRED_WRITER_DRAIN_MS } from "@/worker/do/repo/repositoryLifecycle";
 
 /** Synthetic qualification only. Never accepts caller-selected object keys. */
@@ -42,7 +41,10 @@ export async function recoverQualificationStorage(args: {
       return { status: "conflict", reason: "storage_state_mismatch" } as const;
     }
     const candidates: R2Object[] = [];
-    const oldestAllowed = Date.now() - COMPACT_LEASE_TTL_MS - EXPIRED_WRITER_DRAIN_MS;
+    // Admission already waits for each writer lease's expiry PLUS its drain
+    // period. Do not charge the full writer lease again from object upload:
+    // that timestamp can be near the end of an already-expired invocation.
+    const oldestAllowed = Date.now() - EXPIRED_WRITER_DRAIN_MS;
     for (const object of page.objects) {
       if (
         protectedKeys.has(object.key) ||

@@ -3,6 +3,7 @@ import { env, exports as workerExports } from "cloudflare:workers";
 
 import { getRepoStub } from "@/worker/common";
 import { doPrefix } from "@/worker/keys";
+import { getDb, upsertPackCatalogRow, deletePackCatalogRows } from "@/worker/do/repo/db";
 import { setupRepoForTests } from "./util/repoSeed";
 import { runDOWithRetry, withEnvOverrides } from "./util/test-helpers";
 
@@ -94,7 +95,7 @@ describe("qualification repository controls", () => {
       });
       expect(await env.REPO_BUCKET.head(orphan)).not.toBeNull();
       const now = Date.now();
-      const clock = vi.spyOn(Date, "now").mockReturnValue(now + 26 * 60_000);
+      const clock = vi.spyOn(Date, "now").mockReturnValue(now + 6 * 60_000);
       try {
         const reader = await stub.beginRepositoryRead();
         expect(reader.ok).toBe(true);
@@ -104,6 +105,23 @@ describe("qualification repository controls", () => {
           reason: "repository_active_or_changed",
         });
         if (reader.ok) await stub.finishRepositoryRead(reader.token);
+        await runDOWithRetry(
+          () => stub,
+          async (_instance, state) => {
+            await state.storage.put("compactLease", {
+              token: "qualification-drain",
+              operation: "reachability-gc",
+              createdAt: now - 18 * 60_000,
+              expiresAt: now + 2 * 60_000,
+            });
+          }
+        );
+        const draining = await qualificationRequest("/storage-recovery", init);
+        expect(await draining.json()).toMatchObject({
+          status: "conflict",
+          reason: "repository_active_or_changed",
+        });
+        clock.mockReturnValue(now + 8 * 60_000);
         const unknown = `${prefix}/unknown-object`;
         await env.REPO_BUCKET.put(unknown, new Uint8Array(3));
         const bodyWithUnknown = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 5 });
@@ -129,9 +147,46 @@ describe("qualification repository controls", () => {
         expect(await env.REPO_BUCKET.head(authority)).toBeNull();
         const inventoryAfter = await stub.getQualificationInventory();
         expect(inventoryAfter).toEqual(inventory);
+        await env.REPO_BUCKET.put(orphan, new Uint8Array(17));
+        await runDOWithRetry(
+          () => stub,
+          async (_instance, state) => {
+            await upsertPackCatalogRow(getDb(state.storage), {
+              packKey: orphan,
+              kind: "compact",
+              state: "active",
+              tier: 1,
+              seqLo: 1,
+              seqHi: 1,
+              objectCount: 1,
+              packBytes: 17,
+              idxBytes: 1,
+              createdAt: now,
+              supersededBy: null,
+            });
+          }
+        );
+        const protectedBody = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 3 });
+        const protectedResult = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: protectedBody,
+          headers: { ...init.headers, "Content-Length": String(protectedBody.length) },
+        });
+        expect(await protectedResult.json()).toMatchObject({
+          status: "recovered",
+          deletedObjectCount: 0,
+        });
+        expect(await env.REPO_BUCKET.head(orphan)).not.toBeNull();
       } finally {
         clock.mockRestore();
+        await runDOWithRetry(
+          () => stub,
+          async (_instance, state) => {
+            await deletePackCatalogRows(getDb(state.storage), [orphan]);
+          }
+        );
         await env.REPO_BUCKET.delete([
+          orphan,
           `${prefix}/generations/0.json`,
           `${prefix}/generation-index.json`,
         ]);
