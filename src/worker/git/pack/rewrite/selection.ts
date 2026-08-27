@@ -47,6 +47,7 @@ export async function buildSelection(
     duplicateOwnerUpgrades: 0,
     duplicateOfsOwnerTakeovers: 0,
     duplicateHeaderProbes: 0,
+    equivalentHeaderProbesSkipped: 0,
   };
 
   const resolveStart = Date.now();
@@ -233,6 +234,7 @@ export async function buildSelection(
     duplicateOwnerUpgrades: stats.duplicateOwnerUpgrades,
     duplicateOfsOwnerTakeovers: stats.duplicateOfsOwnerTakeovers,
     duplicateHeaderProbes: stats.duplicateHeaderProbes,
+    equivalentHeaderProbesSkipped: stats.equivalentHeaderProbesSkipped,
     retainedRedirectResolutions,
     collapsedUnsafeRedirectOwners,
     resolveMs,

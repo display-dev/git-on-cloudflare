@@ -101,14 +101,14 @@ async function listGcPackKeys(prefix: string): Promise<string[]> {
 }
 
 describe("candidate-native repository maintenance", () => {
-  it("blocks work before a 901st counted subrequest can start", () => {
+  it("reserves cleanup capacity below the configured 10,000-subrequest limit", () => {
     const budget = new ReachabilityGcSubrequestBudget();
-    budget.consume(500);
-    budget.consume(390);
-    expect(budget.used).toBe(890);
+    budget.consume(5_000);
+    budget.consume(3_900);
+    expect(budget.used).toBe(8_900);
     expect(() => budget.consume(1)).toThrow("reachability GC subrequest limit exceeded");
-    budget.consume(10, true);
-    expect(budget.used).toBe(900);
+    budget.consume(100, true);
+    expect(budget.used).toBe(9_000);
     expect(() => budget.consume(1)).toThrow("reachability GC subrequest limit exceeded");
   });
 

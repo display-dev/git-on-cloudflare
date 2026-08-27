@@ -2,7 +2,7 @@ import type { CacheContext } from "@/worker/cache";
 
 // Global caps
 export const MAX_SIMULTANEOUS_CONNECTIONS = 6; // Cloudflare per-request connection limit
-export const DEFAULT_SUBREQUEST_BUDGET = 900; // soft budget before hard cap (~1000)
+export const DEFAULT_SUBREQUEST_BUDGET = 900; // conservative service guard, not a platform ceiling
 
 // Structural limiter type compatible with RequestMemo.limiter
 export type Limiter = { run<T>(label: string, fn: () => Promise<T>): Promise<T> };

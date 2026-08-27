@@ -41,6 +41,46 @@ async function readStreamBytes(stream: ReadableStream<Uint8Array>): Promise<Uint
 }
 
 describe("pack rewrite cycles", () => {
+  it("does not probe the same delta encoding in an identical re-imported pack", async () => {
+    const base = new TextEncoder().encode("base\n");
+    const suffix = new TextEncoder().encode("suffix\n");
+    const baseOid = await computeOid("blob", base);
+    const deltaOid = await computeOid("blob", concatChunks([base, suffix]));
+    const pack = await buildPack([
+      { type: "blob", payload: base },
+      { type: "ref-delta", baseOid, delta: buildAppendOnlyDelta(base, suffix) },
+    ]);
+    const packKey = `test/rewrite-identical-${crypto.randomUUID()}.pack`;
+    const duplicateKey = `test/rewrite-identical-copy-${crypto.randomUUID()}.pack`;
+    await env.REPO_BUCKET.put(packKey, pack);
+    await env.REPO_BUCKET.put(duplicateKey, pack);
+    const first = await indexTestPack(env, packKey, pack.byteLength);
+    const second = await indexTestPack(env, duplicateKey, pack.byteLength);
+    let reads = 0;
+    const result = await buildSelection(
+      env,
+      {
+        packs: [
+          { packKey, packBytes: pack.byteLength, idx: first.idxView },
+          { packKey: duplicateKey, packBytes: pack.byteLength, idx: second.idxView },
+        ],
+      },
+      [baseOid, deltaOid],
+      createLogger("error", { service: "Test" }),
+      new Set(),
+      {
+        limiter: { run: async (_label, fn) => await fn() },
+        countSubrequest: () => {
+          reads++;
+        },
+      }
+    );
+    expect(result?.table.count).toBe(2);
+    expect(result?.addedDeltaBases).toBe(0);
+    expect(reads).toBe(1);
+    expect(result?.readerStates.size).toBe(1);
+  });
+
   it("continues a partial rewrite after a slow reader applies backpressure", async () => {
     const firstPayload = new TextEncoder().encode("first object\n");
     const secondPayload = new TextEncoder().encode("second object\n");

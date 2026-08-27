@@ -2,6 +2,7 @@ import type { OrderedPackSnapshot } from "@/worker/git/operations/fetch/types";
 import type { Logger } from "@/worker/common/logger";
 
 import { collectPackedObjectCandidates } from "@/worker/git/object-store";
+import { bytesEqual } from "@/worker/common";
 import type { PackHeaderEx } from "../packMeta";
 import {
   copySelectionRow,
@@ -42,6 +43,7 @@ export type SelectionStats = {
   duplicateOwnerUpgrades: number;
   duplicateOfsOwnerTakeovers: number;
   duplicateHeaderProbes: number;
+  equivalentHeaderProbesSkipped: number;
 };
 
 export type ClaimOwnerResult =
@@ -366,6 +368,22 @@ async function tryCanonicalizeDeltaSelectionToFull(
     if (candidate.packSlot === packSlot && candidate.objectIndex === entryIndex) continue;
 
     const altPack = snapshot.packs[candidate.packSlot]!;
+    const selectedPack = snapshot.packs[packSlot]!;
+    // Re-imports can publish the identical immutable pack under another key.
+    // Its exact same indexed position cannot turn this delta into a full
+    // object. Skip only that proven-equivalent encoding; an alternate pack or
+    // index must still be inspected for a full-object representation.
+    if (
+      altPack.packBytes === selectedPack.packBytes &&
+      candidate.objectIndex === entryIndex &&
+      candidate.offset === table.offsets[sel] &&
+      candidate.nextOffset === table.nextOffsets[sel] &&
+      bytesEqual(altPack.idx.packChecksum, selectedPack.idx.packChecksum) &&
+      bytesEqual(altPack.idx.idxChecksum, selectedPack.idx.idxChecksum)
+    ) {
+      stats.equivalentHeaderProbesSkipped++;
+      continue;
+    }
     const altReadState = await ensurePackReadState(
       env,
       altPack,

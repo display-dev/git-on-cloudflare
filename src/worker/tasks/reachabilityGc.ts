@@ -3,8 +3,11 @@ import type { ReachabilityGcQueueMessage, RepoQueueMessageHandle } from "./types
 import { runReachabilityGc } from "@/worker/git/maintenance/reachabilityGc";
 import { createQueueTaskContext, logSoftBudgetExhausted, retryQueueMessage } from "./context";
 
-export const REACHABILITY_GC_SUBREQUEST_BUDGET = 900;
-export const REACHABILITY_GC_WORK_SUBREQUEST_BUDGET = 890;
+// The qualification deployment explicitly selects Cloudflare's 10,000-call
+// paid-plan limit. Keep a separate service guard below that platform limit so
+// cleanup and reconciliation still have deterministic headroom.
+export const REACHABILITY_GC_SUBREQUEST_BUDGET = 9_000;
+export const REACHABILITY_GC_WORK_SUBREQUEST_BUDGET = 8_900;
 const REACHABILITY_GC_RETRY_DELAY_SECONDS = 30;
 
 export class ReachabilityGcBudgetExceededError extends Error {}
@@ -65,6 +68,7 @@ export async function handleReachabilityGcMessage(
     subrequestBudget: REACHABILITY_GC_SUBREQUEST_BUDGET,
   });
   const subrequestBudget = new ReachabilityGcSubrequestBudget();
+  const subrequestsByOperation: Record<string, number> = {};
   const log = task.logFor({
     service: "ReachabilityGcQueue",
     repoId: body.repoId,
@@ -80,6 +84,7 @@ export async function handleReachabilityGcMessage(
       countSubrequest: (op, count = 1) => {
         const reservedCleanup = isReachabilityGcReservedSubrequest(op);
         subrequestBudget.consume(count, reservedCleanup);
+        subrequestsByOperation[op] = (subrequestsByOperation[op] ?? 0) + Math.max(1, count);
         if (op !== "r2:load-gc-pack-metadata") {
           logSoftBudgetExhausted({
             cacheCtx: task.cacheCtx,
@@ -101,13 +106,18 @@ export async function handleReachabilityGcMessage(
       message.ack();
       return;
     }
-    log.info("reachability-gc:queue-complete", result);
+    log.info("reachability-gc:queue-complete", {
+      ...result,
+      countedSubrequests: subrequestBudget.used,
+      subrequestsByOperation,
+    });
     message.ack();
   } catch (error) {
     if (error instanceof ReachabilityGcBudgetExceededError) {
       log.warn("reachability-gc:queue-budget-retry", {
         countedSubrequests: subrequestBudget.used,
         budget: REACHABILITY_GC_SUBREQUEST_BUDGET,
+        subrequestsByOperation,
       });
       retryQueueMessage(message, REACHABILITY_GC_RETRY_DELAY_SECONDS);
       return;

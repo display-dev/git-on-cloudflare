@@ -69,10 +69,12 @@ Write changes against the current source tree, not the docs alone. Some document
   the `Limiter` from `src/worker/git/operations/limits.ts` via `limiter.run(label, fn)`.
   Obtain the limiter with `getLimiter(cacheCtx)` or pass it through options.
 - Use a descriptive label prefixed by target (e.g. `"r2:get-pack"`, `"do:get-object-compat"`).
-- Respect the subrequest budget (`DEFAULT_SUBREQUEST_BUDGET = 900`). If the code path has
-  its own budget (like `RECEIVE_SUBREQUEST_BUDGET`), use `countSubrequest()` to track it.
-- Never bypass the limiter for "just one call"—the hard 1000-subrequest and
-  6-concurrent-connection ceilings apply to the entire request, not individual call sites.
+- Respect each code path's explicit subrequest guard and use `countSubrequest()` to track it.
+  `DEFAULT_SUBREQUEST_BUDGET = 900` remains the conservative default for ordinary paths;
+  long-running tasks may select a larger guard only when their deployment explicitly binds
+  the applicable Cloudflare limit.
+- Never bypass the limiter for "just one call". The configured subrequest limit and the
+  6-concurrent-connection ceiling apply to the entire invocation, not individual call sites.
 
 ## Stack At A Glance
 

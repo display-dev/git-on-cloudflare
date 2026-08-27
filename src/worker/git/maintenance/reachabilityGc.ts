@@ -398,6 +398,10 @@ export async function runReachabilityGc(args: {
       haves: [],
     });
     if (closure.type !== "Ready") return retryResult(args.log, closure.reason);
+    args.log.info("reachability-gc:closure", {
+      reachableObjects: closure.neededOids.length,
+      sourcePacks: snapshotLoad.snapshot.packs.length,
+    });
 
     let stagedIdxBytes: number | undefined;
     if (closure.neededOids.length > 0) {
