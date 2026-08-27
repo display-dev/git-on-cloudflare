@@ -14,6 +14,12 @@ export type StagedPackUpload = {
   cleanup(): Promise<void>;
 };
 
+export type DurablePackUploadOwner = {
+  /** Persist verified identity before the final trailer can complete the PUT.
+   * This owner, not the transient invocation, is responsible for cleanup. */
+  beforeComplete(identity: { packBytes: number; packSha1: string }): Promise<void>;
+};
+
 export type StagedStockReceiveUpload = {
   requestKey: string;
   requestBytes: number;
@@ -134,6 +140,7 @@ async function stageKnownLengthPack(args: {
   limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
   onProgress?: (message: string) => void;
+  durableOwner?: DurablePackUploadOwner;
 }): Promise<StagedPackUpload> {
   if (args.expectedLength <= 0) {
     throw new Error("Streaming receive expected a non-empty pack body.");
@@ -147,8 +154,14 @@ async function stageKnownLengthPack(args: {
 
   args.countSubrequest("r2:put-pack");
   const putPromise = args.limiter.run("r2:put-pack", async () => {
-    return await args.env.REPO_BUCKET.put(args.packKey, fixedLengthStream.readable);
+    return await args.env.REPO_BUCKET.put(
+      args.packKey,
+      fixedLengthStream.readable,
+      args.durableOwner ? { onlyIf: { etagDoesNotMatch: "*" } } : undefined
+    );
   });
+  // The streaming producer may fail before it reaches the await below.
+  void putPromise.catch(() => undefined);
   let totalBytes = 0;
   let headerPrefix: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   let tail: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
@@ -172,8 +185,17 @@ async function stageKnownLengthPack(args: {
         validatePackHeader(headerPrefix);
       }
 
+      const uploadBytes = args.durableOwner ? appendBytes(tail, chunk) : chunk;
       tail = await updateTrailerWindow(digestWriter, tail, chunk);
-      await uploadWriter.write(chunk);
+      if (args.durableOwner) {
+        if (uploadBytes.byteLength > PACK_TRAILER_BYTES) {
+          await uploadWriter.write(
+            uploadBytes.subarray(0, uploadBytes.byteLength - PACK_TRAILER_BYTES)
+          );
+        }
+      } else {
+        await uploadWriter.write(chunk);
+      }
       lastReportedStep = emitKnownLengthUploadProgress({
         onProgress: args.onProgress,
         uploadedBytes: totalBytes,
@@ -196,6 +218,13 @@ async function stageKnownLengthPack(args: {
       throw new Error("Received pack trailer SHA-1 did not match the streamed body.");
     }
 
+    if (args.durableOwner) {
+      await args.durableOwner.beforeComplete({
+        packBytes: totalBytes,
+        packSha1: bytesToHex(computedDigest),
+      });
+      await uploadWriter.write(tail);
+    }
     await uploadWriter.close();
     await putPromise;
     return {
@@ -217,6 +246,8 @@ async function stageKnownLengthPack(args: {
     try {
       await reader.cancel(error);
     } catch {}
+    await putPromise.catch(() => undefined);
+    if (args.durableOwner) throw error;
     try {
       await deletePackArtifact({
         env: args.env,
@@ -430,6 +461,7 @@ export async function stagePackToR2(args: {
   limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
   onProgress?: (message: string) => void;
+  durableOwner?: DurablePackUploadOwner;
 }): Promise<StagedPackUpload> {
   const remainingLength = getRemainingBodyLength(args.request, args.bytesConsumed);
   if (remainingLength !== undefined) {
@@ -441,9 +473,11 @@ export async function stagePackToR2(args: {
       limiter: args.limiter,
       countSubrequest: args.countSubrequest,
       onProgress: args.onProgress,
+      durableOwner: args.durableOwner,
     });
   }
 
+  if (args.durableOwner) throw new Error("Durable pack upload requires an exact planned length.");
   return await stageMultipartPack({
     env: args.env,
     packKey: args.packKey,

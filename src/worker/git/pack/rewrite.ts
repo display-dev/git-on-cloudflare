@@ -16,7 +16,7 @@ import {
 import { createPassthroughStream, createRewriteStream } from "./rewrite/stream";
 
 export type PackRewriteResult =
-  | { status: "ok"; stream: ReadableStream<Uint8Array>; addedDeltaBases: number }
+  | { status: "ok"; stream: ReadableStream<Uint8Array>; addedDeltaBases: number; packBytes: number }
   | { status: "failed"; failure: RewriteFailure };
 
 export async function rewritePackResult(
@@ -81,6 +81,7 @@ export async function rewritePackResult(
     return {
       status: "ok",
       addedDeltaBases,
+      packBytes: snapshot.packs[0]!.packBytes,
       stream: createPassthroughStream({
         env,
         snapshotPack: snapshot.packs[0]!,
@@ -106,9 +107,14 @@ export async function rewritePackResult(
     return failed("header-lengths-did-not-converge", false, { selected: table.count });
   }
 
+  let packBytes = 12 + 20;
+  for (let index = 0; index < table.count; index++) {
+    packBytes += table.outputHeaderLens[index] + table.payloadLens[index];
+  }
   return {
     status: "ok",
     addedDeltaBases,
+    packBytes,
     stream: createRewriteStream(table, snapshot, readerStates, log, rewriteOptions, () => {
       log.info("rewrite:stream-complete", {
         passthrough: false,

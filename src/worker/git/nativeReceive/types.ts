@@ -343,6 +343,13 @@ export type NativeReceiveProcessRequest = {
   outputIdxKey: string;
   outputRefsKey: string;
   stockReceive?: NativeReceiveStockInput | undefined;
+  maintenance?: {
+    roots: string[];
+    objectCount: number;
+    objectSetSha256: string;
+    packSha1: string;
+    resultKey: string;
+  };
 };
 
 export type NativeReceiveProcessResult = {
@@ -358,6 +365,18 @@ export type NativeReceiveProcessResult = {
   hydratedBytes: number;
   downloadedBytes: number;
   cacheHitBytes: number;
+  maintenance?: {
+    objectSetSha256: string;
+    downloadMs: number;
+    indexMs: number;
+    validationMs: number;
+    referenceMs: number;
+    uploadMs: number;
+    downloadBytes: number;
+    uploadBytes: number;
+    downloadRequests: number;
+    uploadRequests: number;
+  };
   receivePackResponse?: string | undefined;
   inputRequestSha256?: string | undefined;
   packSha256?: string | undefined;
@@ -441,6 +460,7 @@ export type RepositoryContainerBridgeProps = {
   readKeys: Array<{ key: string; expectedBytes: number; expectedEtag?: string | undefined }>;
   writeKeys: Array<{ key: string; maxBytes: number }>;
   requireWriteSha256?: boolean | undefined;
+  durableOutputOwner?: boolean;
 };
 
 export function nativeReceiveOperationView(

@@ -233,6 +233,7 @@ describe("git fetch streaming (default)", () => {
     uploadStreamTest.setResolvePackStreamResult(async () => ({
       status: "ok",
       addedDeltaBases: 0,
+      packBytes: 3,
       stream: new ReadableStream<Uint8Array>({
         async pull(controller) {
           if (controller.desiredSize !== null && controller.desiredSize >= 0) {
@@ -277,6 +278,7 @@ describe("git fetch streaming (default)", () => {
     uploadStreamTest.setResolvePackStreamResult(async () => ({
       status: "ok",
       addedDeltaBases: 0,
+      packBytes: 3,
       stream: new ReadableStream<Uint8Array>({
         pull(controller) {
           pulls++;
@@ -328,6 +330,7 @@ describe("git fetch streaming (default)", () => {
     uploadStreamTest.setResolvePackStreamResult(async () => ({
       status: "ok",
       addedDeltaBases: 0,
+      packBytes: 3,
       stream: new ReadableStream<Uint8Array>({
         pull(controller) {
           pulls++;
@@ -374,6 +377,7 @@ describe("git fetch streaming (default)", () => {
     uploadStreamTest.setResolvePackStreamResult(async () => ({
       status: "ok",
       addedDeltaBases: 0,
+      packBytes: 3,
       stream: new ReadableStream<Uint8Array>({
         pull(controller) {
           pulls++;
@@ -450,6 +454,7 @@ describe("git fetch streaming (default)", () => {
       return {
         status: "ok",
         addedDeltaBases: 0,
+        packBytes: 3,
         stream: new ReadableStream<Uint8Array>({
           async start(controller) {
             controller.enqueue(new Uint8Array([1, 2, 3]));

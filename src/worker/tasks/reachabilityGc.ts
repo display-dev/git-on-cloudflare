@@ -1,6 +1,7 @@
 import type { ReachabilityGcQueueMessage, RepoQueueMessageHandle } from "./types";
 
-import { runReachabilityGc } from "@/worker/git/maintenance/reachabilityGc";
+import { runDurableReachabilityGc } from "@/worker/git/maintenance/durableGc";
+import { getRepoStub } from "@/worker/common";
 import { createQueueTaskContext, logSoftBudgetExhausted, retryQueueMessage } from "./context";
 
 // The qualification deployment explicitly selects Cloudflare's 10,000-call
@@ -75,9 +76,34 @@ export async function handleReachabilityGcMessage(
     doId: body.doId,
   });
   try {
-    const result = await runReachabilityGc({
+    const operationId = body.operationId ?? message.id;
+    // Old queued messages are adopted once using their immutable delivery ID.
+    // New requests register before enqueue and carry the operation explicitly.
+    const stub = getRepoStub(env, body.repoId);
+    if (stub.id.toString() !== body.doId) {
+      log.error("reachability-gc:queue-identity-rejected", {});
+      message.ack();
+      return;
+    }
+    if (!body.operationId) {
+      subrequestBudget.consume(1);
+      const registered = await task.limiter.run(
+        "do:gc-adopt-queue",
+        async () => await stub.registerGcOperation(body.repoId, operationId)
+      );
+      if (registered.status === "rejected") {
+        message.ack();
+        return;
+      }
+      if (registered.status === "busy") {
+        retryQueueMessage(message, REACHABILITY_GC_RETRY_DELAY_SECONDS);
+        return;
+      }
+    }
+    const result = await runDurableReachabilityGc({
       env,
       repoId: body.repoId,
+      operationId,
       cacheCtx: task.cacheCtx,
       limiter: task.limiter,
       log,

@@ -6,6 +6,7 @@ import { doPrefix } from "@/worker/keys";
 import { getDb, upsertPackCatalogRow, deletePackCatalogRows } from "@/worker/do/repo/db";
 import { setupRepoForTests } from "./util/repoSeed";
 import { runDOWithRetry, withEnvOverrides } from "./util/test-helpers";
+import { runQueueMessage } from "./util/queue";
 
 const namespace = `qual-${"a".repeat(32)}`;
 const repository = `repo-${"b".repeat(24)}`;
@@ -40,6 +41,66 @@ async function enabled<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe("qualification repository controls", () => {
+  it("admits only a closed exact-target GC request and exposes no private output keys", async () => {
+    const seeded = await setupRepoForTests(env, namespace, repository, {
+      doName: `repo:qualification-gc-${crypto.randomUUID()}`,
+    });
+    const stub = getRepoStub(env, seeded.doName);
+    const request = {
+      schemaVersion: 1,
+      operationId: "qualified-gc",
+      faults: ["after-rewrite"],
+      holdReader: true,
+      deadlineAt: Date.now() + 3_600_000,
+    };
+    const post = (value: unknown) => {
+      const body = JSON.stringify(value);
+      return {
+        method: "POST",
+        body,
+        headers: { "Content-Type": "application/json", "Content-Length": String(body.length) },
+      };
+    };
+    expect((await qualificationRequest("/gc", post(request))).status).toBe(404);
+    await enabled(async () => {
+      expect((await qualificationRequest("/gc", post(request), "wrong")).status).toBe(401);
+      expect(
+        (await qualificationRequest("/gc", post({ ...request, arbitraryKey: "forbidden" }))).status
+      ).toBe(400);
+      expect(
+        (await qualificationRequest("/gc", post({ ...request, faults: ["delete-anything"] })))
+          .status
+      ).toBe(400);
+      expect((await qualificationRequest("/gc", post(request))).status).toBe(202);
+      expect((await qualificationRequest("/gc", post(request))).status).toBe(202);
+      expect(
+        (await qualificationRequest("/gc", post({ ...request, holdReader: false }))).status
+      ).toBe(409);
+      const operation = await stub.getGcOperation();
+      expect(operation).toMatchObject({
+        phase: "queued",
+        qualification: { faults: { "after-rewrite": {} }, reader: {} },
+      });
+      const response = await qualificationRequest("/gc/qualified-gc");
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toContain(operation!.inputPackKey);
+      expect(text).not.toContain(secret);
+      expect((await qualificationRequest("/gc/other-operation")).status).toBe(404);
+      expect((await qualificationRequest("/gc/qualified-gc/artifacts/pack")).status).toBe(409);
+    });
+    // The exact route is reused by later control fixtures. Finish our admitted
+    // empty-repository operation rather than leaving an active write fence.
+    for (let stage = 0; stage < 3; stage++)
+      await runQueueMessage({
+        kind: "reachability-gc",
+        repoId: seeded.doName,
+        doId: stub.id.toString(),
+        operationId: "qualified-gc",
+      });
+    expect(await stub.getGcOperation()).toMatchObject({ phase: "complete" });
+    await stub.resetQualificationState((await stub.getQualificationInventory()).refStateDigest);
+  });
   it("recovers only aged uncatalogued artifacts under an exact idle-state fence", async () => {
     const seeded = await setupRepoForTests(env, namespace, repository, {
       doName: `repo:qualification-storage-${crypto.randomUUID()}`,
@@ -410,7 +471,11 @@ describe("qualification repository controls", () => {
       const after = (await (await qualificationRequest()).json()) as {
         repository: { transientStateCount: number };
       };
-      expect(after.repository.transientStateCount).toBe(0);
+      // Reset now admits a durable operation. Its unfinished work must remain
+      // visible until Queue processing, rather than look like a clean baseline.
+      expect(after.repository.transientStateCount).toBe(1);
+      const queued = await stub.getGcOperation();
+      expect(queued).toMatchObject({ phase: "queued" });
       const repeated = await qualificationRequest("/reset", {
         method: "POST",
         headers: {
@@ -424,12 +489,8 @@ describe("qualification repository controls", () => {
         reason?: string;
         deletedStateCount?: number;
       };
-      if (repeated.status === 409) {
-        expect(repeatedBody).toMatchObject({ status: "conflict", reason: "active" });
-      } else {
-        expect(repeated.status).toBe(202);
-        expect(repeatedBody).toMatchObject({ status: "already_reset", deletedStateCount: 0 });
-      }
+      expect(repeated.status).toBe(409);
+      expect(repeatedBody).toMatchObject({ status: "conflict", reason: "active" });
     });
   });
 

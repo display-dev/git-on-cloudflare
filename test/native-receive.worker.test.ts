@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createExecutionContext } from "cloudflare:test";
 import { env, exports as workerExports } from "cloudflare:workers";
 
-import { getRepoStub, zeroOid } from "@/worker/common";
+import { getRepoStub, zeroOid, bytesToHex } from "@/worker/common";
 import { __test as nativeReceiveTest } from "@/worker/do/repo/nativeReceive";
 import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
 import { clearExpiredLeases } from "@/worker/do/repo/catalog/leases";
@@ -301,6 +301,31 @@ describe("durable native receive and import", () => {
     );
     expect(oversized.status).toBe(400);
     expect(await env.REPO_BUCKET.head(oversizedKey)).toBeNull();
+  });
+
+  it("reconciles immutable GC bridge retries without deleting conflicting output", async () => {
+    const key = "do/test/objects/pack/gc-immutable.pack";
+    const bridge = workerExports.RepositoryContainerBridge({
+      props: {
+        operationId: "gc-immutable",
+        readKeys: [],
+        writeKeys: [{ key, maxBytes: 8 }],
+        requireWriteSha256: true,
+        durableOutputOwner: true,
+      },
+    });
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const digest = bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+    const request = (sha256: string) =>
+      new Request(bridgeUrl(key), {
+        method: "PUT",
+        headers: { "Content-Length": "4", "X-Display-SHA256": sha256 },
+        body: streamedBody(bytes),
+      });
+    expect((await bridge.fetch(request(digest))).status).toBe(204);
+    expect((await bridge.fetch(request(digest))).status).toBe(204);
+    expect((await bridge.fetch(request("0".repeat(64)))).status).toBe(400);
+    expect(new Uint8Array(await (await env.REPO_BUCKET.get(key))!.arrayBuffer())).toEqual(bytes);
   });
 
   it("reads native Git pack, index, and PREF artifacts through the Worker object path", async () => {

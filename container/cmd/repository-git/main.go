@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -56,9 +57,11 @@ func listenAddress() string {
 }
 
 var (
-	objectIDPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	refNamePattern  = regexp.MustCompile(`^refs/[^\x00-\x20~^:?*\\\[]+$`)
-	processSlot     = make(chan struct{}, 1)
+	objectIDPattern      = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	refNamePattern       = regexp.MustCompile(`^refs/[^\x00-\x20~^:?*\\\[]+$`)
+	processSlot          = make(chan struct{}, 1)
+	maintenanceStatusMu  sync.RWMutex
+	maintenanceOperation string
 )
 
 type packInput struct {
@@ -82,20 +85,22 @@ type processRequest struct {
 	OutputPackKey string           `json:"outputPackKey"`
 	OutputIdxKey  string           `json:"outputIdxKey"`
 	OutputRefsKey string           `json:"outputRefsKey"`
+	Maintenance   *gcIndexRequest  `json:"maintenance,omitempty"`
 }
 
 type processResponse struct {
-	OperationID     string `json:"operationId"`
-	PackBytes       int64  `json:"packBytes"`
-	IdxBytes        int64  `json:"idxBytes"`
-	RefsBytes       int64  `json:"refsBytes"`
-	ObjectCount     uint32 `json:"objectCount"`
-	PackSHA1        string `json:"packSha1"`
-	ElapsedMS       int64  `json:"elapsedMs"`
-	ScratchBytes    int64  `json:"scratchBytes"`
-	HydratedBytes   int64  `json:"hydratedBytes"`
-	DownloadedBytes int64  `json:"downloadedBytes"`
-	CacheHitBytes   int64  `json:"cacheHitBytes"`
+	OperationID     string         `json:"operationId"`
+	PackBytes       int64          `json:"packBytes"`
+	IdxBytes        int64          `json:"idxBytes"`
+	RefsBytes       int64          `json:"refsBytes"`
+	ObjectCount     uint32         `json:"objectCount"`
+	PackSHA1        string         `json:"packSha1"`
+	ElapsedMS       int64          `json:"elapsedMs"`
+	ScratchBytes    int64          `json:"scratchBytes"`
+	HydratedBytes   int64          `json:"hydratedBytes"`
+	DownloadedBytes int64          `json:"downloadedBytes"`
+	CacheHitBytes   int64          `json:"cacheHitBytes"`
+	Maintenance     *gcIndexResult `json:"maintenance,omitempty"`
 }
 
 type errorResponse struct {
@@ -117,6 +122,23 @@ func (failure transientProcessError) Unwrap() error {
 
 func transientFailure(message string, err error) error {
 	return transientProcessError{cause: fmt.Errorf("%s: %w", message, err)}
+}
+
+type bridgeUploadStatusError struct{ status int }
+
+func (failure bridgeUploadStatusError) Error() string {
+	return fmt.Sprintf("bridge PUT returned %d", failure.status)
+}
+
+func outputUploadFailure(input processRequest, message string, err error) error {
+	var rejected bridgeUploadStatusError
+	if input.Maintenance != nil && errors.As(err, &rejected) {
+		switch rejected.status {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusRequestEntityTooLarge:
+			return fmt.Errorf("%s: %w", message, err)
+		}
+	}
+	return transientFailure(message, err)
 }
 
 type bridgeClient struct {
@@ -160,6 +182,7 @@ func main() {
 		_, _ = writer.Write([]byte("ready\n"))
 	})
 	mux.HandleFunc("POST /process", processHandler)
+	mux.HandleFunc("GET /maintenance/status", maintenanceStatusHandler)
 	mux.HandleFunc("POST /stock-receive", stockReceiveHandler)
 	mux.HandleFunc("POST /stock-receive-bundle", stockReceiveBundleHandler)
 
@@ -193,9 +216,23 @@ func processHandler(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	defer releaseProcessSlot()
+	processContext := request.Context()
+	if input.Maintenance != nil {
+		var cancel context.CancelFunc
+		processContext, cancel = context.WithTimeout(processContext, 14*time.Minute)
+		defer cancel()
+		maintenanceStatusMu.Lock()
+		maintenanceOperation = input.OperationID
+		maintenanceStatusMu.Unlock()
+		defer func() {
+			maintenanceStatusMu.Lock()
+			maintenanceOperation = ""
+			maintenanceStatusMu.Unlock()
+		}()
+	}
 
 	startedAt := time.Now()
-	result, err := processPack(request.Context(), input)
+	result, err := processPack(processContext, input)
 	if err != nil {
 		// Native Git errors can contain repository OIDs, refs, and paths. Emit
 		// only a closed category to provider stderr; the HTTP response is also
@@ -208,6 +245,17 @@ func processHandler(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(writer).Encode(result)
+}
+
+func maintenanceStatusHandler(writer http.ResponseWriter, _ *http.Request) {
+	maintenanceStatusMu.RLock()
+	operation := maintenanceOperation
+	maintenanceStatusMu.RUnlock()
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(writer).Encode(struct {
+		OperationID string `json:"operationId"`
+	}{operation})
 }
 
 func acquireProcessSlot() bool {
@@ -250,7 +298,11 @@ func validateProcessRequest(input processRequest) error {
 	if len(input.ActivePacks) > maxActivePacks {
 		return errors.New("active pack catalog exceeds processor capacity")
 	}
-	if len(input.Commands) == 0 || len(input.Commands) > maxCommands {
+	if input.Maintenance != nil {
+		if err := validateGcIndexRequest(input); err != nil {
+			return err
+		}
+	} else if len(input.Commands) == 0 || len(input.Commands) > maxCommands {
 		return errors.New("invalid receive command count")
 	}
 	if input.OutputPackKey == "" || input.OutputIdxKey == "" || input.OutputRefsKey == "" {
@@ -476,6 +528,8 @@ func pruneArtifactCache(cacheRoot string, activePacks []packInput) error {
 }
 
 func processPackWithBridgeAtCache(ctx context.Context, input processRequest, client objectBridge, cacheRoot string) (processResponse, error) {
+	startedAt := time.Now()
+	phases := gcIndexResult{}
 	_ = pruneArtifactCache(cacheRoot, input.ActivePacks)
 	workDir, err := os.MkdirTemp("", "repository-git-")
 	if err != nil {
@@ -500,28 +554,40 @@ func processPackWithBridgeAtCache(ctx context.Context, input processRequest, cli
 	}
 
 	inputPath := filepath.Join(workDir, "input.pack")
+	phaseStartedAt := time.Now()
 	if err := client.download(ctx, input.InputPackKey, inputPath, input.InputBytes); err != nil {
 		return processResponse{}, transientFailure("download input pack", err)
 	}
 	metrics.downloadedBytes += input.InputBytes
+	phases.DownloadMS = time.Since(phaseStartedAt).Milliseconds()
 	existingPacks, err := listPackFiles(packDir)
 	if err != nil {
 		return processResponse{}, failAfterHydration(metrics, "inspect hydrated packs", err)
 	}
+	phaseStartedAt = time.Now()
 	if err := indexPack(ctx, repoDir, inputPath); err != nil {
 		return processResponse{}, failAfterHydration(metrics, "index input against hydrated packs", err)
 	}
+	phases.IndexMS = time.Since(phaseStartedAt).Milliseconds()
 
 	packPath, idxPath, err := findProducedPack(packDir, existingPacks)
 	if err != nil {
 		return processResponse{}, failAfterHydration(metrics, "locate indexed pack", err)
 	}
-	if err := verifyConnectivity(ctx, repoDir, input.Commands); err != nil {
-		return processResponse{}, failAfterHydration(metrics, "verify hydrated connectivity", err)
+	phaseStartedAt = time.Now()
+	if input.Maintenance != nil {
+		if err := verifyGcIndex(ctx, repoDir, packPath, idxPath, input); err != nil {
+			return processResponse{}, failAfterHydration(metrics, "verify maintenance closure", err)
+		}
+	} else {
+		if err := verifyConnectivity(ctx, repoDir, input.Commands); err != nil {
+			return processResponse{}, failAfterHydration(metrics, "verify hydrated connectivity", err)
+		}
 	}
 	if err := runGit(ctx, repoDir, "verify-pack", "-s", idxPath); err != nil {
 		return processResponse{}, failAfterHydration(metrics, "verify indexed pack", err)
 	}
+	phases.ValidationMS = time.Since(phaseStartedAt).Milliseconds()
 
 	packBytes, err := fileSize(packPath)
 	if err != nil {
@@ -532,6 +598,7 @@ func processPackWithBridgeAtCache(ctx context.Context, input processRequest, cli
 		return processResponse{}, failAfterHydration(metrics, "inspect output index", err)
 	}
 	refsPath := filepath.Join(workDir, "output.refs")
+	phaseStartedAt = time.Now()
 	objectCount, packSHA1, err := buildPackReferenceIndex(ctx, repoDir, packPath, idxPath, refsPath)
 	if err != nil {
 		return processResponse{}, failAfterHydration(metrics, "build output reference index", err)
@@ -540,21 +607,24 @@ func processPackWithBridgeAtCache(ctx context.Context, input processRequest, cli
 	if err != nil {
 		return processResponse{}, failAfterHydration(metrics, "inspect output reference index", err)
 	}
+	phases.ReferenceMS = time.Since(phaseStartedAt).Milliseconds()
 
+	phaseStartedAt = time.Now()
 	if err := client.upload(ctx, input.OutputPackKey, packPath, packBytes); err != nil {
-		return processResponse{}, transientFailure("upload output pack", err)
+		return processResponse{}, outputUploadFailure(input, "upload output pack", err)
 	}
 	if err := client.upload(ctx, input.OutputIdxKey, idxPath, idxBytes); err != nil {
-		return processResponse{}, transientFailure("upload output index", err)
+		return processResponse{}, outputUploadFailure(input, "upload output index", err)
 	}
 	if err := client.upload(ctx, input.OutputRefsKey, refsPath, refsBytes); err != nil {
-		return processResponse{}, transientFailure("upload output refs", err)
+		return processResponse{}, outputUploadFailure(input, "upload output refs", err)
 	}
+	phases.UploadMS = time.Since(phaseStartedAt).Milliseconds()
 	_ = retainOutputInCache(cacheRoot, input.OutputPackKey, packBytes, packPath)
 	_ = retainOutputInCache(cacheRoot, input.OutputIdxKey, idxBytes, idxPath)
 	scratchBytes, _ := directoryBytes(workDir)
 
-	return processResponse{
+	result := processResponse{
 		OperationID:     input.OperationID,
 		PackBytes:       packBytes,
 		IdxBytes:        idxBytes,
@@ -565,7 +635,22 @@ func processPackWithBridgeAtCache(ctx context.Context, input processRequest, cli
 		HydratedBytes:   metrics.hydratedBytes,
 		DownloadedBytes: metrics.downloadedBytes,
 		CacheHitBytes:   metrics.cacheHitBytes,
-	}, nil
+		ElapsedMS:       time.Since(startedAt).Milliseconds(),
+	}
+	if input.Maintenance != nil {
+		phases.ObjectSetSHA256 = input.Maintenance.ObjectSetSHA256
+		phases.DownloadBytes = input.InputBytes
+		phases.UploadBytes = packBytes + idxBytes + refsBytes
+		phases.DownloadRequests = 1
+		phases.UploadRequests = 3
+		result.Maintenance = &phases
+		// Write the completion receipt last. Recovery reads this immutable
+		// result before deciding whether another native execution is needed.
+		if err := uploadGcResult(ctx, client, workDir, input.Maintenance.ResultKey, result); err != nil {
+			return processResponse{}, outputUploadFailure(input, "upload maintenance receipt", err)
+		}
+	}
+	return result, nil
 }
 
 func directoryBytes(root string) (int64, error) {
@@ -746,7 +831,7 @@ func (bridge bridgeClient) upload(ctx context.Context, key string, source string
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("bridge PUT returned %d", response.StatusCode)
+		return bridgeUploadStatusError{status: response.StatusCode}
 	}
 	return nil
 }

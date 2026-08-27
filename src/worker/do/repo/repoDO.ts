@@ -1,4 +1,26 @@
 import type { Head, IngestionReceipt } from "./repoState";
+import type {
+  GcOperation,
+  GcProgress,
+  GcQualificationOptions,
+  GcFault,
+} from "@/worker/git/maintenance/gcOperation";
+import {
+  consumeGcFault,
+  gcReaderLatch,
+  releaseGcReader,
+  observeGcReaderProtection,
+} from "./gcQualification";
+import {
+  GC_OPERATION_KEY,
+  registerGcOperation,
+  claimGcOperation,
+  recordGcProgress,
+  commitGcOperation,
+  gcDiscardKeys,
+  resumeGcFromAlarm,
+} from "./catalog/gcOperation";
+import { runGcNative } from "./gcNative";
 import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 import type { RepoActivity } from "@/worker/common";
 import type { PackCatalogRow } from "./db/schema";
@@ -210,6 +232,8 @@ export class RepoDurableObject extends DurableObject {
       return;
     }
 
+    if (await resumeGcFromAlarm({ ctx: this.ctx, env: this.env, logger: this.logger })) return;
+
     await clearExpiredLeases(this.ctx, this.env, this.logger);
 
     if (
@@ -414,7 +438,9 @@ export class RepoDurableObject extends DurableObject {
   public async canDeleteSupersededGeneration(
     generation?: number
   ): Promise<{ safe: boolean; retryAfterSeconds?: number }> {
-    return await canDeleteSupersededGenerationState(this.ctx, generation);
+    const result = await canDeleteSupersededGenerationState(this.ctx, generation);
+    if (!result.safe) await observeGcReaderProtection(this.ctx, this.env, generation);
+    return result;
   }
 
   public async getPendingGenerationPublication() {
@@ -523,6 +549,75 @@ export class RepoDurableObject extends DurableObject {
 
   public async beginReachabilityGc(): Promise<BeginReachabilityGcResult> {
     return await beginReachabilityGcState({ ctx: this.ctx, logger: this.logger });
+  }
+
+  public async registerGcOperation(repositoryId: string, operationId: string) {
+    return registerGcOperation({ ctx: this.ctx, repositoryId, operationId, logger: this.logger });
+  }
+
+  public async registerQualificationGc(
+    repositoryId: string,
+    operationId: string,
+    qualification: GcQualificationOptions
+  ) {
+    if (this.env.QUALIFICATION_MODE !== "1" || !this.env.QUALIFICATION_SECRET)
+      return { status: "rejected" as const };
+    return registerGcOperation({
+      ctx: this.ctx,
+      repositoryId,
+      operationId,
+      qualification,
+      logger: this.logger,
+    });
+  }
+
+  public async consumeGcFault(operationId: string, fault: GcFault) {
+    return consumeGcFault(this.ctx, this.env, operationId, fault);
+  }
+
+  public async gcReaderLatch(token: string, packKeys: string[]) {
+    return gcReaderLatch(this.ctx, this.env, token, packKeys);
+  }
+
+  public async releaseGcReader(operationId: string) {
+    return releaseGcReader(this.ctx, this.env, operationId);
+  }
+
+  public async getGcOperation(): Promise<GcOperation | undefined> {
+    return this.ctx.storage.get<GcOperation>(GC_OPERATION_KEY);
+  }
+
+  public async claimGcOperation(operationId: string) {
+    return claimGcOperation({ ctx: this.ctx, operationId, logger: this.logger });
+  }
+
+  public async recordGcProgress(operationId: string, claimId: string, progress: GcProgress) {
+    return recordGcProgress({ ctx: this.ctx, operationId, claimId, progress, logger: this.logger });
+  }
+
+  public async runGcNative(operationId: string, claimId: string) {
+    return runGcNative({ ctx: this.ctx, env: this.env, operationId, claimId, logger: this.logger });
+  }
+
+  public async commitGcOperation(operationId: string, claimId: string) {
+    if (await consumeGcFault(this.ctx, this.env, operationId, "before-publication"))
+      throw new Error("qualification interrupted before GC publication");
+    const result = await commitGcOperation({
+      ctx: this.ctx,
+      operationId,
+      claimId,
+      logger: this.logger,
+    });
+    if (
+      result.status === "committed" &&
+      (await consumeGcFault(this.ctx, this.env, operationId, "after-publication"))
+    )
+      throw new Error("qualification interrupted after GC publication");
+    return result;
+  }
+
+  public async gcDiscardKeys(operationId: string, claimId: string) {
+    return gcDiscardKeys(this.ctx, operationId, claimId);
   }
 
   public async commitReachabilityGc(args: {

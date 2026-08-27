@@ -6,6 +6,8 @@ import { clearQualificationSnapshotProjectionState } from "./acceptedWrites";
 import { pruneRepositoryActivityLeases } from "./repositoryLifecycle";
 import { asTypedStorage, type RepoStateSchema } from "./repoState";
 import { COMPACT_LEASE_TTL_MS } from "./catalog/shared";
+import type { GcOperation } from "@/worker/git/maintenance/gcOperation";
+import { GC_OPERATION_KEY, isGcTerminal } from "./catalog/gcOperation";
 
 export const QUALIFICATION_REPOSITORY_SCHEMA_VERSION = 1;
 
@@ -26,6 +28,7 @@ const TRANSIENT_KEYS = [
   "stockReceiveRecoveryLease",
   "reachabilityGcPending",
   "compactionWantedAt",
+  GC_OPERATION_KEY,
 ] as const;
 
 export type QualificationRepositoryInventory = {
@@ -61,6 +64,13 @@ async function transientKeys(storage: QualificationStorageReader): Promise<strin
     for (const key of (await storage.list({ prefix })).keys()) keys.add(key);
   }
   for (const key of TRANSIENT_KEYS) {
+    if (key === GC_OPERATION_KEY) {
+      const operation = await storage.get<GcOperation>(key);
+      // The bounded terminal receipt and admission tombstones are durable
+      // replay metadata, not an unfinished writer or staging obligation.
+      if (operation && !isGcTerminal(operation)) keys.add(key);
+      continue;
+    }
     if ((await storage.get(key)) !== undefined) keys.add(key);
   }
   return [...keys].sort();
@@ -96,6 +106,9 @@ export async function resetQualificationRepositoryState(
     if ((await transaction.get("reachabilityGcPending")) !== undefined) {
       return { schemaVersion: 1, status: "conflict", reason: "active" };
     }
+    const gc = await transaction.get<GcOperation>(GC_OPERATION_KEY);
+    if (gc && !isGcTerminal(gc)) return { schemaVersion: 1, status: "conflict", reason: "active" };
+    if (gc) await transaction.delete(GC_OPERATION_KEY);
     // A queued request has no authority once every repository lease is idle.
     // Clear it in this exact-ref transaction so a waiting queue message sees
     // no work; an already-started worker would have held a lease above.
@@ -106,16 +119,20 @@ export async function resetQualificationRepositoryState(
     );
     const keys = await transientKeys(transaction);
     if (keys.length === 0) {
-      if (deletedProjectionCount === 0) {
+      if (deletedProjectionCount === 0 && !gc) {
         return { schemaVersion: 1, status: "already_reset", deletedStateCount: 0 };
       }
-      return { schemaVersion: 1, status: "reset", deletedStateCount: deletedProjectionCount };
+      return {
+        schemaVersion: 1,
+        status: "reset",
+        deletedStateCount: deletedProjectionCount + (gc ? 1 : 0),
+      };
     }
     await transaction.delete(keys);
     return {
       schemaVersion: 1,
       status: "reset",
-      deletedStateCount: keys.length + deletedProjectionCount,
+      deletedStateCount: keys.length + deletedProjectionCount + (gc ? 1 : 0),
     };
   });
 }

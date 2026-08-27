@@ -98,7 +98,7 @@ function retryResult(log: Logger, reason: string): ReachabilityGcResult {
   return { status: "retry", reason };
 }
 
-async function publishPendingGeneration(args: {
+export async function publishPendingGeneration(args: {
   env: Env;
   repoId: string;
   stub: DurableObjectStub<RepoDurableObject>;
@@ -151,7 +151,7 @@ async function publishPendingGeneration(args: {
   }
 }
 
-async function scheduleSupersededPackCleanup(args: {
+export async function scheduleSupersededPackCleanup(args: {
   env: Env;
   repoId: string;
   packKeys: string[];
@@ -203,7 +203,7 @@ async function scheduleSupersededPackCleanup(args: {
   }
 }
 
-async function reconcilePriorCleanup(args: {
+export async function reconcilePriorCleanup(args: {
   env: Env;
   repoId: string;
   stub: DurableObjectStub<RepoDurableObject>;
@@ -223,7 +223,7 @@ async function reconcilePriorCleanup(args: {
   return retryResult(args.log, scheduled ? "cleanup-scheduled" : "cleanup-enqueue-failed");
 }
 
-async function reconcilePendingGc(args: {
+export async function reconcilePendingGc(args: {
   env: Env;
   stub: DurableObjectStub<RepoDurableObject>;
   limiter: Limiter;

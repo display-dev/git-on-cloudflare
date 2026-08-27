@@ -32,7 +32,9 @@ function keyRole(props: RepositoryContainerBridgeProps, key: string): string {
   const readIndex = props.readKeys.findIndex((entry) => entry.key === key);
   if (readIndex >= 0) return readIndex === 0 ? "input" : "active-catalog";
   const writeIndex = props.writeKeys.findIndex((entry) => entry.key === key);
-  return writeIndex >= 0 ? ["output-pack", "output-index", "output-refs"][writeIndex]! : "unknown";
+  return writeIndex >= 0
+    ? (["output-pack", "output-index", "output-refs", "output-receipt"][writeIndex] ?? "unknown")
+    : "unknown";
 }
 
 async function writeFixedLengthBody(
@@ -191,7 +193,7 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
       const [pipeResult, putResult] = await Promise.allSettled([pipePromise, putPromise]);
       const createdByInvocation = putResult.status === "fulfilled" && putResult.value !== null;
       if (pipeResult.status === "rejected" || putResult.status === "rejected") {
-        if (createdByInvocation) {
+        if (createdByInvocation && !this.ctx.props.durableOutputOwner) {
           await this.limiter
             .run("r2:container-bridge-delete-rejected", () => this.env.REPO_BUCKET.delete(key))
             .catch(() => {});
@@ -210,7 +212,7 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
       if (digest) {
         computedSha256 = bytesToHex(new Uint8Array(await digest.digest));
         if (computedSha256 !== declaredSha256) {
-          if (createdByInvocation) {
+          if (createdByInvocation && !this.ctx.props.durableOutputOwner) {
             await this.limiter.run("r2:container-bridge-delete-digest-mismatch", () =>
               this.env.REPO_BUCKET.delete(key)
             );
@@ -253,7 +255,7 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
         stored.size !== bytes ||
         (this.ctx.props.requireWriteSha256 && stored.customMetadata?.sha256 !== declaredSha256)
       ) {
-        if (createdByInvocation) {
+        if (createdByInvocation && !this.ctx.props.durableOutputOwner) {
           await this.limiter.run("r2:container-bridge-delete-invalid", () =>
             this.env.REPO_BUCKET.delete(key)
           );

@@ -21,6 +21,12 @@ import {
 import { activeLeaseOrUndefined } from "./activity";
 import { rowsMatchForCommit } from "./compaction/plan";
 import { EXPIRED_WRITER_DRAIN_MS } from "../repositoryLifecycle";
+import {
+  GC_OPERATION_KEY,
+  GC_WAKE_DELAY_MS,
+  type GcOperation,
+  type GcCommit,
+} from "@/worker/git/maintenance/gcOperation";
 
 export type BeginReachabilityGcResult =
   | {
@@ -291,6 +297,8 @@ export async function commitReachabilityGcState(args: {
     objectCount: number;
   };
   logger?: Logger;
+  gcOperationId?: string;
+  gcClaimId?: string;
 }): Promise<CommitReachabilityGcResult> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
   const db = getDb(args.ctx.storage);
@@ -342,24 +350,44 @@ export async function commitReachabilityGcState(args: {
     if (currentVersion <= args.packsetVersion + 1) {
       await store.delete("compactionWantedAt");
     }
+    const committed: GcCommit = {
+      status: "committed",
+      packCatalogVersion,
+      supersededPackKeys: sourcePackKeys,
+      targetPackKey: expectedTargetKey ?? undefined,
+    };
+    await retainGcCommitReceipt(args.ctx, args.gcOperationId, args.token, committed);
     await clearGcAttemptState(args.ctx, args.token);
     args.logger?.info("reachability-gc:commit-reconciled", {
       sourcePackCount: args.sourcePacks.length,
       targetPackKey: expectedTargetKey ?? undefined,
       packCatalogVersion,
     });
-    return {
-      status: "committed",
-      packCatalogVersion,
-      supersededPackKeys: sourcePackKeys,
-      targetPackKey: expectedTargetKey ?? undefined,
-    };
+    return committed;
   }
 
   const fence = await args.ctx.storage.transaction(async (transaction) => {
     const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
     if (await transactionStore.get("repositoryDeleting")) return "repository-deleting";
     const now = Date.now();
+    if (args.gcOperationId) {
+      const operation = await transaction.get<GcOperation>(GC_OPERATION_KEY);
+      if (
+        operation?.id !== args.gcOperationId ||
+        operation.phase !== "publish" ||
+        !operation.claim ||
+        operation.claim.id !== args.gcClaimId ||
+        operation.claim.expiresAt <= now
+      )
+        return "lease-mismatch";
+      // Reconciliation above already recognizes a committed replacement. If
+      // another writer advanced an uncommitted source after our lease expired,
+      // report the conclusive conflict rather than retrying a missing lease.
+      if (((await transactionStore.get("refsVersion")) ?? 0) !== args.refsVersion)
+        return "refs-changed";
+      if (((await transactionStore.get("packsetVersion")) ?? 0) !== args.packsetVersion)
+        return "packset-changed";
+    }
     const lease = await transactionStore.get("compactLease");
     if (
       !lease ||
@@ -415,6 +443,19 @@ export async function commitReachabilityGcState(args: {
   }
 
   let targetPack: PackCatalogRow | undefined = retainedSource;
+  if (sourcePackKeys.length === 0 && !args.stagedPack) {
+    // An already exact catalog is a physical no-op. In particular, do not
+    // advance a version that would make replay of this no-op look stale.
+    const committed: GcCommit = {
+      status: "committed",
+      packCatalogVersion: args.packsetVersion,
+      supersededPackKeys: [],
+      targetPackKey: retainedSource?.packKey,
+    };
+    await retainGcCommitReceipt(args.ctx, args.gcOperationId, args.token, committed);
+    await clearGcAttemptState(args.ctx, args.token);
+    return committed;
+  }
   if (args.stagedPack) {
     let seqLo = args.sourcePacks[0]?.seqLo ?? 0;
     let seqHi = args.sourcePacks[0]?.seqHi ?? 0;
@@ -460,6 +501,13 @@ export async function commitReachabilityGcState(args: {
     activePackKeys: committedActiveCatalog.map((row) => row.packKey),
   });
   await store.delete("compactionWantedAt");
+  const committed: GcCommit = {
+    status: "committed",
+    packCatalogVersion,
+    supersededPackKeys: sourcePackKeys,
+    targetPackKey: targetPack?.packKey,
+  };
+  await retainGcCommitReceipt(args.ctx, args.gcOperationId, args.token, committed);
   await clearGcAttemptState(args.ctx, args.token);
   args.logger?.info("reachability-gc:commit", {
     sourcePackCount: args.sourcePacks.length,
@@ -467,10 +515,38 @@ export async function commitReachabilityGcState(args: {
     targetPackKey: targetPack?.packKey,
     packCatalogVersion,
   });
-  return {
-    status: "committed",
-    packCatalogVersion,
-    supersededPackKeys: sourcePackKeys,
-    targetPackKey: targetPack?.packKey,
-  };
+  return committed;
+}
+
+async function retainGcCommitReceipt(
+  ctx: DurableObjectState,
+  operationId: string | undefined,
+  token: string,
+  committed: GcCommit
+): Promise<void> {
+  if (!operationId) return;
+  // Do this before releasing the source lease or pending-output ownership.
+  // A crash before this write retains the existing catalog reconciliation
+  // evidence; a crash after it has an independent durable outcome receipt.
+  await ctx.storage.transaction(async (transaction) => {
+    const operation = await transaction.get<GcOperation>(GC_OPERATION_KEY);
+    if (!operation || operation.id !== operationId || operation.snapshot?.token !== token)
+      throw new Error("GC committed without its registered owner");
+    if (operation.commit) return;
+    operation.commit = committed;
+    operation.phase = "reclaim";
+    operation.updatedAt = Date.now();
+    const measurement = operation.measurements.publish;
+    if (measurement)
+      operation.measurements.publish = {
+        ...measurement,
+        completedAt: operation.updatedAt,
+        elapsedMs: operation.updatedAt - measurement.startedAt,
+      };
+    delete operation.claim;
+    await transaction.put(GC_OPERATION_KEY, operation);
+    const alarm = await transaction.getAlarm();
+    if (alarm === null || alarm > Date.now() + GC_WAKE_DELAY_MS)
+      await transaction.setAlarm(Date.now() + GC_WAKE_DELAY_MS);
+  });
 }

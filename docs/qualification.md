@@ -142,3 +142,80 @@ storage limits.
 Fixed provider-resource teardown is a separate explicit operator action. An
 ordinary run never deletes the Worker, D1, KV, R2 bucket, Queue, or Container
 configuration.
+
+## Durable reachability GC
+
+GC admission registers one repository-owned operation before writing output.
+The operation binds the protected refs, ref/catalog versions, exact source
+rows, reachable-object digest, staging key, native output triple, and receipt.
+Its phases are `queued`, `rewrite`, `index`, `publish`, `reclaim`, and `complete`.
+An unpublished rejected result drains through `discard` to `blocked`.
+
+Rewriting and native indexing run in separate Queue invocations. Completed
+rewrite identity is durable before native dispatch. A lost upload reply is
+reconciled against that intent and immutable R2 input. Native processing uses
+the existing Container bridge, generates its own index/reference sidecar,
+validates the exact closure, and uploads the unchanged complete pack again.
+The receipt is written last. Retrying indexing first checks that receipt.
+This implementation does not optimize the duplicate upload.
+
+The operation's Durable Object alarm owns wakeups independently of Queue
+retry exhaustion. Expired execution claims wait for the existing writer drain;
+a late worker cannot publish through an expired claim. Publication retains
+the existing lease, refsVersion, packsetVersion, exact source-row, generation,
+reader, and repository-deletion checks. A committed-but-unacknowledged catalog
+change is reconciled before deciding that source versions changed. GC changes
+physical storage, not logical refs or user accepted-write events.
+
+Permanent planner rejection without output releases its source fence. Invalid
+immutable native artifacts and stale unpublished sources enter drained discard.
+Transport failures remain retryable. No unpublished output is deleted until
+ownership, absence from the committed catalog, and writer drain permit it.
+Ordinary queued/rewrite/index work stops after 24 hours from immutable admission
+time and enters that same drained discard path. Qualification can bind a shorter
+deadline. Duplicate deliveries do not reset it. This recovery failsafe is not a
+repository quota or GC latency target; publication/reclamation still reconcile
+authoritative state and reader protection after the deadline.
+Completion requires published generation and physical absence of superseded
+pack/index/reference objects plus staging and receipt cleanup. Existing reader
+leases delay deletion. Per-operation admission tombstones remain to reject
+late duplicate deliveries after the terminal status is reset.
+
+Encoding restrictions remain explicit: rewriting that requires a delta base
+outside the exact reachable closure is rejected. This is not a delta-support
+expansion. The 250-source-pack guard and 64 MiB per-sidecar byte guard are
+implementation safety bounds, not repository quotas. The sidecar cap does not
+bound total Worker memory: both sidecars and derived object sets coexist.
+Large-object-count validation memory remains unqualified.
+
+### Exact-target GC qualification controls
+
+These controls require `QUALIFICATION_MODE=1`, the qualification secret, and
+the configured exact synthetic namespace/repository before object lookup.
+They are disabled by default and return `Cache-Control: no-store`.
+
+- `POST .../gc`: closed schema-v1 `operationId`, `faults`, `holdReader`, and
+  `deadlineAt` admission. Supported one-shot faults are `after-rewrite`,
+  `during-native`, `before-publication`, and `after-publication`.
+- `GET .../gc/:operationId`: sanitized durable status, completed phase costs,
+  native transfer measurements, authoritative publication and R2 source-absence
+  checks. Claims, object keys, credentials, and reader tokens are excluded.
+- `POST .../gc/:operationId/release-reader`: releases only that operation's
+  qualification latch, not the underlying reader/deletion fence.
+- `GET .../gc/:operationId/artifacts/{pack,index,references}`: published output
+  under an ordinary reader lease, for independent empty-store reconstruction.
+- `GET .../gc-source` and `GET .../gc-source/:ordinal/artifacts/:role?generation=N`:
+  bounded current source inventory and generation-bound source downloads.
+
+The reader test uses a real Git request. The latch records an actual blocked
+deletion attempt before release; it cannot manufacture overlap by merely
+registering a reader. The native fault stops only an observed matching native
+operation and records successful Container stop separately from fault intent.
+Qualification deadlines stop starting new rewrite/index work after normal
+claim drain; they do not bypass publication reconciliation or reader fences.
+
+Durable measurements cover completed attempts. Partial work lost to runtime
+termination can be unmetered; request/byte counters are not billed-cost proof.
+The complete 3 GB lifecycle and interruption/reader cases require live
+qualification. Local tests or the earlier isolated native-indexing spike do
+not establish those results.

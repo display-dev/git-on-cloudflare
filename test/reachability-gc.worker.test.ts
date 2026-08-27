@@ -368,22 +368,44 @@ describe("candidate-native repository maintenance", () => {
         }
       );
       expect(response.status).toBe(202);
+      const stub = getRepoStub(env, seeded.doName);
+      const operation = await stub.getGcOperation();
+      if (!operation) throw new Error("GC admission was not durable");
+      expect(await response.json()).toEqual({ status: "queued", operationId: operation.id });
       expect(sendSpy).toHaveBeenCalledWith({
         kind: "reachability-gc",
         doId,
         repoId: seeded.doName,
+        operationId: operation.id,
       });
-      const queueResult = await runQueueMessage({
+      const message = {
         kind: "reachability-gc",
         doId,
         repoId: seeded.doName,
-      });
-      expect(queueResult).toEqual({ acked: true, retried: false });
-      expect(await getRepoStub(env, seeded.doName).getActivePackCatalog()).toHaveLength(1);
+        operationId: operation.id,
+      };
+      expect(await runQueueMessage(message)).toEqual({ acked: false, retried: true });
+      expect((await stub.getGcOperation())?.phase).toBe("publish");
+      expect(await runQueueMessage(message)).toEqual({ acked: false, retried: true });
+      expect((await stub.getGcOperation())?.phase).toBe("reclaim");
+      expect(await runQueueMessage(message)).toEqual({ acked: false, retried: true });
+      expect(await stub.getActivePackCatalog()).toHaveLength(1);
       expect(sendSpy).toHaveBeenCalledWith(
         expect.objectContaining({ kind: "compaction-delete", removeCatalogRows: true }),
         { delaySeconds: 60 }
       );
+      const committed = await stub.getGcOperation();
+      if (!committed?.commit) throw new Error("GC commit receipt missing");
+      expect(
+        await deleteSupersededOnce(
+          seeded.doName,
+          committed.commit.supersededPackKeys,
+          true,
+          committed.commit.packCatalogVersion
+        )
+      ).toEqual({ acked: true, retried: false });
+      expect(await runQueueMessage(message)).toEqual({ acked: true, retried: false });
+      expect((await stub.getGcOperation())?.phase).toBe("complete");
     } finally {
       sendSpy.mockRestore();
     }

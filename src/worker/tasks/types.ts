@@ -30,6 +30,10 @@ export const ReachabilityGcQueueMessageSchema = z.object({
   kind: z.literal("reachability-gc"),
   doId: z.string(),
   repoId: z.string(),
+  operationId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,100}$/)
+    .optional(),
 });
 
 export type ReachabilityGcQueueMessage = z.infer<typeof ReachabilityGcQueueMessageSchema>;

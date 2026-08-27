@@ -1,5 +1,6 @@
 import { getRepoStub, isValidOid, json } from "@/worker/common";
 import { sameOriginViolation } from "@/worker/auth/origin";
+import { gcOperationStatus } from "@/worker/git/maintenance/gcStatus";
 import { safeParseJsonRequest } from "@/shared/web";
 import type { RepositoryDeleteMessage } from "@/worker/tasks/queue";
 import { resolveAdminApiRepoAccess, type AdminRepoAccess } from "./ui/helpers";
@@ -96,15 +97,23 @@ export function registerAdminRoutes(router: AppRouter) {
     const stub = getRepoStub(c.env, route.doName);
     const log = c.var.logFor({ service: "AdminReachabilityGc", repoId: route.doName });
     try {
+      const operationId = crypto.randomUUID();
+      const registered = await limiter.run(
+        "do:admin-register-gc",
+        async () => await stub.registerGcOperation(route.doName, operationId)
+      );
+      if (registered.status !== "ready")
+        return json({ status: registered.status }, 409, { "Cache-Control": "no-store" });
       await limiter.run("queue:admin-reachability-gc", () =>
         c.env.REPO_TASKS_QUEUE.send({
           kind: "reachability-gc",
           doId: stub.id.toString(),
           repoId: route.doName,
+          operationId,
         })
       );
       log.info("admin:reachability-gc-enqueued", { doId: stub.id.toString() });
-      return json({ status: "queued" }, 202, { "Cache-Control": "no-store" });
+      return json({ status: "queued", operationId }, 202, { "Cache-Control": "no-store" });
     } catch (error) {
       log.warn("admin:reachability-gc-enqueue-failed", { error: String(error) });
       return json({ error: "Maintenance queue unavailable" }, 503, {
@@ -112,6 +121,19 @@ export function registerAdminRoutes(router: AppRouter) {
         "Retry-After": "10",
       });
     }
+  });
+
+  router.get(`/:owner/:repo/admin/reachability-gc`, async (c) => {
+    const gate = await requireRepoAdmin(c);
+    if (gate.kind === "response") return gate.response;
+    const operation = await gate.limiter.run("do:admin-gc-status", () =>
+      getRepoStub(c.env, gate.route.doName).getGcOperation()
+    );
+    return json(
+      operation ? gcOperationStatus(operation) : { schemaVersion: 1, status: "none" },
+      200,
+      { "Cache-Control": "no-store" }
+    );
   });
 
   // -------------------------------------------------------------------------

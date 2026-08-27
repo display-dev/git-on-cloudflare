@@ -151,6 +151,29 @@ export async function handleFetchV2Streaming(
   }
   const snapshot = snapshotLoad.snapshot;
 
+  if (env.QUALIFICATION_MODE === "1") {
+    try {
+      // A real reader already owns this snapshot and continues heartbeating.
+      // The exact-target, operation-scoped latch never changes its lease.
+      while (!operationAbort.signal.aborted) {
+        countSubrequest(cacheCtx);
+        const held = await limiter.run("do:gc-reader-latch", () =>
+          repositoryStub.gcReaderLatch(
+            readLease.token,
+            snapshot.packs.map((pack) => pack.packKey)
+          )
+        );
+        if (!held) break;
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        assertReadLeaseHealthy();
+      }
+      operationAbort.signal.throwIfAborted();
+    } catch (error) {
+      await releaseReadLease();
+      throw error;
+    }
+  }
+
   log.info("stream:fetch:snapshot-ready", {
     wants: wants.length,
     haves: haves.length,

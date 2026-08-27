@@ -103,7 +103,7 @@ const stockActivePackReadSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
-const nativeReceiveProcessResultSchema = z
+export const nativeReceiveProcessResultSchema = z
   .object({
     operationId: z.string().min(1),
     packBytes: z.number().int().positive(),
@@ -117,6 +117,21 @@ const nativeReceiveProcessResultSchema = z
     hydratedBytes: z.number().int().nonnegative().default(0),
     downloadedBytes: z.number().int().nonnegative().default(0),
     cacheHitBytes: z.number().int().nonnegative().default(0),
+    maintenance: z
+      .object({
+        objectSetSha256: z.string().regex(/^[a-f0-9]{64}$/),
+        downloadMs: z.number().int().nonnegative(),
+        indexMs: z.number().int().nonnegative(),
+        validationMs: z.number().int().nonnegative(),
+        referenceMs: z.number().int().nonnegative(),
+        uploadMs: z.number().int().nonnegative(),
+        downloadBytes: z.number().int().nonnegative(),
+        uploadBytes: z.number().int().nonnegative(),
+        downloadRequests: z.number().int().nonnegative(),
+        uploadRequests: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
     receivePackResponse: z.string().max(1_400_000).optional(),
     inputRequestSha256: z
       .string()
@@ -260,7 +275,7 @@ export const __test = {
   },
 };
 
-class NativeProcessorError extends Error {
+export class NativeProcessorError extends Error {
   readonly retryable: boolean;
   readonly code: string;
 
@@ -1136,10 +1151,11 @@ async function parseBoundedJSON(response: Response): Promise<unknown> {
   }
 }
 
-async function runContainerProcessor(args: {
+export async function runContainerProcessor(args: {
   ctx: DurableObjectState;
   request: NativeReceiveProcessRequest;
   bridgeProps: RepositoryContainerBridgeProps;
+  onReady?: (wasRunning: boolean) => Promise<void>;
 }): Promise<NativeReceiveProcessResult> {
   const processorAbort = new AbortController();
   const processorKey = args.ctx.id.toString();
@@ -1150,6 +1166,7 @@ async function runContainerProcessor(args: {
   ]);
   if (nativeProcessorForTesting) {
     try {
+      await args.onReady?.(false);
       const result = await nativeProcessorForTesting({ ...args, signal });
       const parsed = nativeReceiveProcessResultSchema.safeParse(result);
       if (!parsed.success || parsed.data.operationId !== args.request.operationId) {
@@ -1176,6 +1193,7 @@ async function runContainerProcessor(args: {
   }
 
   const container = repositoryContainer(args.ctx);
+  const wasRunning = container.running;
   const bridge = args.ctx.exports.RepositoryContainerBridge({ props: args.bridgeProps });
   await container.interceptOutboundHttp("repo-r2.internal", bridge);
   if (!container.running) {
@@ -1184,6 +1202,7 @@ async function runContainerProcessor(args: {
 
   try {
     await waitForContainerReady(container);
+    await args.onReady?.(wasRunning);
     const response = await container.getTcpPort(CONTAINER_PORT).fetch("http://container/process", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

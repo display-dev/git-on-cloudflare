@@ -6,6 +6,7 @@ import type { QualificationResetResult } from "@/worker/do/repo/qualification";
 import { isValidNativeReceiveOperationId } from "@/worker/git/nativeReceive/types";
 import type { AppContext, AppRouter } from "./hono";
 import { recoverQualificationStorage } from "@/worker/git/maintenance/qualificationStorageRecovery";
+import { registerQualificationGcRoutes } from "./qualificationGc";
 
 const QUALIFICATION_SCHEMA_VERSION = 2;
 const SYNTHETIC_NAMESPACE = /^qual-[a-f0-9]{32,64}$/;
@@ -185,6 +186,10 @@ async function readResetRequest(request: Request): Promise<{
 }
 
 export function registerQualificationRoutes(router: AppRouter): void {
+  registerQualificationGcRoutes(router, {
+    authorize: authorizeQualification,
+    resolveTarget: resolveQualificationTarget,
+  });
   router.post("/_internal/qualification/:owner/:repo/storage-recovery", async (c) => {
     const denied = await authorizeQualification(c);
     if (denied) return denied;
@@ -299,11 +304,23 @@ export function registerQualificationRoutes(router: AppRouter): void {
       return json(result, 409, { "Cache-Control": "no-store" });
     }
     try {
+      const operationId = crypto.randomUUID();
+      const registered = await c.var.limiter.run(
+        "do:qualification-register-gc",
+        async () => await stub.registerGcOperation(route.doName, operationId)
+      );
+      if (registered.status !== "ready")
+        return json(
+          { schemaVersion: 1, status: "inconclusive", reason: "gc_operation_busy" },
+          503,
+          { "Cache-Control": "no-store" }
+        );
       await c.var.limiter.run("queue:qualification-reachability-gc", () =>
         c.env.REPO_TASKS_QUEUE.send({
           kind: "reachability-gc",
           doId: stub.id.toString(),
           repoId: route.doName,
+          operationId,
         })
       );
     } catch (error) {
