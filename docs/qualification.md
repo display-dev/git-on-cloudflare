@@ -195,6 +195,14 @@ excludes competing maintenance, not ordinary receives. Rewriting, indexing and
 expired-claim/drain waits leave receive admission open. Old operations without
 the optional coordination record retain their original exclusive behavior.
 
+Open receive admission is not proof of native execution availability. Default
+ordinary receives and GC indexing currently share the repository Container's
+single `/process` slot and operation-scoped outbound R2 bridge. The foreground
+qualification observed a receive failure during indexing. The separate stock
+framed-stream host remains zero-authority; it is not a second default receive
+processor. Whole-path availability requires a separately reviewed execution
+isolation contract, not just the source-protection changes described here.
+
 Receive finalization accounts ref/catalog versions in the existing ref CAS.
 Before acknowledging a generic receive, metadata-only reachability subtraction
 protects any newly referenced source objects and external encoding bases. Normal
