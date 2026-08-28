@@ -26,6 +26,33 @@ type Guards = {
 };
 
 export function registerQualificationGcRoutes(router: AppRouter, guards: Guards): void {
+  router.post("/_internal/qualification/:owner/:repo/gc-source/settle", async (c) => {
+    const denied = await guards.authorize(c);
+    if (denied) return denied;
+    const size = Number(c.req.header("Content-Length"));
+    if (!Number.isSafeInteger(size) || size < 1 || size > 256)
+      return json({ status: "rejected" }, 400);
+    const request = z
+      .object({
+        schemaVersion: z.literal(1),
+        expectedRefStateDigest: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!request.success) return json({ status: "rejected" }, 400);
+    const route = await guards.resolveTarget(c);
+    if (!route) return new Response("Not found\n", { status: 404 });
+    const result = await c.var.limiter.run(
+      "do:qualification-settle-compaction",
+      async () =>
+        await getRepoStub(c.env, route.doName).settleQualificationCompaction(
+          request.data.expectedRefStateDigest
+        )
+    );
+    return json(result, result.status === "request-cleared" ? 200 : 409, {
+      "Cache-Control": "no-store",
+    });
+  });
   router.get("/_internal/qualification/:owner/:repo/gc-source", async (c) => {
     const denied = await guards.authorize(c);
     if (denied) return denied;

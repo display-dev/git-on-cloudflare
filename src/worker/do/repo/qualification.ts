@@ -44,6 +44,37 @@ export type QualificationResetResult =
   | { schemaVersion: 1; status: "reset" | "already_reset"; deletedStateCount: number }
   | { schemaVersion: 1; status: "conflict"; reason: "active" | "ref_state_mismatch" };
 
+// Setup/teardown only: stop queued compaction retries without cancelling a
+// processor or releasing its lease. Measured GC always retains pending demand.
+export async function settleQualificationCompaction(
+  ctx: DurableObjectState,
+  env: Env,
+  expectedRefStateDigest: string
+) {
+  if (env.QUALIFICATION_MODE !== "1" || !env.QUALIFICATION_SECRET)
+    return { schemaVersion: 1 as const, status: "conflict" as const };
+  return ctx.storage.transaction(async (transaction) => {
+    const refs = (await transaction.get<Array<{ name: string; oid: string }>>("refs")) ?? [];
+    const gc = await transaction.get<GcOperation>(GC_OPERATION_KEY);
+    if (
+      (await transaction.get("repositoryDeleting")) ||
+      (gc && !isGcTerminal(gc)) ||
+      (await refStateDigest(refs)) !== expectedRefStateDigest
+    )
+      return { schemaVersion: 1 as const, status: "conflict" as const };
+    const cleared = (await transaction.get("compactionWantedAt")) !== undefined;
+    await transaction.delete("compactionWantedAt");
+    return {
+      schemaVersion: 1 as const,
+      status: "request-cleared" as const,
+      cleared,
+      writerActive: Boolean(
+        (await transaction.get("receiveLease")) || (await transaction.get("compactLease"))
+      ),
+    };
+  });
+}
+
 async function refStateDigest(refs: Array<{ name: string; oid: string }>): Promise<string> {
   const canonical = refs
     .map((ref) => `${ref.name}\0${ref.oid}\n`)

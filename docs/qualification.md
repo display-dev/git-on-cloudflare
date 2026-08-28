@@ -255,3 +255,13 @@ termination can be unmetered; request/byte counters are not billed-cost proof.
 The complete 3 GB lifecycle and interruption/reader cases require live
 qualification. Local tests or the earlier isolated native-indexing spike do
 not establish those results.
+
+Foreground setup and operator teardown may call the disabled-by-default
+`POST /_internal/qualification/:owner/:repo/gc-source/settle` control with schema 1
+and the exact current `expectedRefStateDigest`. It cancels only pending ordinary
+compaction demand. Active GC or repository deletion rejects the request;
+receive/compaction leases, claims, readers, catalogs and refs are unchanged.
+The response distinguishes request cancellation from an active writer, which
+must still finish or drain normally. This is not automatic GC recovery and must
+not be used during measured GC. New foreground receives can request compaction
+again; GC preserves that demand through reclamation.

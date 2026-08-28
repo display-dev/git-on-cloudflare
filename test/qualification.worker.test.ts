@@ -407,6 +407,11 @@ describe("qualification repository controls", () => {
   });
 
   it("is absent by default and authenticates before repository lookup", async () => {
+    const settleInit = {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": "0" },
+    };
+    expect((await qualificationRequest("/gc-source/settle", settleInit)).status).toBe(404);
     const disabled = await qualificationRequest();
     expect(disabled.status).toBe(404);
     expect(disabled.headers.get("Cache-Control")).toBe("no-store");
@@ -418,6 +423,27 @@ describe("qualification repository controls", () => {
     expect(disabledObserver.status).toBe(404);
     expect(disabledObserver.headers.get("Cache-Control")).toBe("no-store");
     await enabled(async () => {
+      expect(
+        (await qualificationRequest("/gc-source/settle", settleInit, "wrong-secret")).status
+      ).toBe(401);
+      expect((await qualificationRequest("/gc-source/settle", settleInit)).status).toBe(400);
+      const invalid = JSON.stringify({
+        schemaVersion: 1,
+        expectedRefStateDigest: "a".repeat(64),
+        extra: true,
+      });
+      expect(
+        (
+          await qualificationRequest("/gc-source/settle", {
+            method: "POST",
+            body: invalid,
+            headers: {
+              "Content-Type": "application/json",
+              "Content-Length": String(invalid.length),
+            },
+          })
+        ).status
+      ).toBe(400);
       const denied = await qualificationRequest("", {}, "wrong-secret");
       expect(denied.status).toBe(401);
       expect(denied.headers.get("Cache-Control")).toBe("no-store");

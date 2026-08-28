@@ -15,6 +15,10 @@ import { buildPack, buildAppendOnlyDelta, uniqueRepoId } from "./util/test-helpe
 import { buildTreePayload, seedPackedRepoState } from "./util/packed-repo";
 import { indexTestPack } from "./util/test-indexer";
 import { runQueueMessage } from "./util/queue";
+import {
+  getQualificationRepositoryInventory,
+  settleQualificationCompaction,
+} from "@/worker/do/repo/qualification";
 
 const encode = (text: string) => new TextEncoder().encode(text);
 
@@ -111,6 +115,58 @@ async function receive(
 }
 
 describe("GC source protection and foreground publication", () => {
+  it("settles only pending setup compaction without releasing writers or readers", async () => {
+    const stub = getRepoStub(env, uniqueRepoId("settle-setup"));
+    await runInDurableObject(stub, async (_instance, ctx) => {
+      const fixtureEnv = { ...env, QUALIFICATION_MODE: "1", QUALIFICATION_SECRET: "test" };
+      const lease = {
+        token: "active",
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 1_200_000,
+        operation: "compaction",
+      };
+      await ctx.storage.put({
+        refs: [],
+        compactionWantedAt: 1,
+        compactLease: lease,
+        receiveLease: { ...lease, operation: "receive" },
+        "read:protected": { expiresAt: Date.now() + 900_000 },
+      });
+      const digest = (await getQualificationRepositoryInventory(ctx)).refStateDigest;
+      const before = await ctx.storage.list();
+      expect(await settleQualificationCompaction(ctx, env, digest)).toMatchObject({
+        status: "conflict",
+      });
+      expect(await settleQualificationCompaction(ctx, fixtureEnv, "0".repeat(64))).toMatchObject({
+        status: "conflict",
+      });
+      expect(await ctx.storage.list()).toEqual(before);
+      await ctx.storage.put(GC_OPERATION_KEY, { id: "measured", phase: "queued" });
+      expect(await settleQualificationCompaction(ctx, fixtureEnv, digest)).toMatchObject({
+        status: "conflict",
+      });
+      expect(await ctx.storage.get("compactionWantedAt")).toBe(1);
+      await ctx.storage.delete(GC_OPERATION_KEY);
+      await ctx.storage.put("repositoryDeleting", true);
+      expect(await settleQualificationCompaction(ctx, fixtureEnv, digest)).toMatchObject({
+        status: "conflict",
+      });
+      await ctx.storage.delete("repositoryDeleting");
+      expect(await settleQualificationCompaction(ctx, fixtureEnv, digest)).toEqual({
+        schemaVersion: 1,
+        status: "request-cleared",
+        cleared: true,
+        writerActive: true,
+      });
+      before.delete("compactionWantedAt");
+      expect(await ctx.storage.list()).toEqual(before);
+      expect(await settleQualificationCompaction(ctx, fixtureEnv, digest)).toMatchObject({
+        status: "request-cleared",
+        cleared: false,
+        writerActive: true,
+      });
+    });
+  });
   it("holds only the designated real reader, including newer packs during publication", async () => {
     const f = await fixture();
     await runInDurableObject(f.stub, async (_instance, state) => {

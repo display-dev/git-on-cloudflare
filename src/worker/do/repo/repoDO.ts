@@ -43,6 +43,7 @@ import { clearRepositoryStorage, removePack, type RemovePackResult } from "./pac
 import {
   getQualificationRepositoryInventory,
   resetQualificationRepositoryState,
+  settleQualificationCompaction,
   beginQualificationStorageRecovery,
   type QualificationRepositoryInventory,
   type QualificationResetResult,
@@ -590,6 +591,20 @@ export class RepoDurableObject extends DurableObject {
 
   public async getQualificationGcSource() {
     return getQualificationGcSource(this.ctx, this.env);
+  }
+
+  public async settleQualificationCompaction(expectedRefStateDigest: string) {
+    const result = await settleQualificationCompaction(this.ctx, this.env, expectedRefStateDigest);
+    if (result.status === "request-cleared") {
+      this.logger.info("qualification:compaction-demand-settled", {
+        status: result.status,
+        cleared: result.cleared,
+        writerActive: result.writerActive,
+      });
+    } else {
+      this.logger.debug("qualification:compaction-settlement-rejected", { status: result.status });
+    }
+    return result;
   }
 
   public async claimGcOperation(operationId: string) {
