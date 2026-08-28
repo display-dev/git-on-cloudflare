@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 
-import { getRepoStub } from "@/worker/common";
+import { createLogger, getRepoStub } from "@/worker/common";
 import { doPrefix } from "@/worker/keys";
 import { getDb, upsertPackCatalogRow, deletePackCatalogRows } from "@/worker/do/repo/db";
 import { setupRepoForTests } from "./util/repoSeed";
-import { runDOWithRetry, withEnvOverrides } from "./util/test-helpers";
+import { buildPack, runDOWithRetry, withEnvOverrides } from "./util/test-helpers";
 import { runQueueMessage } from "./util/queue";
+import { seedPackedRepoState } from "./util/packed-repo";
+import { publishRepositoryGeneration } from "@/worker/git/generation/publish";
+import { SubrequestLimiter } from "@/worker/git/operations/limits";
 
 const namespace = `qual-${"a".repeat(32)}`;
 const repository = `repo-${"b".repeat(24)}`;
@@ -41,6 +44,70 @@ async function enabled<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 describe("qualification repository controls", () => {
+  it.each(["complete", "cancel"])(
+    "streams a published GC artifact with runtime-preserved length and releases its reader on %s",
+    async (ending) => {
+      const artifactNamespace = `qual-${crypto.randomUUID().replaceAll("-", "")}`;
+      const repo = await setupRepoForTests(env, artifactNamespace, repository, {
+        doName: `repo:qualification-artifact-${crypto.randomUUID()}`,
+      });
+      const stub = getRepoStub(env, repo.doName);
+      const payload = new Uint8Array(1024 * 1024);
+      for (let offset = 0; offset < payload.byteLength; offset += 65536)
+        crypto.getRandomValues(payload.subarray(offset, offset + 65536));
+      const pack = await buildPack([{ type: "blob", payload }]);
+      const seeded = await seedPackedRepoState({
+        env,
+        repoId: repo.doName,
+        getStub: () => stub,
+        packs: [{ name: "artifact.pack", packBytes: pack }],
+      });
+      await publishRepositoryGeneration({
+        env,
+        doId: stub.id.toString(),
+        generation: 1,
+        activePackKeys: seeded.packKeys,
+        limiter: new SubrequestLimiter(6),
+        countSubrequest: () => {},
+        log: createLogger("error", { service: "QualificationArtifactTest" }),
+      });
+      await enabled(async () =>
+        withEnvOverrides(env, { QUALIFICATION_NAMESPACE: artifactNamespace }, async () => {
+          const artifactRequest = (generation: number) =>
+            workerExports.default.fetch(
+              `https://example.com/_internal/qualification/${artifactNamespace}/${repository}/gc-source/0/artifacts/pack?generation=${generation}`,
+              { headers: { Authorization: `Bearer ${secret}` } }
+            );
+          expect((await artifactRequest(2)).status).toBe(409);
+          const response = await artifactRequest(1);
+          expect(response.status).toBe(200);
+          expect(response.headers.get("Content-Length")).toBe(String(pack.byteLength));
+          expect(response.headers.get("Cache-Control")).toBe("no-store");
+          if (ending === "complete")
+            expect(new Uint8Array(await response.arrayBuffer())).toEqual(pack);
+          else {
+            const reader = response.body!.getReader();
+            expect((await reader.read()).done).toBe(false);
+            await runDOWithRetry(
+              () => stub,
+              async (_, state) => {
+                expect(await state.storage.get("repositoryReadLeases")).toBeDefined();
+              }
+            );
+            await reader.cancel();
+          }
+          await vi.waitFor(async () =>
+            runDOWithRetry(
+              () => stub,
+              async (_, state) => {
+                expect(await state.storage.get("repositoryReadLeases")).toBeUndefined();
+              }
+            )
+          );
+        })
+      );
+    }
+  );
   it("admits only a closed exact-target GC request and exposes no private output keys", async () => {
     const seeded = await setupRepoForTests(env, namespace, repository, {
       doName: `repo:qualification-gc-${crypto.randomUUID()}`,

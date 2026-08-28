@@ -253,11 +253,25 @@ export function registerQualificationGcRoutes(router: AppRouter, guards: Guards)
           }
         },
         async cancel() {
-          await reader.cancel();
+          await reader.cancel().catch(() => {});
           await release();
         },
       });
-      return new Response(body, {
+      // Workers derives Content-Length from the body type, ignoring a manually
+      // set header on a generic stream. Keep the lease-aware source streaming
+      // through a fixed-length body so the operator can verify exact transfer.
+      const fixed = new FixedLengthStream(object.size);
+      c.executionCtx.waitUntil(
+        body.pipeTo(fixed.writable).catch(() => {
+          c.var
+            .logFor({ service: "QualificationGc" })
+            .warn("qualification-gc:artifact-stream-failed", {
+              role,
+              bytes: object.size,
+            });
+        })
+      );
+      return new Response(fixed.readable, {
         headers: {
           "Content-Type": "application/octet-stream",
           "Content-Length": String(object.size),
