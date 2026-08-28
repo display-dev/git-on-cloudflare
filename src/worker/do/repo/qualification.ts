@@ -28,6 +28,8 @@ const TRANSIENT_KEYS = [
   "stockReceiveRecoveryLease",
   "reachabilityGcPending",
   "compactionWantedAt",
+  "nativeInputHold:foreground",
+  "nativeInputHold:maintenance",
   GC_OPERATION_KEY,
 ] as const;
 

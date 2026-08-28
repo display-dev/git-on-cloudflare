@@ -78,6 +78,16 @@ export async function pruneRepositoryActivityLeases(
   const recoveryActive = !!recoveryLease && recoveryLease.expiresAt > now;
   const receiveActive = writerMayStillBeDraining(await store.get("receiveLease"), now);
   const compactActive = writerMayStillBeDraining(await store.get("compactLease"), now);
+  // Execution revocation and Container termination do not cancel an R2 write
+  // already accepted by the bridge. Keep its independent drain in deletion.
+  const nativeExecutions = [
+    await store.get("nativeExecution:foreground"),
+    await store.get("nativeExecution:maintenance"),
+  ];
+  const executionActive = nativeExecutions.some(
+    (record) =>
+      record && (record.state === "active" || record.stopPending || record.drainUntil > now)
+  );
 
   if (snapshotLeases.length > 0) await store.put("snapshotMaterializationLeases", snapshotLeases);
   else await store.delete("snapshotMaterializationLeases");
@@ -94,6 +104,7 @@ export async function pruneRepositoryActivityLeases(
   return (
     !receiveActive &&
     !compactActive &&
+    !executionActive &&
     !nativeReaderActive &&
     !recoveryActive &&
     readLeases.length === 0 &&

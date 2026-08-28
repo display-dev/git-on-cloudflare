@@ -147,6 +147,12 @@ export type SnapshotCurrent = {
 };
 
 export type RepoStateSchema = {
+  "nativeExecution:foreground":
+    | import("@/worker/git/nativeReceive/execution").NativeExecutionRecord
+    | undefined;
+  "nativeExecution:maintenance":
+    | import("@/worker/git/nativeReceive/execution").NativeExecutionRecord
+    | undefined;
   refs: Ref[];
   head: Head;
   refsVersion: number;

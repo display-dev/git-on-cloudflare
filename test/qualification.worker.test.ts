@@ -412,6 +412,8 @@ describe("qualification repository controls", () => {
       headers: { "Content-Type": "application/json", "Content-Length": "0" },
     };
     expect((await qualificationRequest("/gc-source/settle", settleInit)).status).toBe(404);
+    expect((await qualificationRequest("/native-executions")).status).toBe(404);
+    expect((await qualificationRequest("/native-executions", settleInit)).status).toBe(404);
     const disabled = await qualificationRequest();
     expect(disabled.status).toBe(404);
     expect(disabled.headers.get("Cache-Control")).toBe("no-store");
@@ -423,6 +425,38 @@ describe("qualification repository controls", () => {
     expect(disabledObserver.status).toBe(404);
     expect(disabledObserver.headers.get("Cache-Control")).toBe("no-store");
     await enabled(async () => {
+      expect((await qualificationRequest("/native-executions", {}, "wrong-secret")).status).toBe(
+        401
+      );
+      expect(
+        (await qualificationRequest("/native-executions", settleInit, "wrong-secret")).status
+      ).toBe(401);
+      for (const extra of [
+        { objectKey: "not-accepted" },
+        { providerId: "not-accepted" },
+        { claimId: "not-accepted" },
+      ]) {
+        const body = JSON.stringify({
+          schemaVersion: 1,
+          action: "cancel",
+          lane: "maintenance",
+          operationId: "test",
+          generation: 1,
+          ...extra,
+        });
+        expect(
+          (
+            await qualificationRequest("/native-executions", {
+              method: "POST",
+              body,
+              headers: {
+                "Content-Type": "application/json",
+                "Content-Length": String(body.length),
+              },
+            })
+          ).status
+        ).toBe(400);
+      }
       expect(
         (await qualificationRequest("/gc-source/settle", settleInit, "wrong-secret")).status
       ).toBe(401);

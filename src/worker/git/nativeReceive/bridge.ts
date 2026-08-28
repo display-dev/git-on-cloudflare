@@ -4,6 +4,7 @@ import { createLogger } from "@/worker/common/logger";
 import { bytesToHex, createDigestStream } from "@/worker/common";
 import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits";
 import type { RepositoryContainerBridgeProps } from "./types";
+import { nativeBridgeGrantDigest } from "./execution";
 
 const BRIDGE_PATH_PREFIX = "/r2/";
 
@@ -105,6 +106,22 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
     const log = createLogger(this.env.LOG_LEVEL, {
       service: "RepositoryContainerBridge",
     });
+    const execution = this.ctx.props.execution;
+    if (execution) {
+      const validGrant =
+        execution.operationId === this.ctx.props.operationId &&
+        execution.grantSha256 === (await nativeBridgeGrantDigest(this.ctx.props));
+      const owner = this.env.REPO_DO.get(this.env.REPO_DO.idFromString(execution.repositoryId));
+      if (
+        !validGrant ||
+        !(await this.limiter.run("do:native-bridge-authorize", () =>
+          owner.authorizeNativeExecution(execution)
+        ))
+      ) {
+        log.warn("container-bridge:execution-revoked", { generation: execution.generation });
+        return new Response("Execution unavailable\n", { status: 409 });
+      }
+    }
     const key = decodeKey(new URL(request.url).pathname);
     if (!key) {
       log.warn("container-bridge:invalid-key", {
@@ -142,6 +159,28 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
         keyRole: keyRole(this.ctx.props, key),
         bytes: object.size,
       });
+      if (execution) {
+        const owner = this.env.REPO_DO.get(this.env.REPO_DO.idFromString(execution.repositoryId));
+        await this.limiter.run("do:native-bridge-read-observed", () =>
+          owner.noteNativeBridgeIO(execution, "read", object.size)
+        );
+        // This exact-job, default-off latch holds a real R2 response after native
+        // Git requested it. It expires after at most two minutes; no claim or
+        // reader/drain duration is changed. Count is declared payload, not bytes
+        // proven consumed by the native client.
+        while (
+          await this.limiter.run("do:native-input-hold", () => owner.nativeInputHeld(execution))
+        )
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        if (
+          !(await this.limiter.run("do:native-bridge-recheck", () =>
+            owner.authorizeNativeExecution(execution)
+          ))
+        ) {
+          await object.body.cancel();
+          return new Response("Execution unavailable\n", { status: 409 });
+        }
+      }
       return new Response(object.body, {
         headers: {
           "Content-Type": "application/octet-stream",
@@ -273,6 +312,12 @@ export class RepositoryContainerBridge extends WorkerEntrypoint<
         keyRole: keyRole(this.ctx.props, key),
         bytes,
       });
+      if (execution) {
+        const owner = this.env.REPO_DO.get(this.env.REPO_DO.idFromString(execution.repositoryId));
+        await this.limiter.run("do:native-bridge-write-observed", () =>
+          owner.noteNativeBridgeIO(execution, "write", bytes)
+        );
+      }
       return new Response(null, {
         status: 204,
         headers: stored ? { ETag: stored.etag } : undefined,

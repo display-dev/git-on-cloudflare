@@ -1,4 +1,22 @@
 import type { Logger } from "@/worker/common/logger";
+import type { NativeExecutionIdentity } from "@/worker/git/nativeReceive/execution";
+import {
+  beginNativeExecution,
+  authorizeNativeExecution,
+  finishNativeExecution,
+  nativeExecutionKey,
+  acknowledgeNativeStop,
+} from "./nativeExecution";
+import {
+  startNativeProcessorSlot,
+  finishNativeProcessorSlot,
+  stopNativeProcessorSlot,
+  deleteNativeProcessorSlot,
+} from "../nativeProcessorSlot";
+import type {
+  NativeExecutionRecord,
+  NativeExecutionLane,
+} from "@/worker/git/nativeReceive/execution";
 import type {
   EnqueueNativeReceiveResult,
   MatchNativeReceiveOperationResult,
@@ -236,7 +254,6 @@ let nativeProcessorForTesting: NativeProcessor | undefined;
 let pauseNextBeforeFinalizationForTesting = false;
 let manualWakeupsForTesting = false;
 let failNextAfterEnqueueStoreForTesting = false;
-const activeProcessorAborts = new Map<string, AbortController>();
 
 export const __test = {
   setNativeProcessor(processor: NativeProcessor): void {
@@ -569,28 +586,6 @@ async function publishStockAuthority(args: {
       etag: receiptEtag,
     },
   };
-}
-
-async function storeOperation(
-  storage: DurableObjectStorage,
-  operation: NativeReceiveOperation
-): Promise<void> {
-  await storage.transaction(async (transaction) => {
-    const store = asTypedStorage<RepoStateSchema>(transaction);
-    await store.put(nativeReceiveOperationKey(operation.id), operation);
-    const currentIndex = (await store.get("nativeReceiveOperationIndex")) ?? [];
-    const nextIndex = [...currentIndex.filter((id) => id !== operation.id), operation.id];
-
-    while (nextIndex.length > MAX_RETAINED_OPERATIONS) {
-      const removableIndex = await findOldestTerminalOperationIndex(store, nextIndex);
-      if (removableIndex < 0) {
-        throw new Error("native receive operation ledger has no terminal entry to prune");
-      }
-      const [removedId] = nextIndex.splice(removableIndex, 1);
-      if (removedId) await store.delete(nativeReceiveOperationKey(removedId));
-    }
-    await store.put("nativeReceiveOperationIndex", nextIndex);
-  });
 }
 
 function withEvidenceEvents(
@@ -1153,17 +1148,35 @@ async function parseBoundedJSON(response: Response): Promise<unknown> {
 
 export async function runContainerProcessor(args: {
   ctx: DurableObjectState;
+  execution: NativeExecutionIdentity;
   request: NativeReceiveProcessRequest;
   bridgeProps: RepositoryContainerBridgeProps;
   onReady?: (wasRunning: boolean) => Promise<void>;
 }): Promise<NativeReceiveProcessResult> {
-  const processorAbort = new AbortController();
-  const processorKey = args.ctx.id.toString();
-  activeProcessorAborts.set(processorKey, processorAbort);
-  const signal = AbortSignal.any([
-    processorAbort.signal,
-    AbortSignal.timeout(CONTAINER_PROCESS_TIMEOUT_MS),
-  ]);
+  if (args.request.stockReceive && !nativeProcessorForTesting) {
+    throw new NativeProcessorError(
+      "host_stock_adapter_required",
+      "Stock receive requires the host Git adapter.",
+      false
+    );
+  }
+  const wasRunning = args.ctx.container?.running ?? false;
+  const slotSignal = await startNativeProcessorSlot(args.ctx, args.execution, async () => {
+    if (nativeProcessorForTesting) return;
+    const container = repositoryContainer(args.ctx);
+    const bridge = args.ctx.exports.RepositoryContainerBridge({
+      props: { ...args.bridgeProps, execution: args.execution },
+    });
+    await container.interceptOutboundHttp("repo-r2.internal", bridge);
+    if (!container.running) container.start({ enableInternet: false });
+  });
+  if (!slotSignal)
+    throw new NativeProcessorError(
+      "native_execution_busy",
+      "Native execution slot is already owned.",
+      true
+    );
+  const signal = AbortSignal.any([slotSignal, AbortSignal.timeout(CONTAINER_PROCESS_TIMEOUT_MS)]);
   if (nativeProcessorForTesting) {
     try {
       await args.onReady?.(false);
@@ -1178,27 +1191,11 @@ export async function runContainerProcessor(args: {
       }
       return parsed.data;
     } finally {
-      if (activeProcessorAborts.get(processorKey) === processorAbort) {
-        activeProcessorAborts.delete(processorKey);
-      }
+      await finishNativeProcessorSlot(args.ctx, args.execution);
     }
   }
 
-  if (args.request.stockReceive) {
-    throw new NativeProcessorError(
-      "host_stock_adapter_required",
-      "Stock receive requires the host Git 2.50.1 adapter in this spike.",
-      false
-    );
-  }
-
   const container = repositoryContainer(args.ctx);
-  const wasRunning = container.running;
-  const bridge = args.ctx.exports.RepositoryContainerBridge({ props: args.bridgeProps });
-  await container.interceptOutboundHttp("repo-r2.internal", bridge);
-  if (!container.running) {
-    container.start({ enableInternet: false });
-  }
 
   try {
     await waitForContainerReady(container);
@@ -1228,23 +1225,129 @@ export async function runContainerProcessor(args: {
     return parsed.data;
   } catch (error) {
     if (error instanceof NativeProcessorError) throw error;
+    await stopNativeProcessorSlot(args.ctx, args.execution);
     throw new NativeProcessorError(
       "container_transport_failure",
       "Repository Container request failed.",
       true
     );
   } finally {
-    if (activeProcessorAborts.get(processorKey) === processorAbort) {
-      activeProcessorAborts.delete(processorKey);
-    }
+    await finishNativeProcessorSlot(args.ctx, args.execution);
   }
 }
 
-export async function stopNativeReceiveContainerState(ctx: DurableObjectState): Promise<void> {
-  activeProcessorAborts.get(ctx.id.toString())?.abort("repository deletion fence activated");
-  if (ctx.container?.running) {
-    await ctx.container.destroy("repository deletion fence activated");
+export async function cancelNativeExecution(
+  ctx: DurableObjectState,
+  env: Env,
+  identity: NativeExecutionIdentity
+): Promise<void> {
+  await finishNativeExecution(ctx, identity, "revoked");
+  if (identity.lane === "foreground") await stopNativeProcessorSlot(ctx, identity);
+  else
+    await new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS).run("do:maintenance-cancel", () =>
+      env.MAINTENANCE_CONTAINER_HOST.getByName(ctx.id.toString()).cancel(identity)
+    );
+  await acknowledgeNativeStop(ctx, identity);
+}
+
+export async function reconcileNativeExecutionLeases(
+  ctx: DurableObjectState,
+  env: Env,
+  lane: NativeExecutionLane
+): Promise<void> {
+  const record = await ctx.storage.get<NativeExecutionRecord>(nativeExecutionKey(lane));
+  if (
+    record &&
+    (record.stopPending ||
+      (record.state === "active" && !(await authorizeNativeExecution(ctx, record.identity))))
+  )
+    await cancelNativeExecution(ctx, env, record.identity);
+}
+
+export async function runNativeExecution(args: {
+  ctx: DurableObjectState;
+  env: Env;
+  lane: NativeExecutionLane;
+  claimId: string;
+  request: NativeReceiveProcessRequest;
+  bridgeProps: RepositoryContainerBridgeProps;
+  onReady?: (wasRunning: boolean) => Promise<void>;
+}): Promise<NativeReceiveProcessResult> {
+  const identity = await beginNativeExecution(
+    args.ctx,
+    args.lane,
+    args.request.operationId,
+    args.claimId,
+    args.bridgeProps
+  );
+  if (!identity)
+    throw new NativeProcessorError(
+      "native_execution_busy",
+      "Native execution is unavailable.",
+      true
+    );
+  const onReady = async (wasRunning: boolean) => {
+    if (!(await authorizeNativeExecution(args.ctx, identity)))
+      throw new Error("Native execution authority expired");
+    await args.onReady?.(wasRunning);
+  };
+  try {
+    let result: NativeReceiveProcessResult;
+    if (args.lane === "foreground") {
+      result = await runContainerProcessor({ ...args, execution: identity, onReady });
+    } else {
+      const outcome = await new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS).run(
+        "do:maintenance-process",
+        async () =>
+          await args.env.MAINTENANCE_CONTAINER_HOST.getByName(args.ctx.id.toString()).process(
+            args.request,
+            args.bridgeProps,
+            identity,
+            onReady
+          )
+      );
+      if (outcome.status === "failed")
+        throw new NativeProcessorError(
+          outcome.code,
+          "Maintenance native execution failed.",
+          outcome.retryable
+        );
+      result = outcome.result;
+    }
+    // Settlement and authority validation share one transaction. A revocation
+    // that wins this transition must never return output for publication.
+    if (!(await finishNativeExecution(args.ctx, identity, "completed")))
+      throw new Error("Native execution authority expired");
+    return result;
+  } catch (error) {
+    if (
+      error instanceof NativeProcessorError &&
+      !["container_transport_failure", "native_execution_busy"].includes(error.code)
+    ) {
+      await finishNativeExecution(args.ctx, identity, "completed");
+    } else {
+      await cancelNativeExecution(args.ctx, args.env, identity);
+    }
+    throw error;
   }
+}
+
+export async function stopNativeReceiveContainerState(
+  ctx: DurableObjectState,
+  env: Env
+): Promise<void> {
+  // Repository deletion is deliberately distinct from cancelling one job.
+  const executions: NativeExecutionIdentity[] = [];
+  for (const lane of ["foreground", "maintenance"] as const) {
+    const record = await ctx.storage.get<NativeExecutionRecord>(nativeExecutionKey(lane));
+    if (record) executions.push(record.identity);
+    if (record?.state === "active") await finishNativeExecution(ctx, record.identity, "revoked");
+  }
+  await deleteNativeProcessorSlot(ctx);
+  await new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS).run("do:maintenance-delete", () =>
+    env.MAINTENANCE_CONTAINER_HOST.getByName(ctx.id.toString()).deleteRepositoryExecution()
+  );
+  for (const identity of executions) await acknowledgeNativeStop(ctx, identity);
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   await store.delete("nativeCatalogReaderLease");
 }
@@ -1312,13 +1415,16 @@ async function completeOperationCleanup(args: {
 }): Promise<NativeReceiveOperation> {
   try {
     await deleteOperationObjects(args);
-    const cleaned: NativeReceiveOperation = {
-      ...args.operation,
-      cleanupPending: false,
-      updatedAt: Date.now(),
-    };
-    await storeOperation(args.ctx.storage, cleaned);
-    return cleaned;
+    return await args.ctx.storage.transaction(async (transaction) => {
+      const store = asTypedStorage<RepoStateSchema>(transaction);
+      const current = await store.get(nativeReceiveOperationKey(args.operation.id));
+      // An alarm and the completing request can finish the same cleanup. Never
+      // replace newer terminal evidence with the caller's pre-cleanup snapshot.
+      if (!current || !current.cleanupPending) return current ?? args.operation;
+      const cleaned = { ...current, cleanupPending: false, updatedAt: Date.now() };
+      await store.put(nativeReceiveOperationKey(current.id), cleaned);
+      return cleaned;
+    });
   } catch (error) {
     args.logger.warn("native-receive:cleanup-deferred", {
       operationId: args.operation.id,
@@ -1464,6 +1570,19 @@ export async function runNativeReceiveOperationState(args: {
   logger: Logger;
 }): Promise<NativeReceiveOperationView | null> {
   const retained = await getNativeReceiveOperationState(args.ctx, args.operationId);
+  if (retained && ["staged", "processing"].includes(retained.state)) {
+    await reconcileNativeExecutionLeases(args.ctx, args.env, "foreground");
+    const execution = await args.ctx.storage.get<NativeExecutionRecord>(
+      nativeExecutionKey("foreground")
+    );
+    if (execution?.state === "active" || (execution?.drainUntil ?? 0) > Date.now()) {
+      const retryAt =
+        execution?.state === "active" ? execution.identity.expiresAt : execution!.drainUntil;
+      await scheduleNativeWake(args.ctx, args.env, retryAt + 1);
+      args.logger.info("native-execution:foreground-waiting", { operationId: args.operationId });
+      return nativeReceiveOperationView(retained);
+    }
+  }
   if (retained?.stockReceive) {
     args.logger.warn("native-receive:legacy-stock-dispatch-rejected", {
       operationId: args.operationId,
@@ -1625,7 +1744,14 @@ export async function runNativeReceiveOperationState(args: {
         const readerRenewed = await renewNativeCatalogReaderLease(args.ctx, operation);
         if (!operationRenewed || !readerRenewed) {
           heartbeatFailure = new Error("native receive lease ownership was lost");
-          activeProcessorAborts.get(args.ctx.id.toString())?.abort("native lease renewal failed");
+          const execution = await args.ctx.storage.get<NativeExecutionRecord>(
+            nativeExecutionKey("foreground")
+          );
+          if (
+            execution?.identity.operationId === operation.id &&
+            execution.identity.claimId === claimId
+          )
+            await cancelNativeExecution(args.ctx, args.env, execution.identity);
         }
       })
       .catch((error) => {
@@ -1633,8 +1759,11 @@ export async function runNativeReceiveOperationState(args: {
       });
   }, LEASE_HEARTBEAT_MS);
   try {
-    nativeResult = await runContainerProcessor({
+    nativeResult = await runNativeExecution({
       ctx: args.ctx,
+      env: args.env,
+      lane: "foreground",
+      claimId,
       request: processRequest(operation),
       bridgeProps: bridgeProps(operation),
     });

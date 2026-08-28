@@ -38,7 +38,7 @@ deployment identity.
 Use a dedicated Cloudflare account scope or exact qualification resources. The
 generated Wrangler configuration must bind one qualification-only Worker, D1
 database, KV namespace, R2 bucket, Queue producer/consumer, `RepoDurableObject`,
-`StockReceiveContainerHost`, and their two Container applications using the
+`StockReceiveContainerHost`, `MaintenanceContainerHost`, and their three Container applications using the
 same image built from `container/Dockerfile`.
 
 [`qualification/wrangler.template.jsonc`](../qualification/wrangler.template.jsonc)
@@ -47,7 +47,10 @@ freezes that composition. The external orchestrator must replace every
 `__CONTAINER_IMAGE_REFERENCE__`, and `__CONTAINER_IMAGE_DIGEST__` placeholder
 before deployment and must reject a
 remaining placeholder. The template deliberately limits the maintained
-Container pool to one instance for the bounded first qualification slices.
+each Container application to one instance for bounded qualification. Native
+receive and maintenance may run simultaneously; approval must budget both.
+The zero-authority framed-stream application remains unchanged and is not used
+as the maintenance host.
 The image reference must include the exact recorded digest; a local Dockerfile
 build is not an acceptable qualification deployment identity.
 
@@ -195,13 +198,29 @@ excludes competing maintenance, not ordinary receives. Rewriting, indexing and
 expired-claim/drain waits leave receive admission open. Old operations without
 the optional coordination record retain their original exclusive behavior.
 
-Open receive admission is not proof of native execution availability. Default
-ordinary receives and GC indexing currently share the repository Container's
-single `/process` slot and operation-scoped outbound R2 bridge. The foreground
-qualification observed a receive failure during indexing. The separate stock
-framed-stream host remains zero-authority; it is not a second default receive
-processor. Whole-path availability requires a separately reviewed execution
-isolation contract, not just the source-protection changes described here.
+Open receive admission is not proof of native execution availability. The prior
+shared-processor candidate failed a receive during GC indexing. This candidate
+keeps ordinary receive on the repository Container and dispatches GC indexing to
+the dedicated `MaintenanceContainerHost`. The original RepoDO remains the only
+ref/catalog and operation authority. No new accepted-write event is emitted by
+maintenance. The separate stock framed-stream host remains zero-authority.
+
+RepoDO durably issues each native job's lane, monotonically increasing generation,
+operation, domain claim, deadline and bridge-grant digest. A host's durable slot
+serializes handler installation/start/stop, not processing across the two hosts.
+It rejects duplicate, replaced, cancelled and deleted jobs. Each R2 request checks
+the exact job and live domain claim with RepoDO before touching storage; a later
+job cannot replace another active job's bridge. The Go processor mutex is unchanged.
+
+Cancellation revokes only that job, records an outstanding stop until the host
+acknowledges it, and preserves the existing writer drain. Foreground recovery
+does not wait for maintenance cancellation. Repository deletion is deliberately
+broader: tombstone the authority, stop both hosts, then preserve normal drains
+and readers before removal. Terminal lane records and generation/cancel high-water
+marks are bounded protected metadata, not run-owned residue. Rollback requires
+draining both lanes first; reverting code alone cannot undo new host metadata.
+Whole-path responsiveness remains unqualified until the real overlap canary and
+dependent foreground runs pass; local concurrency tests do not establish it.
 
 Receive finalization accounts ref/catalog versions in the existing ref CAS.
 Before acknowledging a generic receive, metadata-only reachability subtraction
@@ -237,6 +256,19 @@ wait rather than extending its lifetime.
 These controls require `QUALIFICATION_MODE=1`, the qualification secret, and
 the configured exact synthetic namespace/repository before object lookup.
 They are disabled by default and return `Cache-Control: no-store`.
+
+`GET .../native-executions` returns at most the two lane records: operation,
+generation, grant digest, state, dispatch/input-read/completion timestamps and
+bounded bridge byte/request counters. Input bytes are declared R2 response
+payload, not proof that every byte reached the Container. Completed write bytes
+count verified output uploads; native receipt counters remain distinct.
+`POST` on that route accepts only schema 1 and one of `hold-input` (lane,
+operation, deadline no more than 120 seconds away), `release-input` (lane and
+operation), or `cancel` (lane, operation and generation). Cancellation requires
+observed real input I/O. The hold pauses that job's actual R2 response, not an
+idle process; it neither changes claims/drains nor writes catalog state. Release
+holds during cleanup, including after lost control replies. No arbitrary command,
+object key, URL, claim credential or repository selector is accepted in the body.
 
 - `POST .../gc`: closed schema-v1 `operationId`, `faults`, `holdReader`, and
   `deadlineAt` admission. Supported one-shot faults are `after-rewrite`,

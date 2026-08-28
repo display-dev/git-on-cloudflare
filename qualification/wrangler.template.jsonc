@@ -13,9 +13,17 @@
         "name": "STOCK_RECEIVE_CONTAINER_HOST",
         "class_name": "StockReceiveContainerHost",
       },
+      { "name": "MAINTENANCE_CONTAINER_HOST", "class_name": "MaintenanceContainerHost" },
     ],
   },
   "containers": [
+    {
+      "name": "repository-maintenance-git",
+      "class_name": "MaintenanceContainerHost",
+      "image": "__CONTAINER_IMAGE_REFERENCE__",
+      "max_instances": 1,
+      "instance_type": "standard-4",
+    },
     {
       "name": "repository-native-git",
       "class_name": "RepoDurableObject",
@@ -34,6 +42,7 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RepoDurableObject"] },
     { "tag": "v4", "new_sqlite_classes": ["StockReceiveContainerHost"] },
+    { "tag": "v5", "new_sqlite_classes": ["MaintenanceContainerHost"] },
   ],
   "kv_namespaces": [{ "binding": "ROUTES", "id": "__QUALIFICATION_KV_ID__" }],
   "d1_databases": [

@@ -3,12 +3,11 @@ import type { GcOperation } from "@/worker/git/maintenance/gcOperation";
 import type { NativeReceiveProcessResult } from "@/worker/git/nativeReceive/types";
 import { packIndexKey, packRefsKey } from "@/worker/keys";
 import { GC_OPERATION_KEY } from "./catalog/gcOperation";
-import {
-  NativeProcessorError,
-  runContainerProcessor,
-  stopNativeReceiveContainerState,
-} from "./nativeReceive";
+import { NativeProcessorError, runNativeExecution, cancelNativeExecution } from "./nativeReceive";
+import { nativeExecutionKey } from "./nativeExecution";
+import type { NativeExecutionRecord } from "@/worker/git/nativeReceive/execution";
 import { consumeGcFault } from "./gcQualification";
+import { SubrequestLimiter, MAX_SIMULTANEOUS_CONNECTIONS } from "@/worker/git/operations/limits";
 
 export type GcNativeResult =
   | { status: "processed"; result: NativeReceiveProcessResult }
@@ -16,8 +15,9 @@ export type GcNativeResult =
   | { status: "invalid" }
   | { status: "rejected" };
 
-/** Reuse the existing Container host and exact-key R2 bridge. No receive
- * admission, ref transaction, or accepted-write publication is involved. */
+/** Use the maintenance-only execution host with the existing native processor
+ * and exact-key bridge. No receive admission, ref transaction, or accepted-write
+ * publication is delegated to that host. */
 export async function runGcNative(args: {
   ctx: DurableObjectState;
   env: Env;
@@ -46,8 +46,11 @@ export async function runGcNative(args: {
   args.logger.info("reachability-gc:native-dispatch", { inputBytes: operation.rewrite.packBytes });
   try {
     let settled = false;
-    const processing = runContainerProcessor({
+    const processing = runNativeExecution({
       ctx: args.ctx,
+      env: args.env,
+      lane: "maintenance",
+      claimId: args.claimId,
       onReady: async (wasRunning) => {
         await args.ctx.storage.transaction(async (transaction) => {
           const current = await transaction.get<GcOperation>(GC_OPERATION_KEY);
@@ -103,21 +106,24 @@ export async function runGcNative(args: {
     void processing.catch(() => {});
     const fault = operation.qualification?.faults["during-native"];
     if (args.env.QUALIFICATION_MODE === "1" && fault && !fault.triggeredAt) {
+      const limiter = new SubrequestLimiter(MAX_SIMULTANEOUS_CONNECTIONS);
       while (!settled) {
-        let observed = false;
-        if (args.ctx.container?.running) {
-          try {
-            const response = await args.ctx.container
-              .getTcpPort(8080)
-              .fetch("http://container/maintenance/status", { signal: AbortSignal.timeout(5_000) });
-            const status = await response.json<{ operationId: string }>();
-            observed = status.operationId === operation.id;
-          } catch {
-            /* Readiness and a completed process can race observation. */
-          }
-        }
+        const observed = await limiter.run(
+          "do:observe-maintenance",
+          async () =>
+            await args.env.MAINTENANCE_CONTAINER_HOST.getByName(args.ctx.id.toString()).observe(
+              operation.id
+            )
+        );
         if (observed && (await consumeGcFault(args.ctx, args.env, operation.id, "during-native"))) {
-          await stopNativeReceiveContainerState(args.ctx);
+          const execution = await args.ctx.storage.get<NativeExecutionRecord>(
+            nativeExecutionKey("maintenance")
+          );
+          if (
+            execution?.identity.operationId === operation.id &&
+            execution.identity.claimId === args.claimId
+          )
+            await cancelNativeExecution(args.ctx, args.env, execution.identity);
           await args.ctx.storage.transaction(async (transaction) => {
             const current = await transaction.get<GcOperation>(GC_OPERATION_KEY);
             const configured = current?.qualification?.faults["during-native"];

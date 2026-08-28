@@ -458,6 +458,7 @@ export type NativeReceiveActivePackBinding = {
 };
 
 export type RepositoryContainerBridgeProps = {
+  execution?: import("./execution").NativeExecutionIdentity;
   operationId: string;
   readKeys: Array<{ key: string; expectedBytes: number; expectedEtag?: string | undefined }>;
   writeKeys: Array<{ key: string; maxBytes: number }>;

@@ -22,6 +22,16 @@ import {
   resumeGcFromAlarm,
 } from "./catalog/gcOperation";
 import { runGcNative } from "./gcNative";
+import { authorizeNativeExecution, noteNativeBridgeIO } from "./nativeExecution";
+import {
+  holdNativeInput,
+  releaseNativeInput,
+  nativeInputHeld,
+  qualificationNativeExecutions,
+  cancelQualificationNativeExecution,
+} from "./nativeExecutionQualification";
+import type { NativeExecutionLane } from "@/worker/git/nativeReceive/execution";
+import type { NativeExecutionIdentity } from "@/worker/git/nativeReceive/execution";
 import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 import type { RepoActivity } from "@/worker/common";
 import type { PackCatalogRow } from "./db/schema";
@@ -141,6 +151,7 @@ import {
   resumeNativeReceiveFromAlarm,
   runNativeReceiveOperationState,
   stopNativeReceiveContainerState,
+  reconcileNativeExecutionLeases,
 } from "./nativeReceive";
 import {
   admitStockReceiveState,
@@ -198,6 +209,10 @@ export class RepoDurableObject extends DurableObject {
 
   async alarm(): Promise<void> {
     this.logger.debug("alarm:start", {});
+    // A slow remote stop must not sit ahead of foreground recovery. Its durable
+    // pending-stop record and host expiry alarm remain authoritative on eviction.
+    this.ctx.waitUntil(this.reconcileNativeExecution("maintenance"));
+    await this.reconcileNativeExecution("foreground");
 
     if (await this.ctx.storage.get<boolean>("repositoryDeleting")) {
       await this.ctx.storage.deleteAlarm();
@@ -246,6 +261,15 @@ export class RepoDurableObject extends DurableObject {
 
     await handleIdleAndMaintenance(this.ctx, this.env, this.logger);
     this.logger.debug("alarm:end", {});
+  }
+
+  private async reconcileNativeExecution(lane: NativeExecutionLane): Promise<void> {
+    try {
+      await reconcileNativeExecutionLeases(this.ctx, this.env, lane);
+    } catch {
+      this.logger.warn("native-execution:reconciliation-pending", { lane });
+      await this.ctx.storage.setAlarm(Date.now() + 30_000);
+    }
   }
 
   private async touchAndMaybeSchedule(): Promise<void> {
@@ -619,6 +643,44 @@ export class RepoDurableObject extends DurableObject {
     return runGcNative({ ctx: this.ctx, env: this.env, operationId, claimId, logger: this.logger });
   }
 
+  public async authorizeNativeExecution(identity: NativeExecutionIdentity): Promise<boolean> {
+    return authorizeNativeExecution(this.ctx, identity);
+  }
+
+  public async noteNativeBridgeIO(
+    identity: NativeExecutionIdentity,
+    kind: "read" | "write",
+    bytes: number
+  ): Promise<void> {
+    await noteNativeBridgeIO(this.ctx, identity, kind, bytes);
+  }
+  public async nativeInputHeld(identity: NativeExecutionIdentity): Promise<boolean> {
+    return nativeInputHeld(this.ctx, this.env, identity);
+  }
+  public async qualificationNativeExecutions() {
+    return qualificationNativeExecutions(this.ctx, this.env);
+  }
+  public async holdNativeInput(
+    lane: NativeExecutionLane,
+    operationId: string,
+    deadlineAt: number
+  ): Promise<boolean> {
+    return holdNativeInput(this.ctx, this.env, lane, operationId, deadlineAt);
+  }
+  public async releaseNativeInput(
+    lane: NativeExecutionLane,
+    operationId: string
+  ): Promise<boolean> {
+    return releaseNativeInput(this.ctx, this.env, lane, operationId);
+  }
+  public async cancelQualificationNativeExecution(
+    lane: NativeExecutionLane,
+    operationId: string,
+    generation: number
+  ): Promise<boolean> {
+    return cancelQualificationNativeExecution(this.ctx, this.env, lane, operationId, generation);
+  }
+
   public async commitGcOperation(operationId: string, claimId: string) {
     if (await consumeGcFault(this.ctx, this.env, operationId, "before-publication"))
       throw new Error("qualification interrupted before GC publication");
@@ -839,7 +901,7 @@ export class RepoDurableObject extends DurableObject {
       // The tombstone is already durable, so no new native operation can
       // start. Stop any current process before the deletion consumer sweeps R2;
       // the receive lease keeps deletion non-ready until the writer drains.
-      await stopNativeReceiveContainerState(this.ctx);
+      await stopNativeReceiveContainerState(this.ctx, this.env);
       this.logger.info("repository-delete:container-stopped", {});
       return result;
     } catch (error) {

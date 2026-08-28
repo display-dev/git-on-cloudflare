@@ -26,6 +26,77 @@ type Guards = {
 };
 
 export function registerQualificationGcRoutes(router: AppRouter, guards: Guards): void {
+  router.get("/_internal/qualification/:owner/:repo/native-executions", async (c) => {
+    const denied = await guards.authorize(c);
+    if (denied) return denied;
+    const route = await guards.resolveTarget(c);
+    if (!route) return new Response("Not found\n", { status: 404 });
+    const result = await c.var.limiter.run(
+      "do:qualification-native-status",
+      async () => await getRepoStub(c.env, route.doName).qualificationNativeExecutions()
+    );
+    return json(result, result ? 200 : 404, { "Cache-Control": "no-store" });
+  });
+  router.post("/_internal/qualification/:owner/:repo/native-executions", async (c) => {
+    const denied = await guards.authorize(c);
+    if (denied) return denied;
+    const bytes = Number(c.req.header("Content-Length"));
+    if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > 512)
+      return json({ status: "rejected" }, 400);
+    const lane = z.enum(["foreground", "maintenance"]);
+    const operationId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/);
+    const schema = z.discriminatedUnion("action", [
+      z
+        .object({
+          schemaVersion: z.literal(1),
+          action: z.literal("hold-input"),
+          lane,
+          operationId,
+          deadlineAt: z.number().int().positive(),
+        })
+        .strict(),
+      z
+        .object({
+          schemaVersion: z.literal(1),
+          action: z.literal("release-input"),
+          lane,
+          operationId,
+        })
+        .strict(),
+      z
+        .object({
+          schemaVersion: z.literal(1),
+          action: z.literal("cancel"),
+          lane,
+          operationId,
+          generation: z.number().int().positive(),
+        })
+        .strict(),
+    ]);
+    const parsed = schema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return json({ status: "rejected" }, 400);
+    const route = await guards.resolveTarget(c);
+    if (!route) return new Response("Not found\n", { status: 404 });
+    const stub = getRepoStub(c.env, route.doName);
+    const request = parsed.data;
+    const applied = await c.var.limiter.run("do:qualification-native-control", async () => {
+      switch (request.action) {
+        case "hold-input":
+          return await stub.holdNativeInput(request.lane, request.operationId, request.deadlineAt);
+        case "release-input":
+          return await stub.releaseNativeInput(request.lane, request.operationId);
+        case "cancel":
+          return await stub.cancelQualificationNativeExecution(
+            request.lane,
+            request.operationId,
+            request.generation
+          );
+      }
+    });
+    return json({ schemaVersion: 1, applied }, applied ? 200 : 409, {
+      "Cache-Control": "no-store",
+    });
+  });
   router.post("/_internal/qualification/:owner/:repo/gc-source/settle", async (c) => {
     const denied = await guards.authorize(c);
     if (denied) return denied;

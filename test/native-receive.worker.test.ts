@@ -717,6 +717,12 @@ describe("durable native receive and import", () => {
         }>("receiveLease");
         if (!lease) throw new Error("expected receive lease after processor cancellation");
         await state.storage.put("receiveLease", { ...lease, expiresAt: 1 });
+        expect((await instance.beginRepositoryDeletion()).ready).toBe(false);
+        const execution = await state.storage.get<
+          import("@/worker/git/nativeReceive/execution").NativeExecutionRecord
+        >("nativeExecution:foreground");
+        if (!execution) throw new Error("expected native execution drain");
+        await state.storage.put("nativeExecution:foreground", { ...execution, drainUntil: 0 });
         expect((await instance.beginRepositoryDeletion()).ready).toBe(true);
         expect((await instance.getNativeReceiveOperation(operationId))?.state).toBe("staged");
       }
@@ -979,6 +985,25 @@ describe("durable native receive and import", () => {
     const first = await stub.runNativeReceiveOperation(operationId);
     expect(first?.state).toBe("staged");
     expect(await env.REPO_BUCKET.head(inputKey)).not.toBeNull();
+    const waiting = await stub.runNativeReceiveOperation(operationId);
+    expect(waiting?.state).toBe("staged");
+    expect(waiting?.attempts).toBe(first?.attempts);
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const execution = await state.storage.get<
+          import("@/worker/git/nativeReceive/execution").NativeExecutionRecord
+        >("nativeExecution:foreground");
+        expect(execution?.state).toBe("revoked");
+        if (!execution) throw new Error("missing execution drain");
+        // Advance the persisted drain boundary, as other lease tests do; no
+        // wall-clock sleep or shortened production drain is introduced.
+        await state.storage.put("nativeExecution:foreground", {
+          ...execution,
+          drainUntil: Date.now() - 1,
+        });
+      }
+    );
     const second = await stub.runNativeReceiveOperation(operationId);
     expect(second?.state).toBe("committed");
     expect(second?.attempts).toBe(2);

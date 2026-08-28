@@ -53,6 +53,14 @@ The codebase is organized into focused modules with `index.ts` export files:
 - Native processing pins the returned `packsetVersion` with one renewable
   Container reader lease. Superseded-pack cleanup retries while an older
   generation is pinned.
+- The qualification execution-isolation candidate keeps foreground native
+  processing on RepoDO's Container and GC indexing on `MaintenanceContainerHost`.
+  This second DO owns compute lifecycle only. RepoDO issues and revokes exact
+  job-scoped R2 bridge grants and remains the sole operation/ref/catalog authority.
+  Cancelling maintenance does not cancel foreground processing or its reader
+  lease; repository deletion stops both hosts and retains ordinary drain fences.
+  See [qualification](qualification.md#foreground-coordination-during-gc) for
+  the controls and the still-required live availability proof.
 - Smart HTTP fetches hold a bounded renewable repository read lease for the
   lifetime of the response stream, so a long clone cannot lose a snapshotted
   pack to delayed cleanup.
