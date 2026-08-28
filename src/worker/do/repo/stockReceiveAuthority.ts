@@ -1,4 +1,5 @@
 import type { Logger } from "@/worker/common/logger";
+import { advanceGcReceiveVersions } from "./catalog/gcCoordination";
 import type {
   AdmitStockReceiveResult,
   CompleteStockReceiveCleanupResult,
@@ -727,6 +728,15 @@ export async function finalizeStockReceiveState(args: {
     await tx.put("refsVersion", intent.nextRefsVersion);
     await tx.put("nextPackSeq", packSequence + 1);
     await tx.put("packsetVersion", packsetVersion + 1);
+    // The stock planner/proof restricts every semantic external edge to the
+    // advertised closure, which is already covered by the GC snapshot or a
+    // previous protected receive. Native output includes its encoding bases.
+    await advanceGcReceiveVersions(
+      transaction,
+      refsVersion,
+      intent.nextRefsVersion,
+      packsetVersion + 1
+    );
     await recordAcceptedWrites(
       tx,
       intent.nextRefsVersion,

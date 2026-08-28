@@ -1,4 +1,7 @@
 import type { Logger } from "@/worker/common/logger";
+import { GC_OPERATION_KEY, type GcOperation } from "@/worker/git/maintenance/gcOperation";
+import { gcOwnsSource } from "./gcCoordination";
+import { helpPreparedGcPublication } from "./gcPublication";
 import {
   isNativeReceiveTerminal,
   type NativeReceiveOperation,
@@ -85,11 +88,26 @@ export async function clearExpiredLeases(
   }
 
   const compactLease = await store.get("compactLease");
-  if (compactLease && compactLease.expiresAt <= now) {
+  const gc = await ctx.storage.get<GcOperation>(GC_OPERATION_KEY);
+  if (
+    compactLease &&
+    compactLease.expiresAt <= now &&
+    !(gcOwnsSource(gc) && gc?.snapshot?.token === compactLease.token)
+  ) {
     await store.delete("compactLease");
     logger?.debug("lease:expired", { kind: "compact" });
   }
 }
+
+let beforeAdmissionForTesting: ((ctx: DurableObjectState) => Promise<void>) | undefined;
+export const __admissionTest = {
+  beforeAdmissionOnce(callback: (ctx: DurableObjectState) => Promise<void>) {
+    beforeAdmissionForTesting = callback;
+  },
+  reset() {
+    beforeAdmissionForTesting = undefined;
+  },
+};
 
 export async function beginReceiveLease(
   ctx: DurableObjectState,
@@ -102,29 +120,59 @@ export async function beginReceiveLease(
     expiresAt: now + RECEIVE_LEASE_TTL_MS,
     operation: "receive",
   };
-  const acquired = await ctx.storage.transaction(async (transaction) => {
-    const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
-    if (await transactionStore.get("repositoryDeleting")) return false;
-    const nativeOperationIds = (await transactionStore.get("nativeReceiveOperationIndex")) ?? [];
-    for (const operationId of nativeOperationIds) {
-      const operation = await transactionStore.get(nativeReceiveOperationKey(operationId));
-      if (operation && !isNativeReceiveTerminal(operation.state)) return false;
-    }
-    const existing = await transactionStore.get("receiveLease");
-    if (existing && existing.expiresAt > now) return false;
-    if (existing && (await transactionStore.get(receiveFinalizeIntentKey(existing.token)))) {
-      await transactionStore.put("receiveLease", {
-        ...existing,
-        expiresAt: now + RECEIVE_LEASE_TTL_MS,
-      });
-      return false;
-    }
-    const compactLease = activeLeaseOrUndefined(await transactionStore.get("compactLease"), now);
-    if (compactLease?.operation === "reachability-gc") return false;
-    if (existing) logger?.debug("lease:expired", { kind: "receive" });
-    await transactionStore.put("receiveLease", lease);
-    return true;
-  });
+  let helpedClaimId: string | undefined;
+  const acquire = () =>
+    ctx.storage.transaction(async (transaction) => {
+      const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+      if (await transactionStore.get("repositoryDeleting")) return false;
+      const nativeOperationIds = (await transactionStore.get("nativeReceiveOperationIndex")) ?? [];
+      for (const operationId of nativeOperationIds) {
+        const operation = await transactionStore.get(nativeReceiveOperationKey(operationId));
+        if (operation && !isNativeReceiveTerminal(operation.state)) return false;
+      }
+      const existing = await transactionStore.get("receiveLease");
+      if (existing && existing.expiresAt > now) return false;
+      if (existing && (await transactionStore.get(receiveFinalizeIntentKey(existing.token)))) {
+        await transactionStore.put("receiveLease", {
+          ...existing,
+          expiresAt: now + RECEIVE_LEASE_TTL_MS,
+        });
+        return false;
+      }
+      const compactLease = activeLeaseOrUndefined(await transactionStore.get("compactLease"), now);
+      const gc = await transaction.get<GcOperation>(GC_OPERATION_KEY);
+      if (
+        compactLease?.operation === "reachability-gc" &&
+        !(gc?.coordination && gc.snapshot?.token === compactLease.token)
+      )
+        return false;
+      // Decide whether publication gets a turn in the same transaction that
+      // would grant this lease. An earlier helper check can race the preceding
+      // receive's completion and allow a sustained writer stream to bypass GC.
+      const preparedClaim = gc?.coordination?.publicationClaimId;
+      if (
+        gc?.phase === "publish" &&
+        preparedClaim &&
+        gc.claim?.id === preparedClaim &&
+        gc.claim.expiresAt > now &&
+        preparedClaim !== helpedClaimId
+      )
+        return preparedClaim;
+      if (existing) logger?.debug("lease:expired", { kind: "receive" });
+      await transactionStore.put("receiveLease", lease);
+      return true;
+    });
+  const beforeAdmission = beforeAdmissionForTesting;
+  beforeAdmissionForTesting = undefined;
+  await beforeAdmission?.(ctx);
+  let acquired = await acquire();
+  while (typeof acquired === "string") {
+    helpedClaimId = acquired;
+    await helpPreparedGcPublication(ctx);
+    // One metadata attempt per prepared claim: an invalid GC source or a
+    // transaction failure must not create indefinite foreground exclusion.
+    acquired = await acquire();
+  }
   if (!acquired) return { ok: false, retryAfter: LEASE_RETRY_AFTER_SECONDS };
 
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);

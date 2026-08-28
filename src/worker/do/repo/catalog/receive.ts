@@ -1,8 +1,14 @@
 import type { Logger } from "@/worker/common/logger";
+import {
+  prepareGcReceiveProtection,
+  retainGcReceiveProtection,
+  advanceGcReceiveVersions,
+} from "./gcCoordination";
 import type {
   IngestionReceipt,
   ReceiveCommitOutcome,
   ReceiveFinalizeIntent,
+  ReceiveRefPublication,
   RepoStateSchema,
   TypedStorage,
 } from "../repoState";
@@ -49,6 +55,7 @@ export type FinalizeReceiveResult =
       outputValidationBytes: number;
       outputValidationRequests: number;
       outputEtags?: { pack: string; idx: string; refs: string };
+      refPublication?: ReceiveRefPublication;
     }
   | {
       status: "ref_conflict";
@@ -629,6 +636,7 @@ export async function finalizeReceiveState(args: {
       outputValidationBytes: priorOutcome.outputValidationBytes ?? 0,
       outputValidationRequests: priorOutcome.outputValidationRequests ?? 0,
       outputEtags: priorOutcome.outputEtags,
+      refPublication: priorOutcome.refPublication,
     };
   }
 
@@ -718,9 +726,18 @@ export async function finalizeReceiveState(args: {
       acceptedWriteContext: acceptedWriteContextForFacts(args.acceptedWrites),
       createdAt: Date.now(),
     };
+    const gcProtection = await prepareGcReceiveProtection({
+      ctx: args.ctx,
+      env: args.env,
+      refs: currentRefs,
+      refsVersion: expectedRefsVersion,
+      commands: args.commands,
+      stagedPack: args.stagedPack,
+    });
     intent = nextIntent;
     await args.ctx.storage.transaction(async (transaction) => {
       const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+      await retainGcReceiveProtection(transaction, args.token, gcProtection);
       await transactionStore.put(intentKey, nextIntent);
       const recoveryAt = Date.now() + 1_000;
       const currentAlarm = await transaction.getAlarm();
@@ -815,6 +832,7 @@ export async function finalizeReceiveState(args: {
   }
 
   let committedRefs: Array<{ name: string; oid: string }> = [];
+  let refPublication = intent.refPublication;
   const acceptedWrites = acceptedWriteFactsForIntent(intent);
   const statuses = intent.commands.map((command) => ({ ref: command.ref, ok: true }));
   await args.ctx.storage.transaction(async (transaction) => {
@@ -824,6 +842,9 @@ export async function finalizeReceiveState(args: {
     const appliedRefs = applyReceiveCommands(currentRefs, intent.commands);
     if (currentRefsVersion === intent.expectedRefsVersion) {
       committedRefs = appliedRefs;
+      // Persist the first ref-CAS time atomically with refs, not the mutable
+      // native-operation timestamp which advances again during R2 cleanup.
+      refPublication ??= { at: Date.now(), refsVersion: intent.nextRefsVersion };
     } else if (
       currentRefsVersion === intent.nextRefsVersion &&
       JSON.stringify(appliedRefs) === JSON.stringify(currentRefs)
@@ -835,6 +856,15 @@ export async function finalizeReceiveState(args: {
     await transactionStore.put("refs", committedRefs);
     await transactionStore.put("head", intent.nextHead);
     await transactionStore.put("refsVersion", intent.nextRefsVersion);
+    if (refPublication) {
+      await transactionStore.put(intentKey, { ...intent, refPublication });
+    }
+    await advanceGcReceiveVersions(
+      transaction,
+      intent.expectedRefsVersion,
+      intent.nextRefsVersion,
+      intent.nextPacksetVersion
+    );
     if (acceptedWrites) {
       await recordAcceptedWrites(
         transactionStore,
@@ -855,6 +885,7 @@ export async function finalizeReceiveState(args: {
     outputValidationBytes,
     outputValidationRequests,
     outputEtags,
+    refPublication,
   };
   await storeReceiveOutcome(args.ctx.storage, committed);
   if (failNextAfterOutcomeStoreForTesting) {
@@ -889,5 +920,6 @@ export async function finalizeReceiveState(args: {
     outputValidationBytes,
     outputValidationRequests,
     outputEtags,
+    refPublication,
   };
 }

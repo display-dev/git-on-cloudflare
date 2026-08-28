@@ -1417,6 +1417,7 @@ async function reconcileFinalizingOperation(args: {
       state: "committed",
       result: {
         statuses: finalized.statuses,
+        refPublication: finalized.refPublication,
         changed: finalized.changed,
         empty: finalized.empty,
         packKey: operation.outputPackKey,

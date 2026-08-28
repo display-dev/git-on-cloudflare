@@ -6,6 +6,8 @@
  * worker code, and then atomically commits the result via `commitCompactionState`.
  */
 import type { Logger } from "@/worker/common/logger";
+import { GC_OPERATION_KEY, type GcOperation } from "@/worker/git/maintenance/gcOperation";
+import { gcOwnsMaintenance } from "../gcCoordination";
 import type { PackCatalogRow } from "../../db/schema";
 import type { RepoLease, RepoStateSchema } from "../../repoState";
 
@@ -60,6 +62,15 @@ export async function beginCompactionState(args: {
     };
   }
   const wantedAt = await store.get("compactionWantedAt");
+  if (gcOwnsMaintenance(await args.ctx.storage.get<GcOperation>(GC_OPERATION_KEY))) {
+    return {
+      ok: false,
+      status: "busy",
+      retryAfter: LEASE_RETRY_AFTER_SECONDS,
+      reason: "compact-active",
+      message: "GC still owns its source catalog; compaction remains queued.",
+    };
+  }
   if (typeof wantedAt !== "number") {
     return {
       ok: false,
@@ -99,6 +110,8 @@ export async function beginCompactionState(args: {
   const acquisition = await args.ctx.storage.transaction(async (transaction) => {
     const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
     if (await transactionStore.get("repositoryDeleting")) return "repository-deleting";
+    if (gcOwnsMaintenance(await transaction.get<GcOperation>(GC_OPERATION_KEY)))
+      return "compact-active";
     if (activeLeaseOrUndefined(await transactionStore.get("receiveLease"), now)) {
       return "receive-active";
     }
@@ -167,6 +180,8 @@ export async function commitCompactionState(args: {
   const fence = await args.ctx.storage.transaction(async (transaction) => {
     const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
     if (await transactionStore.get("repositoryDeleting")) return "repository-deleting";
+    if (gcOwnsMaintenance(await transaction.get<GcOperation>(GC_OPERATION_KEY)))
+      return "lease-mismatch";
     const now = Date.now();
     const lease = await transactionStore.get("compactLease");
     if (!lease || lease.token !== args.token || lease.expiresAt <= now) {
@@ -303,6 +318,7 @@ export async function rearmCompactionQueueFromAlarm(args: {
   if (typeof wantedAt !== "number") return false;
 
   const now = Date.now();
+  if (gcOwnsMaintenance(await args.ctx.storage.get<GcOperation>(GC_OPERATION_KEY))) return false;
   if (activeLeaseOrUndefined(await store.get("receiveLease"), now)) return false;
   if (activeLeaseOrUndefined(await store.get("compactLease"), now)) return false;
 

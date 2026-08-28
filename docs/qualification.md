@@ -188,6 +188,42 @@ implementation safety bounds, not repository quotas. The sidecar cap does not
 bound total Worker memory: both sidecars and derived object sets coexist.
 Large-object-count validation memory remains unqualified.
 
+### Foreground coordination during GC
+
+Once a durable source snapshot exists, its source lease protects inputs and
+excludes competing maintenance, not ordinary receives. Rewriting, indexing and
+expired-claim/drain waits leave receive admission open. Old operations without
+the optional coordination record retain their original exclusive behavior.
+
+Receive finalization accounts ref/catalog versions in the existing ref CAS.
+Before acknowledging a generic receive, metadata-only reachability subtraction
+protects any newly referenced source objects and external encoding bases. Normal
+append-only checkpoints require no extra source retention. If a permitted write
+resurrects old source objects, or metadata cannot establish the subtraction, all
+source packs are conservatively retained; status reports this explicitly. Such
+retention is safe but is not proof of full reclamation. The selective stock path
+uses its existing advertised-closure and materialized thin-base validation.
+
+Publication atomically replaces only the exact snapshotted source rows, merging
+all later receive packs and any conservatively retained sources. Current refs and
+HEAD are not overwritten. Accounted versions, source-row identity, live claim,
+source lease, repository deletion, active receives and durable finalization
+intents still fence publication. A prepared publication gets a metadata-only
+turn before the next receive, avoiding restart-on-every-write starvation. A lost
+reply replays the same durable receipt. Claims and drain periods are unchanged.
+Ordinary compaction stays deferred through GC reclamation, with its queued demand
+preserved. Repository deletion and real reader leases retain their existing
+protection.
+
+Status schema 2 adds bounded coordination versions, accepted-receive count,
+conservative-retention disposition, prepared-publication flag and claim/drain
+timestamps; it never exposes claim tokens or object keys. The real-reader latch
+selects only the request marked `<gc-operation-id>-reader`, requires an actual
+active read lease containing every source pack, and can start during indexing
+or pre-publication recovery. Other reads are never captured. Its fifteen-minute
+expiry is unchanged; start a recovery reader near the end of the ordinary drain
+wait rather than extending its lifetime.
+
 ### Exact-target GC qualification controls
 
 These controls require `QUALIFICATION_MODE=1`, the qualification secret, and

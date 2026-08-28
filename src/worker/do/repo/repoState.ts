@@ -70,6 +70,11 @@ export type IngestionReceipt = {
   createdAt: number;
 };
 
+export type ReceiveRefPublication = {
+  at: number;
+  refsVersion: number;
+};
+
 export type ReceiveCommitOutcome = {
   token: string;
   statuses: Array<{ ref: string; ok: boolean; msg?: string }>;
@@ -79,10 +84,12 @@ export type ReceiveCommitOutcome = {
   outputValidationBytes?: number;
   outputValidationRequests?: number;
   outputEtags?: { pack: string; idx: string; refs: string };
+  refPublication?: ReceiveRefPublication;
 };
 
 export type ReceiveFinalizeIntent = {
   token: string;
+  refPublication?: ReceiveRefPublication;
   commands: Array<{ oldOid: string; newOid: string; ref: string }>;
   expectedRefsVersion: number;
   nextHead: Head;

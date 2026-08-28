@@ -19,6 +19,7 @@ import {
   LEASE_RETRY_AFTER_SECONDS,
 } from "./shared";
 import { activeLeaseOrUndefined } from "./activity";
+import { gcOwnsSource } from "./gcCoordination";
 import { rowsMatchForCommit } from "./compaction/plan";
 import { EXPIRED_WRITER_DRAIN_MS } from "../repositoryLifecycle";
 import {
@@ -143,6 +144,7 @@ export async function beginReachabilityGcState(args: {
   const acquisition = await args.ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
     if (await store.get("repositoryDeleting")) return "repository-deleting";
+    if (gcOwnsSource(await transaction.get<GcOperation>(GC_OPERATION_KEY))) return "compact-active";
     if (await store.get("reachabilityGcPending")) return "compact-active";
     if (activeLeaseOrUndefined(await store.get("receiveLease"), now)) return "receive-active";
     if (activeLeaseOrUndefined(await store.get("compactLease"), now)) return "compact-active";

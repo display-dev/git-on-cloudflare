@@ -86,6 +86,16 @@ export type GcOperation = {
   updatedAt: number;
   claim?: { id: string; expiresAt: number; safeRetryAt: number };
   snapshot?: GcSnapshot;
+  // Present only after an atomic, writer-fenced snapshot. Older operations
+  // retain their exclusive-writer behavior until they finish.
+  coordination?: {
+    refsVersion: number;
+    packsetVersion: number;
+    retainedSourcePackKeys: string[];
+    conservativeRetentionReason?: "new-source-reachability" | "metadata-unavailable";
+    publicationClaimId?: string;
+    acceptedReceives: number;
+  };
   closure?: GcClosure;
   retainedPackKey?: string;
   inputPackKey: string;

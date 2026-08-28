@@ -576,8 +576,8 @@ export class RepoDurableObject extends DurableObject {
     return consumeGcFault(this.ctx, this.env, operationId, fault);
   }
 
-  public async gcReaderLatch(token: string, packKeys: string[]) {
-    return gcReaderLatch(this.ctx, this.env, token, packKeys);
+  public async gcReaderLatch(token: string, packKeys: string[], readerOperationId?: string) {
+    return gcReaderLatch(this.ctx, this.env, token, packKeys, readerOperationId);
   }
 
   public async releaseGcReader(operationId: string) {

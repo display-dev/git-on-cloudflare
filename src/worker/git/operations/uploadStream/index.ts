@@ -160,7 +160,8 @@ export async function handleFetchV2Streaming(
         const held = await limiter.run("do:gc-reader-latch", () =>
           repositoryStub.gcReaderLatch(
             readLease.token,
-            snapshot.packs.map((pack) => pack.packKey)
+            snapshot.packs.map((pack) => pack.packKey),
+            cacheCtx?.req.headers.get("X-Display-Operation-ID") ?? undefined
           )
         );
         if (!held) break;

@@ -4,7 +4,7 @@ import type { GcOperation } from "./gcOperation";
 export function gcOperationStatus(operation: GcOperation) {
   const reader = operation.qualification?.reader;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     operationId: operation.id,
     phase: operation.phase,
     createdAt: operation.createdAt,
@@ -18,6 +18,24 @@ export function gcOperationStatus(operation: GcOperation) {
         }
       : null,
     closure: operation.closure ?? null,
+    coordination: operation.coordination
+      ? {
+          refsVersion: operation.coordination.refsVersion,
+          packsetVersion: operation.coordination.packsetVersion,
+          retainedSourcePackCount: operation.coordination.retainedSourcePackKeys.length,
+          conservativeRetentionReason: operation.coordination.conservativeRetentionReason ?? null,
+          acceptedReceives: operation.coordination.acceptedReceives,
+          publicationPrepared:
+            operation.phase === "publish" &&
+            Boolean(
+              operation.claim &&
+              operation.coordination.publicationClaimId === operation.claim.id &&
+              operation.claim.expiresAt > Date.now()
+            ),
+          claimExpiresAt: operation.claim?.expiresAt ?? null,
+          safeRetryAt: operation.claim?.safeRetryAt ?? null,
+        }
+      : null,
     rewrite: operation.rewrite
       ? { packBytes: operation.rewrite.packBytes, packSha1: operation.rewrite.packSha1 }
       : null,

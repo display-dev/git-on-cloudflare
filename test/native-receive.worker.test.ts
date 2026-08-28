@@ -8,7 +8,11 @@ import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
 import { clearExpiredLeases } from "@/worker/do/repo/catalog/leases";
 import { RECOVERY_ESCALATION_ATTEMPTS, recoveryRetryDelayMs } from "@/worker/do/repo/scheduler";
 import type { RepoDurableObject } from "@/worker/do/repo/repoDO";
-import { nativeReceiveOperationKey } from "@/worker/do/repo/repoState";
+import {
+  nativeReceiveOperationKey,
+  receiveFinalizeIntentKey,
+  type ReceiveFinalizeIntent,
+} from "@/worker/do/repo/repoState";
 import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db";
 import {
   isNativeReceiveTerminal,
@@ -866,7 +870,27 @@ describe("durable native receive and import", () => {
         const afterOutcome = await stub.runNativeReceiveOperation(operationId);
         expect(afterOutcome?.state).toBe("finalizing");
         expect(receiveCatalogTest.consumedFailureCounts().outcomeStore).toBe(1);
-        return await stub.runNativeReceiveOperation(operationId);
+        const publication = await runDOWithRetry(
+          () => stub,
+          async (_, state) => {
+            const lease = await state.storage.get<{ token: string }>("receiveLease");
+            if (!lease) throw new Error("receive fence missing");
+            const intent = await state.storage.get<ReceiveFinalizeIntent>(
+              receiveFinalizeIntentKey(lease.token)
+            );
+            return intent?.refPublication;
+          }
+        );
+        expect(publication).toMatchObject({ at: expect.any(Number), refsVersion: 1 });
+        const recovered = await stub.runNativeReceiveOperation(operationId);
+        // Finalization replay and R2 cleanup must not replace the ref-CAS time
+        // with the later mutable operation.updatedAt value.
+        expect(recovered?.result?.refPublication).toEqual(publication);
+        expect(recovered?.updatedAt).toBeGreaterThanOrEqual(publication?.at ?? Infinity);
+        expect((await stub.runNativeReceiveOperation(operationId))?.result?.refPublication).toEqual(
+          publication
+        );
+        return recovered;
       }
     );
     expect(terminal?.state).toBe("committed");

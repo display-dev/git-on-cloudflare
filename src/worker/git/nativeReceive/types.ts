@@ -1,6 +1,7 @@
 import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 import type { ReceiveCommand, ReceiveStatus } from "@/worker/git/operations/validation";
 import type { PackCatalogRow } from "@/worker/do/repo/db/schema";
+import type { ReceiveRefPublication } from "@/worker/do/repo/repoState";
 import type { StockPhysicalDependencyEdge, StockPhysicalNode } from "./physicalDependencyPlan";
 
 export type NativeReceiveOperationState =
@@ -13,6 +14,7 @@ export type NativeReceiveOperationState =
   | "failed";
 
 export type NativeReceiveTerminalResult = {
+  refPublication?: ReceiveRefPublication | undefined;
   statuses: ReceiveStatus[];
   changed: boolean;
   empty: boolean;

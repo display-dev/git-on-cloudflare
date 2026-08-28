@@ -6,6 +6,8 @@
  */
 
 import type { RepoStateSchema, Head, TypedStorage } from "./repoState";
+import { GC_OPERATION_KEY, type GcOperation } from "@/worker/git/maintenance/gcOperation";
+import { gcOwnsSource } from "./catalog/gcCoordination";
 
 import { asTypedStorage, nativeReceiveOperationKey, receiveFinalizeIntentKey } from "./repoState";
 import { activeLeaseOrUndefined } from "./catalog/activity";
@@ -51,6 +53,7 @@ export async function setRefs(
   return await ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
     if (await store.get("repositoryDeleting")) return false;
+    if (gcOwnsSource(await transaction.get<GcOperation>(GC_OPERATION_KEY))) return false;
     if (await hasActiveReceiveMutation(store)) return false;
     const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), Date.now());
     if (compactLease?.operation === "reachability-gc") return false;

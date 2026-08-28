@@ -61,7 +61,8 @@ export async function gcReaderLatch(
   ctx: DurableObjectState,
   env: Env,
   token: string,
-  packKeys: string[]
+  packKeys: string[],
+  readerOperationId?: string
 ): Promise<boolean> {
   if (env.QUALIFICATION_MODE !== "1" || !env.QUALIFICATION_SECRET) return false;
   return ctx.storage.transaction(async (transaction) => {
@@ -70,6 +71,10 @@ export async function gcReaderLatch(
     const reader = operation?.qualification?.reader;
     if (!operation || !reader || reader.releasedAt || reader.expired || !operation.snapshot)
       return false;
+    // Ordinary foreground reads must never be captured by a qualification
+    // latch. This marker selects a reader, not authority: the real read lease
+    // and exact-repository qualification configuration are still required.
+    if (readerOperationId !== `${operation.id}-reader`) return false;
     const now = Date.now();
     const lease = (
       (await transaction.get<RepositoryReadLease[]>("repositoryReadLeases")) ?? []
@@ -77,8 +82,7 @@ export async function gcReaderLatch(
     if (!lease || (reader.token && reader.token !== token)) return false;
     if (!reader.token) {
       if (
-        operation.phase !== "index" ||
-        packKeys.length !== operation.snapshot.sourcePacks.length ||
+        !["index", "publish"].includes(operation.phase) ||
         !operation.snapshot.sourcePacks.every((pack) => packKeys.includes(pack.packKey))
       )
         return false;

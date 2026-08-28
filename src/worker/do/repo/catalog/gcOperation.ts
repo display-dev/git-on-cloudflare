@@ -16,6 +16,7 @@ import { commitReachabilityGcState, recordReachabilityGcPendingState } from "./r
 import type { CommitReachabilityGcResult } from "./reachabilityGc";
 import { getDb, getPackCatalogRow } from "../db";
 import { packIndexKey, packRefsKey } from "@/worker/keys";
+import { commitCoordinatedGc } from "./gcPublication";
 
 export { GC_OPERATION_KEY, GC_WAKE_DELAY_MS } from "@/worker/git/maintenance/gcOperation";
 
@@ -146,20 +147,22 @@ export async function claimGcOperation(args: {
       const compact = await transaction.get<RepoLease>("compactLease");
       const receive = await transaction.get<RepoLease>("receiveLease");
       const otherWriter = [
-        receive,
+        operation.coordination ? undefined : receive,
         compact?.token !== operation.snapshot.token ? compact : undefined,
       ].find((lease) => lease && lease.expiresAt + EXPIRED_WRITER_DRAIN_MS > now);
       if (otherWriter && otherWriter.expiresAt + EXPIRED_WRITER_DRAIN_MS > now) {
         await armWake(transaction, now + GC_WAKE_DELAY_MS);
         return { status: "busy", retryAt: otherWriter.expiresAt + EXPIRED_WRITER_DRAIN_MS };
       }
-      // A conclusive failed catalog transaction may have released its lease.
-      // Reclaim the same operation's lease only while its versions still
-      // match; a changed source must go through publication reconciliation.
+      // Receive catalog activation precedes its ref CAS. That WAL-owned
+      // interval is not an unaccounted source change. Publication still waits
+      // for the receive to finish and checks its final accounted versions.
       if (
-        ((await transaction.get<number>("refsVersion")) ?? 0) === operation.snapshot.refsVersion &&
-        ((await transaction.get<number>("packsetVersion")) ?? 0) ===
-          operation.snapshot.packsetVersion
+        (operation.coordination && receive) ||
+        (((await transaction.get<number>("refsVersion")) ?? 0) ===
+          (operation.coordination?.refsVersion ?? operation.snapshot.refsVersion) &&
+          ((await transaction.get<number>("packsetVersion")) ?? 0) ===
+            (operation.coordination?.packsetVersion ?? operation.snapshot.packsetVersion))
       ) {
         await transaction.put<RepoLease>("compactLease", {
           token: operation.snapshot.token,
@@ -268,6 +271,12 @@ export async function recordGcProgress(args: {
           return { status: "rejected", reason: "source-changed" };
         }
         operation.snapshot = progress.snapshot;
+        operation.coordination = {
+          refsVersion: progress.snapshot.refsVersion,
+          packsetVersion: progress.snapshot.packsetVersion,
+          retainedSourcePackKeys: [],
+          acceptedReceives: 0,
+        };
         operation.phase = "rewrite";
         break;
       }
@@ -433,6 +442,24 @@ export async function commitGcOperation(args: {
     // still call the catalog's existing authoritative reconciliation path.
     if (pending.status !== "recorded" && pending.reason === "repository-deleting")
       return { status: "retry", reason: "repository-deleting" };
+  }
+  if (operation.coordination) {
+    // Only the explicit publication RPC arms helping, after qualification's
+    // before-publication interruption. Expired claims never block admission.
+    await args.ctx.storage.transaction(async (transaction) => {
+      const current = await transaction.get<GcOperation>(GC_OPERATION_KEY);
+      if (
+        current?.id === args.operationId &&
+        current.coordination &&
+        current.phase === "publish" &&
+        current.claim?.id === args.claimId &&
+        current.claim.expiresAt > Date.now()
+      ) {
+        current.coordination.publicationClaimId = args.claimId;
+        await transaction.put(GC_OPERATION_KEY, current);
+      }
+    });
+    return await commitCoordinatedGc(args.ctx, args.operationId, args.claimId);
   }
   const result = await commitReachabilityGcState({
     ctx: args.ctx,
