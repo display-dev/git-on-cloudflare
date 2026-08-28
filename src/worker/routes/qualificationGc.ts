@@ -32,28 +32,16 @@ export function registerQualificationGcRoutes(router: AppRouter, guards: Guards)
     const route = await guards.resolveTarget(c);
     if (!route) return new Response("Not found\n", { status: 404 });
     const stub = getRepoStub(c.env, route.doName);
-    const packs = await c.var.limiter.run("do:qualification-gc-source", () =>
-      stub.getActivePackCatalog()
+    const source = await c.var.limiter.run("do:qualification-gc-source", () =>
+      stub.getQualificationGcSource()
     );
-    const refs = await c.var.limiter.run("do:qualification-gc-refs", () => stub.listRefs());
-    const published = await readPublishedRepositoryGenerationState({
-      env: c.env,
-      doId: stub.id.toString(),
-      limiter: c.var.limiter,
-      countSubrequest: () => {},
-    });
-    if (
-      !published ||
-      packs.length !== published.activePackKeys.size ||
-      !packs.every((pack) => published.activePackKeys.has(pack.packKey))
-    )
-      return json({ status: "publication-pending" }, 409, { "Cache-Control": "no-store" });
+    if (!source) return json({ status: "unavailable" }, 409, { "Cache-Control": "no-store" });
     return json(
       {
         schemaVersion: 1,
-        generation: published.generation,
-        refs,
-        packs: packs.map((pack) => ({
+        generation: source.generation,
+        refs: source.refs,
+        packs: source.packs.map((pack) => ({
           packBytes: pack.packBytes,
           idxBytes: pack.idxBytes,
           objectCount: pack.objectCount,
@@ -199,31 +187,32 @@ export function registerQualificationGcRoutes(router: AppRouter, guards: Guards)
         );
         if (operation && operation.id === c.req.param("operationId"))
           target = operation.commit?.targetPackKey;
+        const published = await readPublishedRepositoryGenerationState({
+          env: c.env,
+          doId: stub.id.toString(),
+          limiter: c.var.limiter,
+          countSubrequest: () => {},
+        });
+        if (!target || !published?.activePackKeys.has(target)) {
+          await release();
+          return new Response("Not published\n", { status: 409 });
+        }
       } else {
         const ordinal = c.req.param("ordinal") ?? "";
         if (!/^(?:0|[1-9][0-9]{0,2})$/.test(ordinal) || Number(ordinal) >= 250) {
           await release();
           return new Response("Not found\n", { status: 404 });
         }
-        const packs = await c.var.limiter.run("do:qualification-artifact-source", () =>
-          stub.getActivePackCatalog()
+        const source = await c.var.limiter.run("do:qualification-artifact-source", () =>
+          stub.getQualificationGcSource()
         );
-        target = packs[Number(ordinal)]?.packKey;
+        if (!source || c.req.query("generation") !== String(source.generation)) {
+          await release();
+          return new Response("Source changed\n", { status: 409 });
+        }
+        target = source.packs[Number(ordinal)]?.packKey;
       }
       if (!target) {
-        await release();
-        return new Response("Not published\n", { status: 409 });
-      }
-      const published = await readPublishedRepositoryGenerationState({
-        env: c.env,
-        doId: stub.id.toString(),
-        limiter: c.var.limiter,
-        countSubrequest: () => {},
-      });
-      if (
-        !published?.activePackKeys.has(target) ||
-        (!c.req.param("operationId") && c.req.query("generation") !== String(published.generation))
-      ) {
         await release();
         return new Response("Not published\n", { status: 409 });
       }

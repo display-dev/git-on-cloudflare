@@ -10,6 +10,7 @@ import {
   gcReaderLatch,
   releaseGcReader,
   observeGcReaderProtection,
+  getQualificationGcSource,
 } from "./gcQualification";
 import {
   GC_OPERATION_KEY,
@@ -585,6 +586,10 @@ export class RepoDurableObject extends DurableObject {
 
   public async getGcOperation(): Promise<GcOperation | undefined> {
     return this.ctx.storage.get<GcOperation>(GC_OPERATION_KEY);
+  }
+
+  public async getQualificationGcSource() {
+    return getQualificationGcSource(this.ctx, this.env);
   }
 
   public async claimGcOperation(operationId: string) {

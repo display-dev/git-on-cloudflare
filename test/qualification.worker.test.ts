@@ -45,7 +45,7 @@ async function enabled<T>(fn: () => Promise<T>): Promise<T> {
 
 describe("qualification repository controls", () => {
   it.each(["complete", "cancel"])(
-    "streams a published GC artifact with runtime-preserved length and releases its reader on %s",
+    "streams the current GC source despite an older R2 generation and releases its reader on %s",
     async (ending) => {
       const artifactNamespace = `qual-${crypto.randomUUID().replaceAll("-", "")}`;
       const repo = await setupRepoForTests(env, artifactNamespace, repository, {
@@ -56,7 +56,7 @@ describe("qualification repository controls", () => {
       for (let offset = 0; offset < payload.byteLength; offset += 65536)
         crypto.getRandomValues(payload.subarray(offset, offset + 65536));
       const pack = await buildPack([{ type: "blob", payload }]);
-      const seeded = await seedPackedRepoState({
+      await seedPackedRepoState({
         env,
         repoId: repo.doName,
         getStub: () => stub,
@@ -65,19 +65,34 @@ describe("qualification repository controls", () => {
       await publishRepositoryGeneration({
         env,
         doId: stub.id.toString(),
-        generation: 1,
-        activePackKeys: seeded.packKeys,
+        generation: 0,
+        activePackKeys: [],
         limiter: new SubrequestLimiter(6),
         countSubrequest: () => {},
         log: createLogger("error", { service: "QualificationArtifactTest" }),
       });
       await enabled(async () =>
         withEnvOverrides(env, { QUALIFICATION_NAMESPACE: artifactNamespace }, async () => {
+          const source = await workerExports.default.fetch(
+            `https://example.com/_internal/qualification/${artifactNamespace}/${repository}/gc-source`,
+            { headers: { Authorization: `Bearer ${secret}` } }
+          );
+          expect(source.status).toBe(200);
+          expect(await source.json()).toMatchObject({
+            schemaVersion: 1,
+            generation: 1,
+            packs: [{ packBytes: pack.byteLength, objectCount: 1 }],
+          });
           const artifactRequest = (generation: number) =>
             workerExports.default.fetch(
               `https://example.com/_internal/qualification/${artifactNamespace}/${repository}/gc-source/0/artifacts/pack?generation=${generation}`,
               { headers: { Authorization: `Bearer ${secret}` } }
             );
+          const writer = await stub.beginReceive();
+          expect(writer.ok).toBe(true);
+          if (!writer.ok) throw new Error("test writer unavailable");
+          expect((await artifactRequest(1)).status).toBe(409);
+          await stub.abortReceive(writer.lease.token);
           expect((await artifactRequest(2)).status).toBe(409);
           const response = await artifactRequest(1);
           expect(response.status).toBe(200);
@@ -104,6 +119,27 @@ describe("qualification repository controls", () => {
               }
             )
           );
+          await runDOWithRetry(
+            () => stub,
+            async (_, state) => {
+              await state.storage.put("repositoryDeleting", true);
+            }
+          );
+          try {
+            const deleting = await workerExports.default.fetch(
+              `https://example.com/_internal/qualification/${artifactNamespace}/${repository}/gc-source`,
+              { headers: { Authorization: `Bearer ${secret}` } }
+            );
+            expect(deleting.status).toBe(409);
+            expect((await artifactRequest(1)).status).toBe(409);
+          } finally {
+            await runDOWithRetry(
+              () => stub,
+              async (_, state) => {
+                await state.storage.delete("repositoryDeleting");
+              }
+            );
+          }
         })
       );
     }

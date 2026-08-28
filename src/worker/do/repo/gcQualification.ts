@@ -3,9 +3,31 @@ import {
   type GcFault,
   type GcOperation,
 } from "@/worker/git/maintenance/gcOperation";
-import type { RepositoryReadLease } from "./repoState";
+import type { RepositoryReadLease, Ref, RepoLease } from "./repoState";
+import { getDb, listActivePackCatalog } from "./db";
 
 const READER_HOLD_MS = 15 * 60_000;
+
+// Receives publish to the authoritative catalog before a maintenance generation
+// is materialized in R2. Read the catalog and its version together, not through
+// the potentially older maintenance-generation manifest.
+export async function getQualificationGcSource(ctx: DurableObjectState, env: Env) {
+  if (env.QUALIFICATION_MODE !== "1" || !env.QUALIFICATION_SECRET) return null;
+  return ctx.storage.transaction(async (transaction) => {
+    if (await transaction.get<boolean>("repositoryDeleting")) return null;
+    for (const key of ["receiveLease", "compactLease"]) {
+      const lease = await transaction.get<RepoLease>(key);
+      // An expired writer may still have a durable finalization intent. Let
+      // normal recovery clear it before exposing a qualification snapshot.
+      if (lease) return null;
+    }
+    return {
+      generation: (await transaction.get<number>("packsetVersion")) ?? 0,
+      refs: (await transaction.get<Ref[]>("refs")) ?? [],
+      packs: await listActivePackCatalog(getDb(ctx.storage)),
+    };
+  });
+}
 
 // These methods are reached only through the exact-target authenticated
 // qualification route or internal execution. No control is active by default.
