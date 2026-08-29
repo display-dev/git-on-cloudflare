@@ -358,6 +358,13 @@ func TestStockReceiveUsesLiveQuarantineAndReturnsActualResponse(t *testing.T) {
 	if rollbackResult.ResultKind != "ref-only" || rollbackResult.InputPackObjectCount != 0 || rollbackResult.ObjectCount != 0 {
 		t.Fatalf("unexpected exact rollback result %#v", rollbackResult)
 	}
+	rollbackResultJSON, err := json.Marshal(rollbackResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rollbackResultJSON, []byte(`"incomingOids":[]`)) {
+		t.Fatalf("ref-only closure proof must encode the empty incoming OID set as an array: %s", rollbackResultJSON)
+	}
 	response, err = decodeStockResponse(rollbackResult.ReceivePackResponse)
 	if err != nil || !bytes.Contains(response, []byte("ok refs/heads/main")) {
 		t.Fatalf("unexpected exact rollback response %q: %v", response, err)

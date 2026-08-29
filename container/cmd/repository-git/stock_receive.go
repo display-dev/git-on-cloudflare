@@ -1310,7 +1310,11 @@ func verifyStockLogicalClosure(ctx context.Context, repoDir string, commands []r
 	}
 	seen := make(map[string]struct{})
 	external := make(map[string]struct{})
-	proof := stockClosureProof{PlanSHA256: planSHA256}
+	proof := stockClosureProof{
+		PlanSHA256:           planSHA256,
+		IncomingOIDs:         []string{},
+		SemanticExternalOIDs: []string{},
+	}
 	for len(queue) > 0 {
 		oid := queue[len(queue)-1]
 		queue = queue[:len(queue)-1]
