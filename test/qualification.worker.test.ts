@@ -340,6 +340,9 @@ describe("qualification repository controls", () => {
         await runDOWithRetry(
           () => stub,
           async (_instance, state) => {
+            await state.storage.put("refs", [
+              { name: "refs/heads/first", oid: "c".repeat(40) },
+            ]);
             await upsertPackCatalogRow(getDb(state.storage), {
               packKey: activePack,
               kind: "compact",
@@ -385,7 +388,12 @@ describe("qualification repository controls", () => {
             })
           );
         }
-        const protectedBody = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 9 });
+        const protectedInventory = await stub.getQualificationInventory();
+        const protectedBody = JSON.stringify({
+          schemaVersion: 1,
+          expectedRefStateDigest: protectedInventory.refStateDigest,
+          expectedObjectCount: 9,
+        });
         const protectedResult = await qualificationRequest("/storage-recovery", {
           ...init,
           body: protectedBody,
@@ -400,6 +408,7 @@ describe("qualification repository controls", () => {
           expect(await env.REPO_BUCKET.head(key)).not.toBeNull();
         }
         for (const key of runAuthorities) expect(await env.REPO_BUCKET.head(key)).toBeNull();
+        expect(await stub.getQualificationInventory()).toEqual(protectedInventory);
       } finally {
         clock.mockRestore();
         await runDOWithRetry(

@@ -133,11 +133,16 @@ default-off, exact-synthetic-repository control never accepts object keys. It
 acquires the existing compaction fence only after every activity lease and
 writer drain period has ended, requires no transient operation or pending
 generation, and protects all catalogued and currently published pack triples.
-It removes only complete recognized native authority pairs for absent valid
-refs and aged uncatalogued native output triples whose operation-ID/fingerprint
-key identity matches those authority records. The ref and receipt bodies must
-also form one complete, content-valid pair. A run marker, filename, timestamp or
-size alone is never ownership evidence. Uncatalogued compaction/GC output
+It removes only complete recognized native authority pairs after their
+transient operation state has been cleared, including a completed qualification
+operation whose ref name remains active. Those records prove run-output
+ownership; the authoritative ref remains in RepoDO and its complete object
+closure remains in protected catalogued/published pack triples. Aged
+uncatalogued native output triples are eligible only when their
+operation-ID/fingerprint key identity matches those authority records. The ref
+and receipt bodies must also form one complete, content-valid pair. A run
+marker, filename, timestamp or size alone is never ownership evidence.
+Uncatalogued compaction/GC output
 without retained exact operation ownership is refused rather than guessed.
 Authoritative active-catalog and published-generation pack, index and reference
 artifacts are removed from eligibility before ownership classification. Unknown

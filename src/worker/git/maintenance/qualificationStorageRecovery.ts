@@ -115,8 +115,7 @@ export async function recoverQualificationStorage(args: {
           typeof ref !== "string" ||
           !isValidRefName(ref) ||
           typeof oid !== "string" ||
-          !/^[a-f0-9]{40}$/.test(oid) ||
-          held.refs.some((r) => r.name === ref)
+          !/^[a-f0-9]{40}$/.test(oid)
         ) {
           return { status: "conflict", reason: "unrecognized_authority" } as const;
         }
