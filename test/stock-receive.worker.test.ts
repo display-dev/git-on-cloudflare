@@ -198,6 +198,17 @@ describe("stock Smart HTTP receive spike", () => {
     expect(parsed.resultKind).toBe("artifacts");
   });
 
+  it("retains only a bounded schema category for invalid host result evidence", () => {
+    expect(() => stockDataPlaneTest.parseHostResultPayload(new TextEncoder().encode("{"))).toThrow(
+      "stock-data-plane:response-header-json-invalid"
+    );
+    expect(() =>
+      stockDataPlaneTest.parseHostResultPayload(
+        new TextEncoder().encode(JSON.stringify({ operationId: "private-provider-value" }))
+      )
+    ).toThrow("stock-data-plane:response-header-receivepackresponse");
+  });
+
   it("restarts a Container that exits during readiness before forwarding receive bytes", async () => {
     let running = true;
     let starts = 0;

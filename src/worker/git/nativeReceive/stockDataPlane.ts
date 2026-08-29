@@ -116,6 +116,28 @@ const hostResultSchema = z
 
 type HostResult = z.infer<typeof hostResultSchema>;
 
+function parseHostResultPayload(bytes: Uint8Array): HostResult {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new Error("stock-data-plane:response-header-json-invalid");
+  }
+  const parsed = hostResultSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  const issue = parsed.error.issues[0];
+  const path = issue?.path
+    .map(String)
+    .join("-")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .slice(0, 36);
+  // Retain only the schema location/category. Values, provider responses and
+  // receive-pack output remain outside durable evidence.
+  const diagnostic = issue?.code === "custom" ? "result-artifact-contract" : path || "contract";
+  throw new Error(`stock-data-plane:response-header-${diagnostic}`);
+}
+
 type StockWorkerExecutor = (args: {
   operation: NativeReceiveOperation;
   cacheCtx: CacheContext;
@@ -171,6 +193,7 @@ export const __test = {
   parseHostResult(value: unknown): HostResult {
     return hostResultSchema.parse(value);
   },
+  parseHostResultPayload,
   setWorkerExecutor(executor: StockWorkerExecutor): void {
     workerExecutorForTesting = executor;
   },
@@ -801,14 +824,7 @@ async function executeStreamingContainer(args: {
   if (resultLength <= 0 || resultLength > HOST_RESULT_MAX_BYTES) {
     throw new Error("stock-data-plane:response-header-limit");
   }
-  let host: HostResult;
-  try {
-    host = hostResultSchema.parse(
-      JSON.parse(new TextDecoder().decode(await reader.exact(resultLength)))
-    );
-  } catch (error) {
-    throw streamingContainerPhaseError("response-header", error);
-  }
+  const host = parseHostResultPayload(await reader.exact(resultLength));
   if (
     host.operationId !== args.operation.id ||
     host.inputRequestSha256 !== stock.inputRequestSha256 ||
