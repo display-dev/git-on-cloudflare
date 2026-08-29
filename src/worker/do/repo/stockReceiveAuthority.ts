@@ -355,24 +355,42 @@ async function preparedProofValid(
   prepared: NativeReceivePrepared
 ): Promise<boolean> {
   const result = prepared.processorResult;
+  const resultKind = result.resultKind ?? "artifacts";
+  const outputProofValid =
+    resultKind === "ref-only"
+      ? result.packBytes === 0 &&
+        result.idxBytes === 0 &&
+        result.refsBytes === 0 &&
+        result.objectCount === 0 &&
+        result.outputValidationRequests === 0 &&
+        result.outputValidationBytes === 0 &&
+        result.outputBytesWritten === 0 &&
+        result.outputRequests === 0 &&
+        !result.packSha256 &&
+        !result.idxSha256 &&
+        !result.refsSha256 &&
+        !result.outputPackEtag &&
+        !result.outputIdxEtag &&
+        !result.outputRefsEtag
+      : result.packBytes > 0 &&
+        result.idxBytes > 0 &&
+        result.refsBytes > 0 &&
+        result.objectCount > 0 &&
+        /^[0-9a-f]{64}$/.test(result.packSha256 ?? "") &&
+        /^[0-9a-f]{64}$/.test(result.idxSha256 ?? "") &&
+        /^[0-9a-f]{64}$/.test(result.refsSha256 ?? "") &&
+        result.outputValidationRequests === 3 &&
+        result.outputValidationBytes === result.packBytes + result.idxBytes + result.refsBytes &&
+        Boolean(result.outputPackEtag && result.outputIdxEtag && result.outputRefsEtag) &&
+        result.outputPackEtag!.length <= 256 &&
+        result.outputIdxEtag!.length <= 256 &&
+        result.outputRefsEtag!.length <= 256;
   return (
     prepared.operationId === operation.id &&
     prepared.fingerprint === operation.fingerprint &&
     result.operationId === operation.id &&
-    result.packBytes > 0 &&
-    result.idxBytes > 0 &&
-    result.refsBytes > 0 &&
-    result.objectCount > 0 &&
-    /^[0-9a-f]{64}$/.test(result.packSha256 ?? "") &&
-    /^[0-9a-f]{64}$/.test(result.idxSha256 ?? "") &&
-    /^[0-9a-f]{64}$/.test(result.refsSha256 ?? "") &&
+    outputProofValid &&
     /^[0-9a-f]{64}$/.test(result.planSha256 ?? "") &&
-    result.outputValidationRequests === 3 &&
-    result.outputValidationBytes === result.packBytes + result.idxBytes + result.refsBytes &&
-    Boolean(result.outputPackEtag && result.outputIdxEtag && result.outputRefsEtag) &&
-    result.outputPackEtag!.length <= 256 &&
-    result.outputIdxEtag!.length <= 256 &&
-    result.outputRefsEtag!.length <= 256 &&
     (await validateStockReceivePreparedProof(operation, result))
   );
 }
@@ -414,8 +432,9 @@ function catalogNeedsCompaction(rows: Array<{ tier: number }>): boolean {
 function stagedPackFor(
   operation: NativeReceiveOperation,
   prepared: NativeReceivePrepared
-): NonNullable<ReceiveFinalizeIntent["stagedPack"]> {
+): ReceiveFinalizeIntent["stagedPack"] {
   const result = prepared.processorResult;
+  if (result.resultKind === "ref-only") return undefined;
   return {
     packKey: operation.outputPackKey,
     packBytes: result.packBytes,
@@ -434,8 +453,9 @@ function stagedPackFor(
 }
 
 /**
- * State-only exact-old CAS. The Worker has already read and hashed the three
- * immutable R2 artifacts; RepoDO receives only their bounded proof.
+ * State-only exact-old CAS. The Worker supplies either bounded proof of three
+ * verified immutable R2 artifacts or an explicitly artifact-free ref-only
+ * result whose complete target closure is already authoritative.
  */
 export async function finalizeStockReceiveState(args: {
   ctx: DurableObjectState;
@@ -473,7 +493,7 @@ export async function finalizeStockReceiveState(args: {
   let statuses = validateReceiveCommands(currentRefs, operation.commands);
   if (operation.state === "ready") {
     const retainedIntent = await store.get(receiveFinalizeIntentKey(operation.leaseToken));
-    if (!operation.processorResult || !operation.publicationPlan || !retainedIntent?.stagedPack) {
+    if (!operation.processorResult || !operation.publicationPlan || !retainedIntent) {
       return { status: "rejected", code: "finalize-state-invalid" };
     }
     prepared = {
@@ -541,6 +561,7 @@ export async function finalizeStockReceiveState(args: {
   const packsetVersion = (await store.get("packsetVersion")) ?? 0;
   const nextRefs = applyReceiveCommands(currentRefs, operation.commands);
   const stagedPack = stagedPackFor(operation, prepared);
+  const refOnly = prepared.processorResult.resultKind === "ref-only";
   let intent = await store.get(receiveFinalizeIntentKey(operation.leaseToken));
   let publicationPlan = operation.publicationPlan;
   if (operation.state === "processing") {
@@ -551,8 +572,8 @@ export async function finalizeStockReceiveState(args: {
       nextHead: nextHead(await store.get("head"), nextRefs),
       nextRefsVersion: refsVersion + 1,
       stagedPack,
-      packSequence,
-      nextPacksetVersion: packsetVersion + 1,
+      packSequence: refOnly ? undefined : packSequence,
+      nextPacksetVersion: refOnly ? undefined : packsetVersion + 1,
       acceptedWriteContext: acceptedWriteContext(operation),
       createdAt: Date.now(),
     };
@@ -623,7 +644,7 @@ export async function finalizeStockReceiveState(args: {
       statuses = validateReceiveCommands(currentRefs, current.commands);
     }
   }
-  if (!intent?.stagedPack || !publicationPlan) {
+  if (!intent || !publicationPlan) {
     return { status: "rejected", code: "finalize-state-invalid" };
   }
   if (operation.state === "ready" && intent.expectedRefsVersion !== refsVersion) {
@@ -636,7 +657,10 @@ export async function finalizeStockReceiveState(args: {
       expectedClaimId: operation.claimId,
     });
   }
-  if (intent.packSequence !== packSequence || intent.nextPacksetVersion !== packsetVersion + 1) {
+  if (
+    !refOnly &&
+    (intent.packSequence !== packSequence || intent.nextPacksetVersion !== packsetVersion + 1)
+  ) {
     return await rejectReadyStockAuthority({
       ctx: args.ctx,
       operation,
@@ -649,8 +673,11 @@ export async function finalizeStockReceiveState(args: {
 
   const db = getDb(args.ctx.storage);
   const activeBefore = await listActivePackCatalog(db);
-  const existingPack = activeBefore.find((row) => row.packKey === stagedPack.packKey);
+  const existingPack = stagedPack
+    ? activeBefore.find((row) => row.packKey === stagedPack.packKey)
+    : undefined;
   if (
+    stagedPack &&
     existingPack &&
     (existingPack.packBytes !== stagedPack.packBytes ||
       existingPack.idxBytes !== stagedPack.idxBytes ||
@@ -667,7 +694,7 @@ export async function finalizeStockReceiveState(args: {
       expectedClaimId: operation.claimId,
     });
   }
-  if (!existingPack) {
+  if (stagedPack && !existingPack) {
     await upsertPackCatalogRow(db, {
       packKey: stagedPack.packKey,
       kind: "receive",
@@ -683,7 +710,7 @@ export async function finalizeStockReceiveState(args: {
     });
   }
   const activeAfter = await listActivePackCatalog(db);
-  const shouldQueueCompaction = catalogNeedsCompaction(activeAfter);
+  const shouldQueueCompaction = stagedPack ? catalogNeedsCompaction(activeAfter) : false;
   const committedAt = Date.now();
   const finalizing = withEvidence(
     {
@@ -697,8 +724,8 @@ export async function finalizeStockReceiveState(args: {
         statuses,
         changed: true,
         empty: nextRefs.length === 0,
-        packKey: operation.outputPackKey,
-        packBytes: stagedPack.packBytes,
+        packKey: stagedPack ? operation.outputPackKey : undefined,
+        packBytes: stagedPack?.packBytes,
         receivePackResponse: prepared.processorResult.receivePackResponse,
         stockTrace: prepared.processorResult.stockTrace,
       },
@@ -726,8 +753,10 @@ export async function finalizeStockReceiveState(args: {
     await tx.put("refs", nextRefs);
     await tx.put("head", intent.nextHead);
     await tx.put("refsVersion", intent.nextRefsVersion);
-    await tx.put("nextPackSeq", packSequence + 1);
-    await tx.put("packsetVersion", packsetVersion + 1);
+    if (stagedPack) {
+      await tx.put("nextPackSeq", packSequence + 1);
+      await tx.put("packsetVersion", packsetVersion + 1);
+    }
     // The stock planner/proof restricts every semantic external edge to the
     // advertised closure, which is already covered by the GC snapshot or a
     // previous protected receive. Native output includes its encoding bases.
@@ -735,7 +764,7 @@ export async function finalizeStockReceiveState(args: {
       transaction,
       refsVersion,
       intent.nextRefsVersion,
-      packsetVersion + 1
+      stagedPack ? packsetVersion + 1 : undefined
     );
     await recordAcceptedWrites(
       tx,
@@ -752,11 +781,13 @@ export async function finalizeStockReceiveState(args: {
       shouldQueueCompaction,
       outputValidationBytes: prepared.processorResult.outputValidationBytes,
       outputValidationRequests: prepared.processorResult.outputValidationRequests,
-      outputEtags: {
-        pack: prepared.processorResult.outputPackEtag!,
-        idx: prepared.processorResult.outputIdxEtag!,
-        refs: prepared.processorResult.outputRefsEtag!,
-      },
+      outputEtags: stagedPack
+        ? {
+            pack: prepared.processorResult.outputPackEtag!,
+            idx: prepared.processorResult.outputIdxEtag!,
+            refs: prepared.processorResult.outputRefsEtag!,
+          }
+        : undefined,
     });
     await tx.put(nativeReceiveOperationKey(operation!.id), finalizing);
     const lease = await tx.get("receiveLease");

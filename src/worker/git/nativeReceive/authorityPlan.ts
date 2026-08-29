@@ -7,10 +7,7 @@ import type {
 } from "./types";
 
 import { asBufferSource, bytesToHex } from "@/worker/common";
-import {
-  nativeReceiveAuthorityReceiptKey,
-  nativeReceiveAuthorityRefKey,
-} from "@/worker/keys";
+import { nativeReceiveAuthorityReceiptKey, nativeReceiveAuthorityRefKey } from "@/worker/keys";
 
 async function sha256Bytes(bytes: Uint8Array): Promise<string> {
   return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", asBufferSource(bytes))));
@@ -38,17 +35,23 @@ export async function buildNativeReceiveAuthorityPublicationPlan(args: {
   }
   const command = args.operation.commands[0]!;
   const result = args.processorResult;
-  if (
-    !result.packSha256 ||
-    !result.idxSha256 ||
-    !result.refsSha256 ||
-    !result.planSha256 ||
-    result.outputValidationBytes === undefined ||
-    result.outputValidationRequests !== 3 ||
-    !result.outputPackEtag ||
-    !result.outputIdxEtag ||
-    !result.outputRefsEtag
-  ) {
+  const resultKind = result.resultKind ?? "artifacts";
+  const artifactProof =
+    resultKind === "artifacts" &&
+    result.packSha256 &&
+    result.idxSha256 &&
+    result.refsSha256 &&
+    result.outputValidationRequests === 3 &&
+    result.outputPackEtag &&
+    result.outputIdxEtag &&
+    result.outputRefsEtag;
+  const refOnlyProof =
+    resultKind === "ref-only" &&
+    result.outputValidationBytes === 0 &&
+    result.outputValidationRequests === 0 &&
+    result.outputBytesWritten === 0 &&
+    result.outputRequests === 0;
+  if (!result.planSha256 || (!artifactProof && !refOnlyProof)) {
     throw new Error("FUBAR: stock publication lacks verified immutable output proof");
   }
   const refKey = nativeReceiveAuthorityRefKey(
@@ -75,6 +78,7 @@ export async function buildNativeReceiveAuthorityPublicationPlan(args: {
         refName: command.ref,
         oldOid: command.oldOid,
         newOid: command.newOid,
+        resultKind,
         packSha256: result.packSha256,
         idxSha256: result.idxSha256,
         refsSha256: result.refsSha256,

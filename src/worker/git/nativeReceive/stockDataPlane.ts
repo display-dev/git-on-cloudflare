@@ -39,6 +39,7 @@ const countsSchema = z
 const hostResultSchema = z
   .object({
     operationId: z.string().min(1).max(100),
+    resultKind: z.enum(["artifacts", "ref-only"]).optional().default("artifacts"),
     receivePackResponse: z.string().min(1).max(1_400_000),
     receiveResponseBytes: z
       .number()
@@ -46,15 +47,15 @@ const hostResultSchema = z
       .nonnegative()
       .max(1024 * 1024),
     inputRequestSha256: sha256Schema,
-    packBytes: z.number().int().positive().max(ARTIFACT_MAX_BYTES),
-    idxBytes: z.number().int().positive().max(ARTIFACT_MAX_BYTES),
-    refsBytes: z.number().int().positive().max(ARTIFACT_MAX_BYTES),
-    packSha1: oidSchema,
-    packSha256: sha256Schema,
-    idxSha256: sha256Schema,
-    refsSha256: sha256Schema,
-    objectCount: z.number().int().positive().max(100_256),
-    inputPackObjectCount: z.number().int().positive().max(100_000),
+    packBytes: z.number().int().nonnegative().max(ARTIFACT_MAX_BYTES),
+    idxBytes: z.number().int().nonnegative().max(ARTIFACT_MAX_BYTES),
+    refsBytes: z.number().int().nonnegative().max(ARTIFACT_MAX_BYTES),
+    packSha1: oidSchema.optional(),
+    packSha256: sha256Schema.optional(),
+    idxSha256: sha256Schema.optional(),
+    refsSha256: sha256Schema.optional(),
+    objectCount: z.number().int().nonnegative().max(100_256),
+    inputPackObjectCount: z.number().int().nonnegative().max(100_000),
     elapsedMs: z.number().int().nonnegative(),
     trace: z
       .array(
@@ -88,7 +89,30 @@ const hostResultSchema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((result, context) => {
+    const hasArtifacts =
+      result.packBytes > 0 &&
+      result.idxBytes > 0 &&
+      result.refsBytes > 0 &&
+      result.objectCount > 0 &&
+      Boolean(result.packSha1 && result.packSha256 && result.idxSha256 && result.refsSha256);
+    const isRefOnly =
+      result.packBytes === 0 &&
+      result.idxBytes === 0 &&
+      result.refsBytes === 0 &&
+      result.objectCount === 0 &&
+      result.packSha1 === undefined &&
+      result.packSha256 === undefined &&
+      result.idxSha256 === undefined &&
+      result.refsSha256 === undefined;
+    if (
+      (result.resultKind === "artifacts" && !hasArtifacts) ||
+      (result.resultKind === "ref-only" && !isRefOnly)
+    ) {
+      context.addIssue({ code: "custom", message: "result kind and artifacts disagree" });
+    }
+  });
 
 type HostResult = z.infer<typeof hostResultSchema>;
 
@@ -144,6 +168,9 @@ type OutputMutationFault = {
 let outputMutationFaultForTesting: OutputMutationFault | undefined;
 
 export const __test = {
+  parseHostResult(value: unknown): HostResult {
+    return hostResultSchema.parse(value);
+  },
   setWorkerExecutor(executor: StockWorkerExecutor): void {
     workerExecutorForTesting = executor;
   },
@@ -578,12 +605,13 @@ function mergeResult(args: {
 }): NativeReceiveProcessResult {
   return {
     operationId: args.host.operationId,
+    resultKind: args.host.resultKind,
     packBytes: args.host.packBytes,
     idxBytes: args.host.idxBytes,
     refsBytes: args.host.refsBytes,
     objectCount: args.host.objectCount,
     inputPackObjectCount: args.host.inputPackObjectCount,
-    packSha1: args.host.packSha1,
+    packSha1: args.host.packSha1 ?? "",
     elapsedMs: args.host.elapsedMs + args.elapsedMs,
     scratchBytes:
       args.operation.inputBytes +
@@ -660,7 +688,7 @@ function mergeResult(args: {
     selectedPackBytes: args.plan.selectedPackBytes,
     activePackCount: args.plan.activePackCount,
     outputBytesWritten: args.host.packBytes + args.host.idxBytes + args.host.refsBytes,
-    outputRequests: 3,
+    outputRequests: args.host.resultKind === "artifacts" ? 3 : 0,
   };
 }
 
@@ -790,33 +818,35 @@ async function executeStreamingContainer(args: {
     throw new Error("stock-data-plane:response-binding-invalid");
   }
   try {
-    await receiveArtifact({
-      ...args,
-      reader,
-      operationId: args.operation.id,
-      key: args.operation.outputPackKey,
-      bytes: host.packBytes,
-      sha256: host.packSha256,
-      role: "pack",
-    });
-    await receiveArtifact({
-      ...args,
-      reader,
-      operationId: args.operation.id,
-      key: args.operation.outputIdxKey,
-      bytes: host.idxBytes,
-      sha256: host.idxSha256,
-      role: "index",
-    });
-    await receiveArtifact({
-      ...args,
-      reader,
-      operationId: args.operation.id,
-      key: args.operation.outputRefsKey,
-      bytes: host.refsBytes,
-      sha256: host.refsSha256,
-      role: "references",
-    });
+    if (host.resultKind === "artifacts") {
+      await receiveArtifact({
+        ...args,
+        reader,
+        operationId: args.operation.id,
+        key: args.operation.outputPackKey,
+        bytes: host.packBytes,
+        sha256: host.packSha256!,
+        role: "pack",
+      });
+      await receiveArtifact({
+        ...args,
+        reader,
+        operationId: args.operation.id,
+        key: args.operation.outputIdxKey,
+        bytes: host.idxBytes,
+        sha256: host.idxSha256!,
+        role: "index",
+      });
+      await receiveArtifact({
+        ...args,
+        reader,
+        operationId: args.operation.id,
+        key: args.operation.outputRefsKey,
+        bytes: host.refsBytes,
+        sha256: host.refsSha256!,
+        role: "references",
+      });
+    }
     await reader.expectEof();
   } catch (error) {
     throw streamingContainerPhaseError("output-upload", error);
@@ -864,10 +894,20 @@ export async function executeStockReceiveWorkerDataPlane(args: {
       elapsedMs: Date.now() - startedAt,
     });
   }
-  try {
-    result = await verifyOutputArtifacts({ ...args, result });
-  } catch (error) {
-    throw streamingContainerPhaseError("output-verification", error);
+  if (result.resultKind === "ref-only") {
+    result = {
+      ...result,
+      outputValidationBytes: 0,
+      outputValidationRequests: 0,
+      outputBytesWritten: 0,
+      outputRequests: 0,
+    };
+  } else {
+    try {
+      result = await verifyOutputArtifacts({ ...args, result });
+    } catch (error) {
+      throw streamingContainerPhaseError("output-verification", error);
+    }
   }
   let proofFailure: string | undefined;
   try {

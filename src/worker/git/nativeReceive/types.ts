@@ -358,6 +358,9 @@ export type NativeReceiveProcessRequest = {
 
 export type NativeReceiveProcessResult = {
   operationId: string;
+  /** Native receive either produced immutable artifacts or only validated a ref transaction. */
+  /** Required by the stock-receive host protocol; absent on non-stock native work. */
+  resultKind?: "artifacts" | "ref-only" | undefined;
   packBytes: number;
   idxBytes: number;
   refsBytes: number;

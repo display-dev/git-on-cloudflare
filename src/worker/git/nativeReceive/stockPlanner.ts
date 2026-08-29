@@ -19,7 +19,7 @@ import { buildPackV2 } from "@/worker/git/pack/build";
 import { createStockPhysicalDependencyPlanner } from "@/worker/git/nativeReceive/physicalDependencyPlan";
 import { resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/resolve";
 import { scanPack } from "@/worker/git/pack/indexer/scan";
-import { findOidIndex, parseIdxView } from "@/worker/git/object-store";
+import { findOidIndex, getOidHexAt, parseIdxView } from "@/worker/git/object-store";
 import { readPackRange } from "@/worker/git/pack/packMeta";
 import {
   getPackRefObjectType,
@@ -1138,7 +1138,7 @@ function deriveIncomingBoundary(args: {
   | "externalEdgeCount"
   | "missingObjectCount"
   | "objectTypeCounts"
-> {
+> & { visitedIncomingOids: string[] } {
   const queue = args.commands
     .map((command) => command.newOid.toLowerCase())
     .filter((oid) => oid !== ZERO_OID);
@@ -1153,14 +1153,14 @@ function deriveIncomingBoundary(args: {
   for (let cursor = 0; cursor < queue.length; cursor++) {
     const oid = queue[cursor]!;
     if (visited.has(oid) || external.has(oid)) continue;
-    const node = incomingNode(args.incomingIdx, args.incomingRefs, oid);
-    if (!node) {
-      if (!args.advertisedReachable.has(oid)) {
-        missingObjectCount++;
-        throw new Error("stock-plan:incoming-closure-missing");
-      }
+    if (args.advertisedReachable.has(oid)) {
       external.add(oid);
       continue;
+    }
+    const node = incomingNode(args.incomingIdx, args.incomingRefs, oid);
+    if (!node) {
+      missingObjectCount++;
+      throw new Error("stock-plan:incoming-closure-missing");
     }
     if (visited.size >= MAX_CLOSURE_OBJECTS) throw new Error("stock-plan:incoming-closure-limit");
     visited.add(oid);
@@ -1183,6 +1183,7 @@ function deriveIncomingBoundary(args: {
   }
 
   return {
+    visitedIncomingOids: [...visited].sort(),
     semanticExternalOids: [...external].sort(),
     visitedIncomingObjectCount: visited.size,
     logicalEdgeCount,
@@ -1458,8 +1459,22 @@ async function planStockReceiveImpl(
     incomingRefs,
     advertisedReachable,
   });
+  const visitedIncoming = new Set(boundary.visitedIncomingOids);
+  for (let index = 0; index < incomingIdx.count; index++) {
+    const oid = getOidHexAt(incomingIdx, index);
+    if (!visitedIncoming.has(oid) && !advertisedReachable.has(oid)) {
+      throw new Error("stock-plan:unreachable-input-object");
+    }
+  }
+  // receive-pack validates each command against a disposable ref at the exact
+  // old OID. A rollback target can be an advertised ancestor that does not
+  // reach the current tip, so hydrate non-zero command old-OIDs independently
+  // from the target closure.
+  const commandOldOids = args.commands
+    .map((command) => command.oldOid.toLowerCase())
+    .filter((oid) => oid !== ZERO_OID);
   const requiredRootOids = [
-    ...new Set([...boundary.semanticExternalOids, ...thinDeltaBaseOids]),
+    ...new Set([...boundary.semanticExternalOids, ...thinDeltaBaseOids, ...commandOldOids]),
   ].sort();
   if (requiredRootOids.length > MAX_RANGE_RECORDS) {
     throw new Error("stock-plan:required-root-limit");

@@ -223,7 +223,14 @@ func stockReceiveBundleHandler(writer http.ResponseWriter, request *http.Request
 	pack, packOK := bridge.outputs[input.OutputPackKey]
 	idx, idxOK := bridge.outputs[input.OutputIdxKey]
 	refs, refsOK := bridge.outputs[input.OutputRefsKey]
-	if !packOK || !idxOK || !refsOK || pack.bytes != result.PackBytes || idx.bytes != result.IdxBytes || refs.bytes != result.RefsBytes {
+	result.ResultKind = normalizedStockResultKind(result.ResultKind)
+	if result.ResultKind == "ref-only" {
+		if packOK || idxOK || refsOK || result.PackBytes != 0 || result.IdxBytes != 0 || result.RefsBytes != 0 || result.ObjectCount != 0 {
+			writeProcessError(writer, errors.New("ref-only stock result unexpectedly produced outputs"))
+			return
+		}
+		pack, idx, refs = stockBundleObject{}, stockBundleObject{}, stockBundleObject{}
+	} else if !packOK || !idxOK || !refsOK || pack.bytes != result.PackBytes || idx.bytes != result.IdxBytes || refs.bytes != result.RefsBytes {
 		writeProcessError(writer, errors.New("stock result outputs are incomplete"))
 		return
 	}
@@ -247,9 +254,18 @@ func stockReceiveBundleHandler(writer http.ResponseWriter, request *http.Request
 	if _, err := writer.Write(resultBytes); err != nil {
 		return
 	}
-	for _, object := range []stockBundleObject{pack, idx, refs} {
-		if writeStockBundleFile(writer, object) != nil {
-			return
+	if result.ResultKind == "artifacts" {
+		for _, object := range []stockBundleObject{pack, idx, refs} {
+			if writeStockBundleFile(writer, object) != nil {
+				return
+			}
 		}
 	}
+}
+
+func normalizedStockResultKind(resultKind string) string {
+	if resultKind == "" {
+		return "artifacts"
+	}
+	return resultKind
 }

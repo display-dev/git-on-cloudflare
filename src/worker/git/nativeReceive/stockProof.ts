@@ -379,6 +379,13 @@ export async function stockReceivePreparedProofFailure(
   const prerequisiteOids = result.prerequisiteObjectOids;
   const ranges = result.ranges;
   const reads = result.activePackReads;
+  const resultKind = result.resultKind ?? "artifacts";
+  const outputCountsValid =
+    resultKind === "ref-only"
+      ? result.objectCount === 0 &&
+        result.visitedIncomingObjectCount === 0 &&
+        proof?.incomingOids.length === 0
+      : result.objectCount === result.visitedIncomingObjectCount! + thin!.length;
   if (
     !operation.stockReceive ||
     result.operationId !== operation.id ||
@@ -418,10 +425,10 @@ export async function stockReceivePreparedProofFailure(
     !equalStrings(prerequisiteOids, roots) ||
     !equalStrings(proof.semanticExternalOids, semantic) ||
     proof.visitedIncomingObjectCount !== result.visitedIncomingObjectCount ||
-    proof.visitedIncomingObjectCount !== result.incomingObjectCount ||
-    proof.incomingOids.length !== result.incomingObjectCount ||
+    proof.visitedIncomingObjectCount! > result.incomingObjectCount! ||
+    proof.incomingOids.length !== result.visitedIncomingObjectCount ||
     result.inputPackObjectCount !== result.incomingObjectCount ||
-    result.objectCount !== result.incomingObjectCount! + thin.length ||
+    !outputCountsValid ||
     proof.logicalEdgeCount !== result.logicalEdgeCount ||
     proof.internalEdgeCount !== result.internalEdgeCount ||
     proof.externalEdgeCount !== result.externalEdgeCount ||
@@ -440,7 +447,10 @@ export async function stockReceivePreparedProofFailure(
   }
   const semanticSet = new Set(semantic);
   if (thin.some((oid) => semanticSet.has(oid))) return "root-overlap";
-  const rootUnion = [...new Set([...semantic, ...thin])].sort();
+  const commandOldOids = operation.commands
+    .map((command) => command.oldOid.toLowerCase())
+    .filter((oid) => oid !== "0".repeat(40));
+  const rootUnion = [...new Set([...semantic, ...thin, ...commandOldOids])].sort();
   if (!equalStrings(rootUnion, roots)) return "root-union";
   if (!(await physicalPlanValid({ operation, result, roots, ranges, reads }))) {
     return "physical-plan";

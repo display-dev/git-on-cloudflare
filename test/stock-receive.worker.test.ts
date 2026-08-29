@@ -36,6 +36,7 @@ import {
   r2PackKey,
 } from "@/worker/keys";
 import { buildPack } from "./util/git-pack";
+import { buildTreePayload, readRepoCatalogState, seedPackedRepoState } from "./util/packed-repo";
 import { setupRepoForTests } from "./util/repoSeed";
 import { runDOWithRetry, toRequestBody, uniqueRepoId } from "./util/test-helpers";
 
@@ -154,6 +155,47 @@ describe("stock Smart HTTP receive spike", () => {
     expect(
       stockDataPlaneTest.containerFailureCode(new Response("rejected\n", { status: 422 }))
     ).toBe("stock-data-plane:container-rejected");
+  });
+
+  it("accepts legacy artifact host results and normalizes their omitted discriminator", () => {
+    const digest = "a".repeat(64);
+    const parsed = stockDataPlaneTest.parseHostResult({
+      operationId: "legacy-artifact-result",
+      receivePackResponse: "AA==",
+      receiveResponseBytes: 1,
+      inputRequestSha256: digest,
+      packBytes: 1,
+      idxBytes: 1,
+      refsBytes: 1,
+      packSha1: "b".repeat(40),
+      packSha256: digest,
+      idxSha256: digest,
+      refsSha256: digest,
+      objectCount: 1,
+      inputPackObjectCount: 1,
+      elapsedMs: 1,
+      trace: [],
+      quarantinePathInsideOwnedWorkRoot: true,
+      quarantineRemovedAfterReceive: true,
+      quarantinePathNonEmpty: true,
+      freshWorkDirectory: true,
+      repositoryPackBytesBeforeHydration: 0,
+      sharedObjectCacheDisabled: true,
+      skipConnectivityCheck: false,
+      planSha256: digest,
+      closureProof: {
+        planSha256: digest,
+        incomingOids: ["b".repeat(40)],
+        semanticExternalOids: [],
+        visitedIncomingObjectCount: 1,
+        logicalEdgeCount: 0,
+        internalEdgeCount: 0,
+        externalEdgeCount: 0,
+        missingObjectCount: 0,
+        objectTypeCounts: { commit: 1, tree: 0, blob: 0, tag: 0 },
+      },
+    });
+    expect(parsed.resultKind).toBe("artifacts");
   });
 
   it("restarts a Container that exits during readiness before forwarding receive bytes", async () => {
@@ -516,10 +558,33 @@ describe("stock Smart HTTP receive spike", () => {
       size: plan.closureManifestBytes,
       customMetadata: { sha256: plan.closureManifestSha256 },
     });
+    cacheCtx.memo = {};
+    const emptyPack = await buildPack([]);
+    const emptyRequestKey = `${prefix}/native-receive/input-stock-empty.request`;
+    const emptySha256 = await sha256(emptyPack);
+    await env.REPO_BUCKET.put(emptyRequestKey, emptyPack, {
+      customMetadata: { sha256: emptySha256 },
+    });
+    const emptyPlan = await planStockReceive({
+      ...planArgs,
+      operationId: "stock-empty-plan-operation",
+      inputRequestKey: emptyRequestKey,
+      inputRequestBytes: emptyPack.byteLength,
+      inputRequestSha256: emptySha256,
+      packBytes: emptyPack.byteLength,
+      commands: [{ oldOid: active.commitOid, newOid: active.commitOid, ref: "refs/heads/main" }],
+    });
+    expect(emptyPlan.incomingObjectCount).toBe(0);
+    expect(emptyPlan.visitedIncomingObjectCount).toBe(0);
+    expect(emptyPlan.semanticExternalOids).toEqual([active.commitOid]);
+    expect(emptyPlan.requiredRootOids).toEqual([active.commitOid]);
     await env.REPO_BUCKET.delete([
       inputRequestKey,
       plan.prerequisitePackKey,
       plan.closureManifestKey,
+      emptyRequestKey,
+      emptyPlan.prerequisitePackKey,
+      emptyPlan.closureManifestKey,
     ]);
   });
 
@@ -1044,6 +1109,312 @@ describe("stock Smart HTTP receive spike", () => {
         .filter((object) => object.key.includes("/native-receive/input-"))
         .map((object) => object.key)
     ).toEqual([]);
+  });
+
+  it("commits and replays a ref-only rollback without catalog or artifact mutation", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stock-ref-only");
+    const seeded = await setupRepoForTests(env, owner, repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const author = "Display <display@example.invalid> 0 +0000";
+    const blobPayload = new TextEncoder().encode("ref-only\n");
+    const blob = await encodeGitObject("blob", blobPayload);
+    const treePayload = buildTreePayload([{ mode: "100644", name: "state.txt", oid: blob.oid }]);
+    const tree = await encodeGitObject("tree", treePayload);
+    const basePayload = new TextEncoder().encode(
+      `tree ${tree.oid}\nauthor ${author}\ncommitter ${author}\n\nbase\n`
+    );
+    const base = await encodeGitObject("commit", basePayload);
+    const currentPayload = new TextEncoder().encode(
+      `tree ${tree.oid}\nparent ${base.oid}\nauthor ${author}\ncommitter ${author}\n\ncurrent\n`
+    );
+    const current = await encodeGitObject("commit", currentPayload);
+    const authoritativePack = await buildPack([
+      { type: "blob", payload: blobPayload },
+      { type: "tree", payload: treePayload },
+      { type: "commit", payload: basePayload },
+      { type: "commit", payload: currentPayload },
+    ]);
+    await seedPackedRepoState({
+      env,
+      repoId: seeded.doName,
+      getStub: () => stub,
+      packs: [{ name: "pack-ref-only-authority.pack", packBytes: authoritativePack }],
+      refs: [{ name: "refs/heads/main", oid: current.oid }],
+      head: { target: "refs/heads/main", oid: current.oid },
+    });
+    const before = await readRepoCatalogState(() => stub);
+
+    // The input deliberately duplicates objects already reachable from the
+    // advertised current tip. The native result therefore has no new output.
+    const duplicatePack = await buildPack([
+      { type: "blob", payload: blobPayload },
+      { type: "tree", payload: treePayload },
+      { type: "commit", payload: basePayload },
+    ]);
+    const commandPrefix = concatChunks([
+      pktLine(`${current.oid} ${base.oid} refs/heads/main\0 report-status agent=git/2.50.1\n`),
+      flushPkt(),
+    ]);
+    const requestBody = concatChunks([commandPrefix, duplicatePack]);
+    const receivePackResponse = concatChunks([
+      pktLine("unpack ok\n"),
+      pktLine("ok refs/heads/main\n"),
+      flushPkt(),
+    ]);
+    let executionCount = 0;
+    let plannedRangeBytes = -1;
+    stockDataPlaneTest.setWorkerExecutor(
+      async ({ operation, cacheCtx, limiter, countSubrequest, logger }) => {
+        executionCount++;
+        const stock = operation.stockReceive!;
+        const plan = await planStockReceive({
+          env,
+          repoId: operation.repositoryId,
+          operationId: operation.id,
+          inputRequestKey: operation.inputPackKey,
+          inputRequestBytes: operation.inputBytes,
+          inputRequestSha256: stock.inputRequestSha256,
+          packOffset: stock.packOffset,
+          packBytes: stock.packBytes,
+          advertisedRefs: stock.advertisedRefs,
+          commands: operation.commands,
+          activePacks: operation.activeCatalog,
+          cacheCtx,
+          limiter,
+          countSubrequest: (count) => countSubrequest("test-stock-ref-only-plan", count),
+          log: logger,
+        });
+        plannedRangeBytes = plan.rangeBytes;
+        expect(plan.incomingObjectCount).toBe(3);
+        expect(plan.visitedIncomingObjectCount).toBe(0);
+        expect(plan.semanticExternalOids).toEqual([base.oid]);
+        expect(plan.requiredRootOids).toEqual([base.oid, current.oid].sort());
+        const result = {
+          operationId: operation.id,
+          resultKind: "ref-only",
+          packBytes: 0,
+          idxBytes: 0,
+          refsBytes: 0,
+          objectCount: 0,
+          inputPackObjectCount: plan.incomingObjectCount,
+          packSha1: "",
+          elapsedMs: 1,
+          scratchBytes: requestBody.byteLength + plan.prerequisitePackBytes,
+          hydratedBytes: plan.prerequisiteHydratedBytes,
+          downloadedBytes:
+            plan.inputBytesRead +
+            plan.rangeBytes +
+            plan.metadataBytes +
+            operation.inputBytes +
+            plan.prerequisitePackBytes +
+            plan.closureManifestBytes,
+          cacheHitBytes: 0,
+          receivePackResponse: btoa(String.fromCharCode(...receivePackResponse)),
+          inputRequestSha256: await sha256(requestBody),
+          stockTrace: stockTrace.map((event, index) => ({ sequence: index + 1, event })),
+          metadataBytes: plan.metadataBytes + plan.closureManifestBytes,
+          metadataRequests: plan.metadataRequests + 1,
+          inputBytesRead: plan.inputBytesRead + operation.inputBytes + plan.prerequisitePackBytes,
+          inputRequests: plan.inputRequests + 2,
+          rangeBytes: plan.rangeBytes,
+          rangeRequests: plan.rangeRequests,
+          packsTouched: plan.packsTouched,
+          quarantinePathInsideOwnedWorkRoot: true,
+          quarantineRemovedAfterReceive: true,
+          quarantinePathNonEmpty: true,
+          freshWorkDirectory: true,
+          repositoryPackBytesBeforeHydration: 0,
+          sharedObjectCacheDisabled: true,
+          skipConnectivityCheck: false,
+          planSha256: plan.planSha256,
+          closureProof: {
+            planSha256: plan.planSha256,
+            incomingOids: [],
+            semanticExternalOids: plan.semanticExternalOids,
+            visitedIncomingObjectCount: 0,
+            logicalEdgeCount: 0,
+            internalEdgeCount: 0,
+            externalEdgeCount: 0,
+            missingObjectCount: 0,
+            objectTypeCounts: { commit: 0, tree: 0, blob: 0, tag: 0 },
+          },
+          semanticExternalOids: plan.semanticExternalOids,
+          thinDeltaBaseOids: plan.thinDeltaBaseOids,
+          requiredRootOids: plan.requiredRootOids,
+          prerequisiteObjectOids: plan.requiredRootOids,
+          physicalNodes: plan.physicalNodes,
+          physicalDependencies: plan.dependencies,
+          topologicalEntryIds: plan.topologicalEntryIds,
+          selectedPackChecksums: plan.selectedPackChecksums,
+          activePackBindings: plan.activePackBindings,
+          ranges: plan.ranges,
+          activePackReads: plan.activePackReads,
+          activePackTrailerBytes: plan.activePackTrailerBytes,
+          activePackTrailerRequests: plan.activePackTrailerRequests,
+          activePackRangeBytes: plan.activePackRangeBytes,
+          activePackRangeRequests: plan.activePackRangeRequests,
+          activePackWholeBytes: 0,
+          activePackWholeRequests: 0,
+          activePackUnattributedBytes: 0,
+          activePackUnattributedRequests: 0,
+          closureManifestKey: plan.closureManifestKey,
+          closureManifestBytes: plan.closureManifestBytes,
+          closureManifestSha256: plan.closureManifestSha256,
+          closureManifestEtag: plan.closureManifestEtag,
+          prerequisitePackKey: plan.prerequisitePackKey,
+          prerequisitePackBytes: plan.prerequisitePackBytes,
+          prerequisitePackSha256: plan.prerequisitePackSha256,
+          prerequisitePackEtag: plan.prerequisitePackEtag,
+          incomingObjectCount: plan.incomingObjectCount,
+          visitedIncomingObjectCount: 0,
+          logicalEdgeCount: 0,
+          internalEdgeCount: 0,
+          externalEdgeCount: 0,
+          missingObjectCount: 0,
+          objectTypeCounts: { commit: 0, tree: 0, blob: 0, tag: 0 },
+          selectedPackBytes: plan.selectedPackBytes,
+          activePackCount: plan.activePackCount,
+          outputValidationBytes: 0,
+          outputValidationRequests: 0,
+          outputBytesWritten: 0,
+          outputRequests: 0,
+        } satisfies NativeReceiveProcessResult;
+        expect(await validateStockReceivePreparedProof(operation, result)).toBe(true);
+        expect(
+          await validateStockReceivePreparedProof(operation, {
+            ...result,
+            visitedIncomingObjectCount: 1,
+            closureProof: {
+              ...result.closureProof,
+              incomingOids: [base.oid],
+              visitedIncomingObjectCount: 1,
+              objectTypeCounts: { commit: 1, tree: 0, blob: 0, tag: 0 },
+            },
+            objectTypeCounts: { commit: 1, tree: 0, blob: 0, tag: 0 },
+          })
+        ).toBe(false);
+        expect(
+          await validateStockReceivePreparedProof(operation, {
+            ...result,
+            thinDeltaBaseOids: [base.oid],
+          })
+        ).toBe(false);
+        expect(
+          await validateStockReceivePreparedProof(operation, {
+            ...result,
+            missingObjectCount: 1,
+            closureProof: { ...result.closureProof, missingObjectCount: 1 },
+          })
+        ).toBe(false);
+        expect(
+          await validateStockReceivePreparedProof(operation, {
+            ...result,
+            quarantineRemovedAfterReceive: false,
+          })
+        ).toBe(false);
+        return result;
+      }
+    );
+
+    const push = async (operationId: string) =>
+      await handleStreamingReceivePackPOST(
+        { ...env, NATIVE_RECEIVE_CONTAINER: "1" },
+        seeded.doName,
+        new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-git-receive-pack-request",
+            "Content-Length": String(requestBody.byteLength),
+            "X-Display-Operation-ID": operationId,
+          },
+          body: toRequestBody(requestBody),
+        }),
+        createExecutionContext(),
+        {
+          limiter: new SubrequestLimiter(900),
+          acceptedWriteContext: {
+            repositoryId: seeded.doName,
+            actor: "stock-ref-only-test",
+            sourceSurface: "git-push",
+            idempotencyKey: null,
+          },
+        }
+      );
+
+    const response = await push("stock-ref-only-operation");
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(receivePackResponse);
+    expect((await stub.listRefs()).find((ref) => ref.name === "refs/heads/main")?.oid).toBe(
+      base.oid
+    );
+    const committed = await stub.getNativeReceiveOperation("stock-ref-only-operation");
+    expect(committed).toMatchObject({
+      state: "committed",
+      result: {
+        changed: true,
+        packKey: undefined,
+        packBytes: undefined,
+        authorityPublication: {
+          refs: [{ name: "refs/heads/main", oid: base.oid }],
+          receipt: { disposition: "committed", newOid: base.oid },
+        },
+      },
+      metrics: {
+        outputValidationBytes: 0,
+        outputValidationRequests: 0,
+        outputBytesWritten: 0,
+        outputRequests: 0,
+      },
+    });
+    expect(plannedRangeBytes).toBeGreaterThan(0);
+    const after = await readRepoCatalogState(() => stub);
+    expect(after).toEqual(before);
+    expect(
+      (await env.REPO_BUCKET.list()).objects.filter(
+        (object) =>
+          object.key.includes("stock-ref-only-operation") && /\.(?:pack|idx|refs)$/.test(object.key)
+      )
+    ).toEqual([]);
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        expect((await state.storage.list({ prefix: "acceptedWrite:" })).size).toBe(1);
+      }
+    );
+
+    // A lost response retries by operation identity and must not repeat native
+    // processing or create a second accepted-write fact.
+    const replay = await push("stock-ref-only-operation");
+    expect(replay.status).toBe(200);
+    expect(new Uint8Array(await replay.arrayBuffer())).toEqual(receivePackResponse);
+    expect(executionCount).toBe(1);
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        expect((await state.storage.list({ prefix: "acceptedWrite:" })).size).toBe(1);
+      }
+    );
+
+    const stale = await push("stock-ref-only-stale-old");
+    expect(stale.status).toBe(200);
+    expect(new TextDecoder().decode(await stale.arrayBuffer())).toContain(
+      "ng refs/heads/main stale info"
+    );
+    expect(await stub.getNativeReceiveOperation("stock-ref-only-stale-old")).toMatchObject({
+      state: "aborted",
+      errorCode: "exact-old-ref-conflict",
+    });
+    expect((await stub.listRefs()).find((ref) => ref.name === "refs/heads/main")?.oid).toBe(
+      base.oid
+    );
+    expect(await readRepoCatalogState(() => stub)).toEqual(before);
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        expect((await state.storage.list({ prefix: "acceptedWrite:" })).size).toBe(1);
+      }
+    );
   });
 
   it("fences a late expired execution claim from a newer attempt's output keys", async () => {

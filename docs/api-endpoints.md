@@ -63,11 +63,16 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
   routing threshold, not a repository or push quota.
 
   The native processor receives the incoming request plus the validated
-  prerequisite pack, writes immutable `.pack`, `.idx`, and reference-sidecar
-  output, and returns its proof to the Worker. RepoDO remains the sole authority:
-  it performs exact-old-ref validation and atomically commits refs and catalog
-  metadata before the Worker acknowledges the client. One active receive lease
-  is allowed per repository; concurrent pushes receive `503 Retry-After: 10`.
+  prerequisite pack and completes stock `receive-pack` plus hook validation.
+  When new objects remain, it writes immutable `.pack`, `.idx`, and
+  reference-sidecar output and returns their proof to the Worker. A valid
+  transaction can instead be `ref-only` when every required object is already
+  authoritative: that result has zero output objects and no artifact triple.
+  RepoDO remains the sole authority in both cases. It performs exact-old-ref
+  validation, records the accepted-write fact and conclusive receipt, and
+  changes the pack catalog only for artifact-producing receives before the
+  Worker acknowledges the client. One active receive lease is allowed per
+  repository; concurrent pushes receive `503 Retry-After: 10`.
   Requires HTTP Basic credentials where the username matches `:owner` and the
   password is a PAT with `level: "push"`.
 

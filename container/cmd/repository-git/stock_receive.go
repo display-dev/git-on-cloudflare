@@ -163,6 +163,7 @@ type stockTraceEvent struct {
 }
 
 type stockReceiveResponse struct {
+	ResultKind                         string            `json:"resultKind,omitempty"`
 	OperationID                        string            `json:"operationId"`
 	ReceivePackResponse                string            `json:"receivePackResponse"`
 	ReceiveResponseBytes               int64             `json:"receiveResponseBytes"`
@@ -170,10 +171,10 @@ type stockReceiveResponse struct {
 	PackBytes                          int64             `json:"packBytes"`
 	IdxBytes                           int64             `json:"idxBytes"`
 	RefsBytes                          int64             `json:"refsBytes"`
-	PackSHA1                           string            `json:"packSha1"`
-	PackSHA256                         string            `json:"packSha256"`
-	IdxSHA256                          string            `json:"idxSha256"`
-	RefsSHA256                         string            `json:"refsSha256"`
+	PackSHA1                           string            `json:"packSha1,omitempty"`
+	PackSHA256                         string            `json:"packSha256,omitempty"`
+	IdxSHA256                          string            `json:"idxSha256,omitempty"`
+	RefsSHA256                         string            `json:"refsSha256,omitempty"`
 	ObjectCount                        uint32            `json:"objectCount"`
 	InputPackObjectCount               uint32            `json:"inputPackObjectCount"`
 	ElapsedMS                          int64             `json:"elapsedMs"`
@@ -755,9 +756,14 @@ func validateStockClosureManifest(manifest stockClosureManifest, input stockRece
 			return errors.New("closure manifest semantic and thin roots overlap")
 		}
 	}
-	union := make(map[string]struct{}, len(manifest.SemanticExternalOIDs)+len(manifest.ThinDeltaBaseOIDs))
+	union := make(map[string]struct{}, len(manifest.SemanticExternalOIDs)+len(manifest.ThinDeltaBaseOIDs)+len(input.Commands))
 	for _, oid := range append(append([]string(nil), manifest.SemanticExternalOIDs...), manifest.ThinDeltaBaseOIDs...) {
 		union[oid] = struct{}{}
+	}
+	for _, command := range input.Commands {
+		if !isZeroOID(command.OldOID) {
+			union[command.OldOID] = struct{}{}
+		}
 	}
 	if len(union) != len(requiredSet) {
 		return errors.New("closure manifest required root union mismatch")
@@ -778,8 +784,8 @@ func validateStockClosureManifest(manifest stockClosureManifest, input stockRece
 		return err
 	}
 	counts := manifest.Closure
-	if counts.IncomingObjectCount <= 0 || counts.IncomingObjectCount > maxStockClosureObjects ||
-		counts.VisitedIncomingObjectCount != counts.IncomingObjectCount ||
+	if counts.IncomingObjectCount < 0 || counts.IncomingObjectCount > maxStockClosureObjects ||
+		counts.VisitedIncomingObjectCount < 0 || counts.VisitedIncomingObjectCount > counts.IncomingObjectCount ||
 		counts.LogicalEdgeCount < 0 || counts.LogicalEdgeCount > maxStockClosureEdges ||
 		counts.InternalEdgeCount < 0 || counts.ExternalEdgeCount < 0 ||
 		counts.InternalEdgeCount+counts.ExternalEdgeCount != counts.LogicalEdgeCount || counts.MissingObjectCount != 0 {
@@ -993,12 +999,33 @@ func processStockReceive(ctx context.Context, input stockReceiveRequest, client 
 		return stockReceiveResponse{}, err
 	}
 	closureProof, err := readStockClosureProof(closureRecordPath)
-	if err != nil || validateStockClosureProof(closureProof, manifest, input.ClosureManifestSHA256) != nil {
-		return stockReceiveResponse{}, errors.New("pre-receive closure proof did not match plan")
+	if err != nil {
+		return stockReceiveResponse{}, errors.New("pre-receive closure proof was unavailable")
 	}
-	packPath, idxPath, err := findStockOutputPack(filepath.Join(repoDir, "objects", "pack"), input.PrerequisitePackSHA256)
+	if err := validateStockClosureProof(closureProof, manifest, input.ClosureManifestSHA256); err != nil {
+		return stockReceiveResponse{}, fmt.Errorf("pre-receive closure proof did not match plan: %w", err)
+	}
+	packPath, idxPath, foundOutput, err := findStockOutputPack(filepath.Join(repoDir, "objects", "pack"), input.PrerequisitePackSHA256)
 	if err != nil {
 		return stockReceiveResponse{}, err
+	}
+	// Thin bases belong to the submitted pack's decoding prerequisites. They do
+	// not imply that receive-pack produced new authoritative objects.
+	refOnly := manifest.Closure.VisitedIncomingObjectCount == 0
+	if !foundOutput && !refOnly {
+		return stockReceiveResponse{}, errors.New("receive-pack output was missing for new objects")
+	}
+	if refOnly {
+		return stockReceiveResponse{
+			ResultKind: "ref-only", OperationID: input.OperationID,
+			ReceivePackResponse:  base64.StdEncoding.EncodeToString(responseBuffer.Bytes()),
+			ReceiveResponseBytes: int64(responseBuffer.Len()), InputRequestSHA256: requestDigest,
+			InputPackObjectCount: inputPackObjectCount, Trace: trace,
+			QuarantineInsideOwnedRoot: true, QuarantineRemoved: true, QuarantinePathNonEmpty: true,
+			FreshWorkDirectory: true, RepositoryPackBytesBeforeHydration: repositoryPackBytesBeforeHydration,
+			SharedObjectCacheDisabled: sharedCacheDisabled, SkipConnectivityCheck: skipConnectivityCheck,
+			PlanSHA256: input.ClosureManifestSHA256, ClosureProof: closureProof,
+		}, nil
 	}
 	if err := runGit(ctx, repoDir, "verify-pack", "-s", idxPath); err != nil {
 		return stockReceiveResponse{}, err
@@ -1067,7 +1094,7 @@ func readStockInputPackObjectCount(body []byte, packOffset int64) (uint32, error
 		return 0, errors.New("stock input pack header is invalid")
 	}
 	count := binary.BigEndian.Uint32(header[8:12])
-	if count == 0 || count > maxStockClosureObjects {
+	if count > maxStockClosureObjects {
 		return 0, errors.New("stock input pack object count is invalid")
 	}
 	return count, nil
@@ -1435,10 +1462,10 @@ func validateStockClosureProof(proof stockClosureProof, manifest stockClosureMan
 		proof.ExternalEdgeCount != manifest.Closure.ExternalEdgeCount ||
 		proof.ObjectTypeCounts != manifest.Closure.ObjectTypeCounts ||
 		!reflect.DeepEqual(proof.SemanticExternalOIDs, manifest.SemanticExternalOIDs) ||
-		len(proof.IncomingOIDs) != manifest.Closure.IncomingObjectCount {
+		len(proof.IncomingOIDs) != manifest.Closure.VisitedIncomingObjectCount {
 		return errors.New("logical closure proof mismatch")
 	}
-	if err := validateSortedUniqueOIDs(proof.IncomingOIDs, false); err != nil {
+	if err := validateSortedUniqueOIDs(proof.IncomingOIDs, true); err != nil {
 		return err
 	}
 	if err := validateSortedUniqueOIDs(proof.SemanticExternalOIDs, true); err != nil {
@@ -1547,17 +1574,17 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func findStockOutputPack(packDir string, prerequisiteSHA256 string) (string, string, error) {
+func findStockOutputPack(packDir string, prerequisiteSHA256 string) (string, string, bool, error) {
 	packs, err := filepath.Glob(filepath.Join(packDir, "pack-*.pack"))
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	type candidate struct{ pack, idx string }
 	candidates := []candidate{}
 	for _, pack := range packs {
 		digest, err := sha256File(pack)
 		if err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
 		if prerequisiteSHA256 != "" && digest == prerequisiteSHA256 {
 			continue
@@ -1567,11 +1594,14 @@ func findStockOutputPack(packDir string, prerequisiteSHA256 string) (string, str
 			candidates = append(candidates, candidate{pack: pack, idx: idx})
 		}
 	}
+	if len(candidates) == 0 {
+		return "", "", false, nil
+	}
 	if len(candidates) != 1 {
-		return "", "", fmt.Errorf("expected one receive-pack output, found %d", len(candidates))
+		return "", "", false, fmt.Errorf("expected at most one receive-pack output, found %d", len(candidates))
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].pack < candidates[j].pack })
-	return candidates[0].pack, candidates[0].idx, nil
+	return candidates[0].pack, candidates[0].idx, true, nil
 }
 
 func validatePackSHA1(path string) (string, error) {

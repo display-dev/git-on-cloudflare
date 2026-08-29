@@ -76,8 +76,12 @@ The codebase is organized into focused modules with `index.ts` export files:
   processor. Independent ranges use fixed concurrency four; shared bases are
   single-flight and the retained plan remains deterministic and base-first.
   Larger or length-unknown requests retain the generic native/streaming path.
-  Both paths write immutable output to R2, then RepoDO commits refs and pack-
-  catalog metadata atomically through typed RPCs. One active receive lease at a
+  Artifact-producing receives write immutable output to R2, then RepoDO commits
+  refs and pack-catalog metadata atomically through typed RPCs. Native Git may
+  also return an explicit ref-only result after hook and closure validation when
+  every target object is already authoritative. RepoDO then commits the exact-old
+  ref transaction, accepted-write fact and receipt without inserting a catalog
+  row or fabricating an empty artifact triple. One active receive lease at a
   time; concurrent pushes receive `503 Retry-After: 10`.
 - `StockReceiveContainerHost` rechecks the low-level Container process state
   during port readiness, not only before it. A process that exits before any

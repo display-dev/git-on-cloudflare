@@ -7,9 +7,16 @@ This document describes the primary data flows of the server: pushing (receive-p
 1. Client sends `POST /:owner/:repo/git-receive-pack`
 2. Worker acquires a receive lease via `beginReceive()` RPC. If a lease is already active, returns `503 Retry-After: 10`.
 3. Worker parses pkt-line commands and the packfile payload from the request body.
-4. Worker writes the `.pack` to R2, builds `.idx` inline, and writes it to R2.
-5. Worker commits refs and pack-catalog metadata atomically via `finalizeReceive()` RPC.
-6. Returns a pkt-line `report-status` response with sideband progress.
+4. The bounded stock path selectively hydrates the authenticated prerequisite
+   closure and native Git completes `receive-pack` and hook validation.
+5. If new objects remain, the native processor returns a verified pack, index,
+   and reference-sidecar triple. If all required objects are already stored, it
+   returns an explicit ref-only result with zero artifacts.
+6. RepoDO performs exact-old-ref CAS and records the conclusive operation and
+   accepted-write fact. It inserts pack-catalog metadata only for the
+   artifact-producing result.
+7. Worker publishes the authority ref/receipt objects and returns the native
+   pkt-line `report-status` response.
 
 ### Metadata maintained by the DO
 
