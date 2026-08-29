@@ -372,6 +372,28 @@ describe("qualification repository controls", () => {
           createdAt: 1787731200000,
           updatedAt: 1787731201000,
           attempts: 1,
+          result: {
+            statuses: [{ ref: "refs/heads/qual-observed", ok: true }],
+            changed: true,
+            empty: false,
+            refPublication: { at: 1787731200900, refsVersion: 7 },
+          },
+          rejectionMetrics: {
+            downloadedBytes: 4096,
+            hydratedBytes: 4096,
+            metadataBytes: 512,
+            metadataRequests: 3,
+            rangeBytes: 2048,
+            rangeRequests: 2,
+            activePackRangeBytes: 2048,
+            activePackRangeRequests: 2,
+            activePackWholeBytes: 0,
+            activePackWholeRequests: 0,
+            activePackUnattributedBytes: 0,
+            activePackUnattributedRequests: 0,
+            selectedPackBytes: 3000000000,
+            activePackCount: 1,
+          },
         });
       }
     );
@@ -389,6 +411,28 @@ describe("qualification repository controls", () => {
         createdAt: 1787731200000,
         updatedAt: 1787731201000,
         attempts: 1,
+        result: {
+          statuses: [{ ref: "refs/heads/qual-observed", ok: true }],
+          changed: true,
+          empty: false,
+          refPublication: { at: 1787731200900, refsVersion: 7 },
+        },
+        metrics: {
+          downloadedBytes: 4096,
+          hydratedBytes: 4096,
+          metadataBytes: 512,
+          metadataRequests: 3,
+          rangeBytes: 2048,
+          rangeRequests: 2,
+          activePackRangeBytes: 2048,
+          activePackRangeRequests: 2,
+          activePackWholeBytes: 0,
+          activePackWholeRequests: 0,
+          activePackUnattributedBytes: 0,
+          activePackUnattributedRequests: 0,
+          selectedPackBytes: 3000000000,
+          activePackCount: 1,
+        },
       });
       const missing = await qualificationRequest(
         "/operations/qualification-missing",

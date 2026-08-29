@@ -3,7 +3,10 @@ import { getRepoStub, json } from "@/worker/common";
 import { doPrefix } from "@/worker/keys";
 import { resolveRepositoryRoute } from "@/worker/repositories/route";
 import type { QualificationResetResult } from "@/worker/do/repo/qualification";
-import { isValidNativeReceiveOperationId } from "@/worker/git/nativeReceive/types";
+import {
+  isValidNativeReceiveOperationId,
+  nativeReceiveOperationEvidenceView,
+} from "@/worker/git/nativeReceive/types";
 import type { AppContext, AppRouter } from "./hono";
 import { recoverQualificationStorage } from "@/worker/git/maintenance/qualificationStorageRecovery";
 import { registerQualificationGcRoutes } from "./qualificationGc";
@@ -236,14 +239,7 @@ export function registerQualificationRoutes(router: AppRouter): void {
     if (!operation)
       return new Response("Not found\n", { status: 404, headers: { "Cache-Control": "no-store" } });
     return json(
-      {
-        schemaVersion: 1,
-        id: operation.id,
-        state: operation.state,
-        createdAt: operation.createdAt,
-        updatedAt: operation.updatedAt,
-        attempts: operation.attempts,
-      },
+      nativeReceiveOperationEvidenceView(operation),
       ["committed", "aborted", "failed"].includes(operation.state) ? 200 : 202,
       { "Cache-Control": "no-store" }
     );
