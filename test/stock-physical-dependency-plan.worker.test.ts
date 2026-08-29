@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
-import { asBufferSource, bytesToHex } from "@/worker/common";
+import { asBufferSource, bytesToHex, hexToBytes } from "@/worker/common";
 import { computeOid } from "@/worker/git/core/objects";
 import {
   planStockPhysicalDependencies,
@@ -218,6 +218,20 @@ async function mergeRegressionFixture(): Promise<FrozenFixture> {
   });
 }
 
+async function boundedParallelFixture(): Promise<FrozenFixture> {
+  const objects = await Promise.all(
+    Array.from({ length: 6 }, (_value, index) => blob(`bounded-parallel-${index}\n`))
+  );
+  return await createFixture({
+    name: "bounded-parallel",
+    entries: objects.map((object) => ({ type: "blob", payload: object.payload })),
+    semanticRootOids: objects.map((object) => object.oid),
+    expectedPhysicalNodes: objects.length,
+    expectedDependencyEdges: 0,
+    expectedMaximumDepth: 0,
+  });
+}
+
 function permutations<T>(values: readonly T[]): T[][] {
   if (values.length <= 1) return [[...values]];
   const result: T[][] = [];
@@ -327,6 +341,211 @@ async function cleanupFixture(fixture: FrozenFixture): Promise<void> {
 }
 
 describe("stock physical dependency plan", () => {
+  it("rejects a cross-root REF_DELTA cycle without deadlocking concurrent roots", async () => {
+    const leftOid = "1".repeat(40);
+    const rightOid = "2".repeat(40);
+    const delta = buildAppendOnlyDelta(encoder.encode("cycle-base\n"), encoder.encode("x"));
+    const packs = new Map<string, Uint8Array>();
+    const source = async (name: string, oid: string, baseOid: string) => {
+      const packBytes = await buildPack([{ type: "ref-delta", baseOid, delta }]);
+      const packKey = `test/stock-physical/${uniqueRepoId()}/${name}.pack`;
+      packs.set(packKey, packBytes);
+      const rawOid = hexToBytes(oid);
+      const fanout = new Uint32Array(256);
+      for (let index = rawOid[0]!; index < fanout.length; index++) fanout[index] = 1;
+      return {
+        source: {
+          packKey,
+          packBytes: packBytes.byteLength,
+          idx: {
+            packKey,
+            count: 1,
+            fanout,
+            rawNames: rawOid,
+            offsets: Float64Array.of(12),
+            nextOffsetByIndex: Float64Array.of(packBytes.byteLength - 20),
+            sortedOffsets: Float64Array.of(12),
+            sortedOffsetIndices: Uint32Array.of(0),
+            packSize: packBytes.byteLength,
+            packChecksum: packBytes.subarray(-20),
+            idxChecksum: new Uint8Array(20),
+          },
+        },
+        packChecksum: bytesToHex(packBytes.subarray(-20)),
+        idxSha256: "a".repeat(64),
+        prefSha256: "b".repeat(64),
+      } satisfies StockBoundPackSource;
+    };
+    const sources = [
+      await source("cycle-left", leftOid, rightOid),
+      await source("cycle-right", rightOid, leftOid),
+    ];
+    let readsStarted = 0;
+    let releaseReads!: () => void;
+    const bothReadsStarted = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+
+    const planning = planStockPhysicalDependencies({
+      sources,
+      semanticRootOids: [leftOid, rightOid],
+      maxEntryBytes: MAX_TEST_OBJECT_BYTES,
+      maxInflatedBytes: MAX_TEST_OBJECT_BYTES,
+      maxDeltaResultBytes: MAX_TEST_OBJECT_BYTES,
+      readEntry: async (candidate) => {
+        readsStarted++;
+        if (readsStarted === 2) releaseReads();
+        await bothReadsStarted;
+        const pack = packs.get(candidate.source.packKey)!;
+        return pack.subarray(candidate.offset, candidate.nextOffset);
+      },
+    });
+
+    await expect(
+      Promise.race([
+        planning,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("planner-deadlocked")), 1_000)
+        ),
+      ])
+    ).rejects.toThrow("stock-physical-plan:dependency-cycle");
+  });
+
+  it("settles started reads and stops dequeuing roots after the first failure", async () => {
+    const fixture = await boundedParallelFixture();
+    let readsStarted = 0;
+    let planningSettled = false;
+    let releaseFailure!: () => void;
+    let releaseSiblings!: () => void;
+    let signalFourStarted!: () => void;
+    const failureGate = new Promise<void>((resolve) => {
+      releaseFailure = resolve;
+    });
+    const siblingGate = new Promise<void>((resolve) => {
+      releaseSiblings = resolve;
+    });
+    const fourStarted = new Promise<void>((resolve) => {
+      signalFourStarted = resolve;
+    });
+    try {
+      const planning = planStockPhysicalDependencies({
+        sources: [fixture.boundSource],
+        semanticRootOids: fixture.semanticRootOids,
+        maxEntryBytes: MAX_TEST_OBJECT_BYTES,
+        maxInflatedBytes: MAX_TEST_OBJECT_BYTES,
+        maxDeltaResultBytes: MAX_TEST_OBJECT_BYTES,
+        readEntry: async (candidate) => {
+          const ordinal = readsStarted++;
+          if (readsStarted === 4) signalFourStarted();
+          if (ordinal === 0) {
+            await failureGate;
+            throw new Error("first-range-failed");
+          }
+          await siblingGate;
+          const object = await env.REPO_BUCKET.get(candidate.source.packKey, {
+            range: {
+              offset: candidate.offset,
+              length: candidate.nextOffset - candidate.offset,
+            },
+          });
+          return object ? new Uint8Array(await object.arrayBuffer()) : undefined;
+        },
+      }).finally(() => {
+        planningSettled = true;
+      });
+
+      await fourStarted;
+      releaseFailure();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(readsStarted).toBe(4);
+      expect(planningSettled).toBe(false);
+      releaseSiblings();
+      await expect(planning).rejects.toThrow("first-range-failed");
+      expect(readsStarted).toBe(4);
+    } finally {
+      releaseFailure();
+      releaseSiblings();
+      await cleanupFixture(fixture);
+    }
+  });
+
+  it("hydrates independent roots concurrently while reading a shared base once", async () => {
+    const fixture = await sharedBaseFixture();
+    const reads = new Map<string, number>();
+    let activeReads = 0;
+    let maximumConcurrency = 0;
+    try {
+      const plan = await planStockPhysicalDependencies({
+        sources: [fixture.boundSource],
+        semanticRootOids: fixture.semanticRootOids,
+        maxEntryBytes: MAX_TEST_OBJECT_BYTES,
+        maxInflatedBytes: MAX_TEST_OBJECT_BYTES,
+        maxDeltaResultBytes: MAX_TEST_OBJECT_BYTES,
+        readEntry: async (candidate) => {
+          const id = `${fixture.boundSource.packChecksum}:${candidate.offset}:${candidate.nextOffset}`;
+          reads.set(id, (reads.get(id) ?? 0) + 1);
+          activeReads++;
+          maximumConcurrency = Math.max(maximumConcurrency, activeReads);
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            const object = await env.REPO_BUCKET.get(candidate.source.packKey, {
+              range: {
+                offset: candidate.offset,
+                length: candidate.nextOffset - candidate.offset,
+              },
+            });
+            return object ? new Uint8Array(await object.arrayBuffer()) : undefined;
+          } finally {
+            activeReads--;
+          }
+        },
+      });
+
+      expect(maximumConcurrency).toBeGreaterThan(1);
+      expect(maximumConcurrency).toBeLessThanOrEqual(4);
+      expect([...reads.values()]).toEqual(Array.from({ length: 4 }, () => 1));
+      expect(plan.physicalNodes).toHaveLength(4);
+      expect(plan.dependencies).toHaveLength(3);
+    } finally {
+      await cleanupFixture(fixture);
+    }
+  });
+
+  it("limits independent range hydration to four concurrent reads", async () => {
+    const fixture = await boundedParallelFixture();
+    let activeReads = 0;
+    let maximumConcurrency = 0;
+    try {
+      await planStockPhysicalDependencies({
+        sources: [fixture.boundSource],
+        semanticRootOids: fixture.semanticRootOids,
+        maxEntryBytes: MAX_TEST_OBJECT_BYTES,
+        maxInflatedBytes: MAX_TEST_OBJECT_BYTES,
+        maxDeltaResultBytes: MAX_TEST_OBJECT_BYTES,
+        readEntry: async (candidate) => {
+          activeReads++;
+          maximumConcurrency = Math.max(maximumConcurrency, activeReads);
+          try {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            const object = await env.REPO_BUCKET.get(candidate.source.packKey, {
+              range: {
+                offset: candidate.offset,
+                length: candidate.nextOffset - candidate.offset,
+              },
+            });
+            return object ? new Uint8Array(await object.arrayBuffer()) : undefined;
+          } finally {
+            activeReads--;
+          }
+        },
+      });
+
+      expect(maximumConcurrency).toBe(4);
+    } finally {
+      await cleanupFixture(fixture);
+    }
+  });
+
   it("accepts byte-identical packs stored under different keys", async () => {
     const fixture = await baseNotRootFixture();
     const duplicatePackKey = `${fixture.boundSource.source.packKey}.duplicate`;

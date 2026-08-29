@@ -52,7 +52,24 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
   Capability advertisement for push operations.
 
 - **`POST /:owner/:repo/git-receive-pack`**  
-  Push objects. The Worker writes `.pack` and `.idx` to R2 and commits metadata atomically via DO RPCs. One active receive lease at a time; concurrent pushes receive `503 Retry-After: 10`. Requires HTTP Basic credentials where the username matches `:owner` and the password is a PAT with `level: "push"`.
+  Push objects. For a native receive with a positive exact `Content-Length` no
+  greater than 16 MiB, the Worker derives the incoming pack's semantic external
+  object closure from authenticated active `.idx` and reference sidecars. It
+  downloads only the exact required pack-entry ranges, with at most four
+  independent reads in flight and encoding bases resolved before dependants.
+  Shared physical entries are read once and every range is bound back to the
+  active pack checksum and sidecar digests. Requests outside that planner input
+  bound retain the generic streaming/native path; the bound is an internal
+  routing threshold, not a repository or push quota.
+
+  The native processor receives the incoming request plus the validated
+  prerequisite pack, writes immutable `.pack`, `.idx`, and reference-sidecar
+  output, and returns its proof to the Worker. RepoDO remains the sole authority:
+  it performs exact-old-ref validation and atomically commits refs and catalog
+  metadata before the Worker acknowledges the client. One active receive lease
+  is allowed per repository; concurrent pushes receive `503 Retry-After: 10`.
+  Requires HTTP Basic credentials where the username matches `:owner` and the
+  password is a PAT with `level: "push"`.
 
   Display-managed native clients may send `X-Display-Operation-ID` with 1–100
   letters, digits, `_`, or `-`. The header is accepted only when the Container

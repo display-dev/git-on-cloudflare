@@ -108,10 +108,13 @@ export type PlanStockPhysicalDependenciesArgs = {
 
 export type StockPhysicalDependencyPlanner = {
   materializeSemanticRoot(oid: string): Promise<PackedObjectResult>;
+  materializeSemanticRoots(oids: readonly string[]): Promise<void>;
   finalize(semanticRootOids: readonly string[]): Promise<StockPhysicalDependencyPlan>;
 };
 
 type NodeColor = "gray" | "black";
+
+const STOCK_PHYSICAL_RANGE_READ_CONCURRENCY = 4;
 
 type MutablePhysicalNode = {
   internalId: string;
@@ -293,9 +296,24 @@ export function createStockPhysicalDependencyPlanner(
     )
     .map((bound) => bound.source);
   const nodes = new Map<string, MutablePhysicalNode>();
+  const nodePromises = new Map<string, Promise<MutablePhysicalNode>>();
   const selectedCandidateByOid = new Map<string, PackedObjectCandidate>();
   const rootNodeByOid = new Map<string, MutablePhysicalNode>();
+  const rootPromises = new Map<string, Promise<PackedObjectResult>>();
   let finalized = false;
+
+  const assertDependencyAcyclic = (dependentId: string, baseId: string): void => {
+    let cursor: string | undefined = baseId;
+    const visited = new Set<string>();
+    while (cursor) {
+      if (cursor === dependentId) {
+        throw new Error("stock-physical-plan:dependency-cycle");
+      }
+      if (visited.has(cursor)) return;
+      visited.add(cursor);
+      cursor = nodes.get(cursor)?.baseInternalId;
+    }
+  };
 
   const selectCandidate = (oid: string): PackedObjectCandidate => {
     assertOid(oid, "dependency");
@@ -325,7 +343,8 @@ export function createStockPhysicalDependencyPlanner(
   const visit = async (
     candidate: PackedObjectCandidate,
     depth: number,
-    semanticRootOid: string
+    semanticRootOid: string,
+    ancestry: ReadonlySet<string>
   ): Promise<MutablePhysicalNode> => {
     throwIfAborted(args.signal);
     if (depth > STOCK_MAX_DEPENDENCY_DEPTH) {
@@ -334,6 +353,9 @@ export function createStockPhysicalDependencyPlanner(
     const bound = sourceByPackKey.get(candidate.source.packKey);
     if (!bound) throw new Error("stock-physical-plan:unbound-candidate");
     const internalId = internalPhysicalNodeId(bound.packChecksum, candidate);
+    if (ancestry.has(internalId)) {
+      throw new Error("stock-physical-plan:dependency-cycle");
+    }
     const existing = nodes.get(internalId);
     if (existing) {
       if (
@@ -345,10 +367,8 @@ export function createStockPhysicalDependencyPlanner(
       ) {
         throw new Error("stock-physical-plan:duplicate-mismatch");
       }
-      if (existing.color === "gray") {
-        throw new Error("stock-physical-plan:dependency-cycle");
-      }
-      return existing;
+      const pending = nodePromises.get(internalId);
+      return pending ? await pending : existing;
     }
     if (nodes.size >= STOCK_MAX_PHYSICAL_NODES) {
       throw new Error("stock-physical-plan:physical-node-limit");
@@ -366,83 +386,96 @@ export function createStockPhysicalDependencyPlanner(
       semanticRootOids: new Set(),
     };
     nodes.set(internalId, node);
-    args.log?.debug("stock-physical-plan:read-node", {
-      physicalNodeId: internalId,
-      objectOid: candidate.oid,
-      packKey: candidate.source.packKey,
-      offset: candidate.offset,
-      length: entryLength,
-    });
-    const entry = await args.readEntry(candidate, semanticRootOid);
-    if (!entry || entry.byteLength !== entryLength) {
-      throw new Error("stock-physical-plan:entry-read-mismatch");
-    }
-    const header = readPackHeaderExFromBuf(entry, 0);
-    if (!header) throw new Error("stock-physical-plan:malformed-header");
-    const inflatedSize = decodePackObjectSize(header.sizeVarBytes);
-    if (inflatedSize === undefined || inflatedSize > args.maxInflatedBytes) {
-      throw new Error("stock-physical-plan:inflated-size-limit");
-    }
-    const inflated = await inflate(entry.subarray(header.headerLen));
-    if (inflated.byteLength !== inflatedSize) {
-      throw new Error("stock-physical-plan:inflated-size-mismatch");
-    }
-
-    const fullType = typeCodeToObjectType(header.type);
-    if (fullType) {
-      node.encoding = "full";
-      node.object = packedObject(candidate, fullType, inflated);
-    } else {
-      let baseCandidate: PackedObjectCandidate;
-      if (header.type === 6) {
-        if (!header.baseRel || header.baseRel <= 0) {
-          throw new Error("stock-physical-plan:ofs-base-distance");
-        }
-        const baseOffset = candidate.offset - header.baseRel;
-        baseCandidate =
-          makeOffsetCandidate(candidate.source, candidate.packSlot, baseOffset) ??
-          (() => {
-            throw new Error("stock-physical-plan:ofs-base-missing");
-          })();
-        node.encoding = "ofs-delta";
-        node.baseOffset = baseOffset;
-      } else if (header.type === 7 && header.baseOid) {
-        assertOid(header.baseOid, "ref-base");
-        baseCandidate = selectCandidate(header.baseOid);
-        node.encoding = "ref-delta";
-        node.baseOid = header.baseOid;
-      } else {
-        throw new Error("stock-physical-plan:unsupported-encoding");
+    const promise = (async (): Promise<MutablePhysicalNode> => {
+      args.log?.debug("stock-physical-plan:read-node", {
+        physicalNodeId: internalId,
+        objectOid: candidate.oid,
+        packKey: candidate.source.packKey,
+        offset: candidate.offset,
+        length: entryLength,
+      });
+      const entry = await args.readEntry(candidate, semanticRootOid);
+      if (!entry || entry.byteLength !== entryLength) {
+        throw new Error("stock-physical-plan:entry-read-mismatch");
+      }
+      const header = readPackHeaderExFromBuf(entry, 0);
+      if (!header) throw new Error("stock-physical-plan:malformed-header");
+      const inflatedSize = decodePackObjectSize(header.sizeVarBytes);
+      if (inflatedSize === undefined || inflatedSize > args.maxInflatedBytes) {
+        throw new Error("stock-physical-plan:inflated-size-limit");
+      }
+      const inflated = await inflate(entry.subarray(header.headerLen));
+      if (inflated.byteLength !== inflatedSize) {
+        throw new Error("stock-physical-plan:inflated-size-mismatch");
       }
 
-      const baseNode = await visit(baseCandidate, depth + 1, semanticRootOid);
-      if (!baseNode.object) throw new Error("stock-physical-plan:base-unmaterialized");
-      node.baseInternalId = baseNode.internalId;
-      node.object = packedObject(
-        candidate,
-        baseNode.object.type,
-        applyGitDelta(baseNode.object.payload, inflated, {
-          maxResultBytes: args.maxDeltaResultBytes,
-        })
-      );
-    }
+      const fullType = typeCodeToObjectType(header.type);
+      if (fullType) {
+        node.encoding = "full";
+        node.object = packedObject(candidate, fullType, inflated);
+      } else {
+        let baseCandidate: PackedObjectCandidate;
+        if (header.type === 6) {
+          if (!header.baseRel || header.baseRel <= 0) {
+            throw new Error("stock-physical-plan:ofs-base-distance");
+          }
+          const baseOffset = candidate.offset - header.baseRel;
+          baseCandidate =
+            makeOffsetCandidate(candidate.source, candidate.packSlot, baseOffset) ??
+            (() => {
+              throw new Error("stock-physical-plan:ofs-base-missing");
+            })();
+          node.encoding = "ofs-delta";
+          node.baseOffset = baseOffset;
+        } else if (header.type === 7 && header.baseOid) {
+          assertOid(header.baseOid, "ref-base");
+          baseCandidate = selectCandidate(header.baseOid);
+          node.encoding = "ref-delta";
+          node.baseOid = header.baseOid;
+        } else {
+          throw new Error("stock-physical-plan:unsupported-encoding");
+        }
 
-    if (
-      !node.object ||
-      (await computeOid(node.object.type, node.object.payload)) !== candidate.oid
-    ) {
-      throw new Error("stock-physical-plan:canonical-oid-mismatch");
-    }
-    node.entryId = await stockPhysicalEntryId({
-      packChecksum: bound.packChecksum,
-      idxSha256: bound.idxSha256,
-      prefSha256: bound.prefSha256,
-      offset: candidate.offset,
-      end: candidate.nextOffset,
-      oid: candidate.oid,
-    });
-    node.color = "black";
-    return node;
+        const baseBound = sourceByPackKey.get(baseCandidate.source.packKey);
+        if (!baseBound) throw new Error("stock-physical-plan:unbound-candidate");
+        const baseInternalId = internalPhysicalNodeId(baseBound.packChecksum, baseCandidate);
+        assertDependencyAcyclic(internalId, baseInternalId);
+        node.baseInternalId = baseInternalId;
+        const nextAncestry = new Set(ancestry);
+        nextAncestry.add(internalId);
+        const baseNode = await visit(baseCandidate, depth + 1, semanticRootOid, nextAncestry);
+        if (!baseNode.object) throw new Error("stock-physical-plan:base-unmaterialized");
+        if (baseNode.internalId !== baseInternalId) {
+          throw new Error("stock-physical-plan:base-identity-mismatch");
+        }
+        node.object = packedObject(
+          candidate,
+          baseNode.object.type,
+          applyGitDelta(baseNode.object.payload, inflated, {
+            maxResultBytes: args.maxDeltaResultBytes,
+          })
+        );
+      }
+
+      if (
+        !node.object ||
+        (await computeOid(node.object.type, node.object.payload)) !== candidate.oid
+      ) {
+        throw new Error("stock-physical-plan:canonical-oid-mismatch");
+      }
+      node.entryId = await stockPhysicalEntryId({
+        packChecksum: bound.packChecksum,
+        idxSha256: bound.idxSha256,
+        prefSha256: bound.prefSha256,
+        offset: candidate.offset,
+        end: candidate.nextOffset,
+        oid: candidate.oid,
+      });
+      node.color = "black";
+      return node;
+    })();
+    nodePromises.set(internalId, promise);
+    return await promise;
   };
 
   const materializeSemanticRoot = async (oid: string): Promise<PackedObjectResult> => {
@@ -450,15 +483,46 @@ export function createStockPhysicalDependencyPlanner(
     assertOid(oid, "semantic-root");
     const existing = rootNodeByOid.get(oid);
     if (existing?.object) return existing.object;
-    if (rootNodeByOid.size >= STOCK_MAX_PHYSICAL_NODES) {
+    const pending = rootPromises.get(oid);
+    if (pending) return await pending;
+    if (rootPromises.size >= STOCK_MAX_PHYSICAL_NODES) {
       throw new Error("stock-physical-plan:semantic-root-limit");
     }
-    const rootNode = await visit(selectCandidate(oid), 0, oid);
-    if (rootNode.object?.oid !== oid) {
-      throw new Error("stock-physical-plan:semantic-root-mismatch");
+    const promise = (async (): Promise<PackedObjectResult> => {
+      const rootNode = await visit(selectCandidate(oid), 0, oid, new Set());
+      if (rootNode.object?.oid !== oid) {
+        throw new Error("stock-physical-plan:semantic-root-mismatch");
+      }
+      rootNodeByOid.set(oid, rootNode);
+      return rootNode.object;
+    })();
+    rootPromises.set(oid, promise);
+    return await promise;
+  };
+
+  const materializeSemanticRoots = async (oids: readonly string[]): Promise<void> => {
+    let nextIndex = 0;
+    let stopped = false;
+    const failures: Array<{ index: number; error: unknown }> = [];
+    const workers = Array.from(
+      { length: Math.min(STOCK_PHYSICAL_RANGE_READ_CONCURRENCY, oids.length) },
+      async () => {
+        while (!stopped && nextIndex < oids.length) {
+          const index = nextIndex++;
+          try {
+            await materializeSemanticRoot(oids[index]!);
+          } catch (error) {
+            failures.push({ index, error });
+            stopped = true;
+          }
+        }
+      }
+    );
+    await Promise.all(workers);
+    if (failures.length > 0) {
+      failures.sort((left, right) => left.index - right.index);
+      throw failures[0]!.error;
     }
-    rootNodeByOid.set(oid, rootNode);
-    return rootNode.object;
   };
 
   const finalize = async (
@@ -469,10 +533,8 @@ export function createStockPhysicalDependencyPlanner(
     if (semanticRootOids.length > STOCK_MAX_PHYSICAL_NODES) {
       throw new Error("stock-physical-plan:semantic-root-limit");
     }
-    for (const oid of semanticRootOids) {
-      assertOid(oid, "semantic-root");
-      await materializeSemanticRoot(oid);
-    }
+    for (const oid of semanticRootOids) assertOid(oid, "semantic-root");
+    await materializeSemanticRoots(semanticRootOids);
     finalized = true;
 
     const attachSemanticRoot = (internalId: string, rootOid: string): void => {
@@ -637,7 +699,7 @@ export function createStockPhysicalDependencyPlanner(
     };
   };
 
-  return { materializeSemanticRoot, finalize };
+  return { materializeSemanticRoot, materializeSemanticRoots, finalize };
 }
 
 /** Build a complete order-independent physical plan from a known root set. */
@@ -648,8 +710,6 @@ export async function planStockPhysicalDependencies(
   // Exercise the caller-supplied enumeration. finalize() canonicalizes the
   // retained identity after discovery, so permutations must converge without
   // disguising an order-sensitive traversal behind a pre-sort.
-  for (const oid of args.semanticRootOids) {
-    await planner.materializeSemanticRoot(oid);
-  }
+  await planner.materializeSemanticRoots(args.semanticRootOids);
   return await planner.finalize(args.semanticRootOids);
 }

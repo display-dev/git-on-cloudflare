@@ -79,6 +79,13 @@ function useNativeReceive(env: Env, commands: ReceiveCommand[]): boolean {
   );
 }
 
+function declaredReceiveBytes(request: Request): number | undefined {
+  const declaredLength = request.headers.get("Content-Length");
+  if (!declaredLength || !/^\d+$/.test(declaredLength)) return undefined;
+  const bytes = Number(declaredLength);
+  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : undefined;
+}
+
 function scheduleRepoStateChange(
   ctx: ExecutionContext,
   onRepoStateChanged: RepoStateChangeHandler | undefined,
@@ -287,18 +294,27 @@ export async function handleStreamingReceivePackPOST(
   }
 
   const stockReceiveRequested = request.headers.get(STOCK_RECEIVE_SPIKE_HEADER) === "1";
+  const requestBytes = declaredReceiveBytes(request);
   if (stockReceiveRequested) {
     const declaredLength = request.headers.get("Content-Length");
     if (!declaredLength || !/^\d+$/.test(declaredLength)) {
       logReceiveEnd(log, 411, { reason: "stock-receive-length-required" });
       return new Response("Stock receive requires an exact Content-Length.\n", { status: 411 });
     }
-    const bytes = Number(declaredLength);
-    if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > STOCK_RECEIVE_REQUEST_MAX_BYTES) {
+    const explicitBytes = Number(declaredLength);
+    if (
+      !Number.isSafeInteger(explicitBytes) ||
+      explicitBytes <= 0 ||
+      explicitBytes > STOCK_RECEIVE_REQUEST_MAX_BYTES
+    ) {
       logReceiveEnd(log, 413, { reason: "stock-receive-declaration-too-large" });
       return new Response("Stock receive declaration exceeds its bound.\n", { status: 413 });
     }
   }
+  const ordinarySelectiveReceiveEligible =
+    !stockReceiveRequested &&
+    requestBytes !== undefined &&
+    requestBytes <= STOCK_RECEIVE_REQUEST_MAX_BYTES;
 
   const cacheCtx = options?.cacheCtx ?? {
     req: request,
@@ -390,7 +406,9 @@ export async function handleStreamingReceivePackPOST(
         })
       : [];
     const responseMode = selectReceiveResponseMode(parsedRequest.capabilities);
-    const stockReceive = request.headers.get(STOCK_RECEIVE_SPIKE_HEADER) === "1";
+    const stockReceive =
+      stockReceiveRequested ||
+      (ordinarySelectiveReceiveEligible && useNativeReceive(env, parsedRequest.commands));
 
     if (requestedOperationId && !useNativeReceive(env, parsedRequest.commands)) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");

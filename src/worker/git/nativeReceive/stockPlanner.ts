@@ -1472,9 +1472,7 @@ async function planStockReceiveImpl(
   let prerequisitePayloadBytes = 0;
   let physicalPlan: StockPhysicalDependencyPlan;
   try {
-    for (const oid of rootIterationOids) {
-      await physicalPlanner.materializeSemanticRoot(oid);
-    }
+    await physicalPlanner.materializeSemanticRoots(rootIterationOids);
     physicalPlan = await physicalPlanner.finalize(requiredRootOids);
   } catch (error) {
     throwWrongRangePlannerFailure({

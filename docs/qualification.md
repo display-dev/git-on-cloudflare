@@ -228,8 +228,13 @@ protects any newly referenced source objects and external encoding bases. Normal
 append-only checkpoints require no extra source retention. If a permitted write
 resurrects old source objects, or metadata cannot establish the subtraction, all
 source packs are conservatively retained; status reports this explicitly. Such
-retention is safe but is not proof of full reclamation. The selective stock path
-uses its existing advertised-closure and materialized thin-base validation.
+retention is safe but is not proof of full reclamation. Bounded ordinary native
+receives now use the selective stock path's existing advertised-closure and
+materialized thin-base validation. The qualification header remains only an
+explicit fail-closed control for exact request-length and durable replay probes;
+ordinary eligible stock Git does not need that header. The planner schedules at
+most four independent exact range reads, shares physical bases across semantic
+roots, and still emits deterministic base-before-dependent evidence.
 
 Publication atomically replaces only the exact snapshotted source rows, merging
 all later receive packs and any conservatively retained sources. Current refs and

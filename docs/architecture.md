@@ -69,7 +69,16 @@ The codebase is organized into focused modules with `index.ts` export files:
   advances `generation-index.json`. The marker stores only the ordered pack
   keys, and upgraded repositories bootstrap their first marker from the current
   catalog before any old superseded rows are removed.
-- Push: the Worker writes `.pack` and `.idx` to R2, then commits refs and pack-catalog metadata atomically through typed DO RPCs. One active receive lease at a time; concurrent pushes receive `503 Retry-After: 10`.
+- Push: bounded ordinary native receives use Worker-owned selective hydration.
+  The Worker reads authenticated `.idx` and reference sidecars, materializes only
+  the exact semantic prerequisite ranges and required encoding bases, and sends
+  the incoming request plus that prerequisite pack to the foreground native
+  processor. Independent ranges use fixed concurrency four; shared bases are
+  single-flight and the retained plan remains deterministic and base-first.
+  Larger or length-unknown requests retain the generic native/streaming path.
+  Both paths write immutable output to R2, then RepoDO commits refs and pack-
+  catalog metadata atomically through typed RPCs. One active receive lease at a
+  time; concurrent pushes receive `503 Retry-After: 10`.
 - Pack metadata lives in `pack_catalog` (SQLite). Exact pack membership lives in `.idx` files in R2.
 
 ### Ownership And Auth

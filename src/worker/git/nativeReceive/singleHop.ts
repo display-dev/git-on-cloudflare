@@ -2,7 +2,7 @@ import type { Logger } from "@/worker/common/logger";
 import type { Limiter } from "@/worker/git/operations/limits";
 
 /**
- * This is the request-scoped ownership seam for stock receive qualification.
+ * This is the request-scoped ownership seam for selective stock receive.
  * RepoDO owns only transactionally tagged admission, exact-old publication,
  * and conclusive receipt state. The stateless Worker owns native processing
  * and every R2 call through the data-plane adapter.
@@ -33,17 +33,18 @@ export type StockReceiveConfirmation<Committed> =
   | { status: "replayed"; committed: Committed }
   | { status: "rejected"; code: string };
 
-export type StockReceiveSingleHopAuthority<Request, Work, Prepared, Publication, Proof, Committed> = {
-  admit(request: Request): Promise<StockReceiveAdmission<Work, Publication, Committed>>;
-  finalize(
-    executionToken: string,
-    prepared: Prepared
-  ): Promise<StockReceiveFinalize<Publication, Committed>>;
-  confirmPublication(
-    publicationToken: string,
-    proof: Proof
-  ): Promise<StockReceiveConfirmation<Committed>>;
-};
+export type StockReceiveSingleHopAuthority<Request, Work, Prepared, Publication, Proof, Committed> =
+  {
+    admit(request: Request): Promise<StockReceiveAdmission<Work, Publication, Committed>>;
+    finalize(
+      executionToken: string,
+      prepared: Prepared
+    ): Promise<StockReceiveFinalize<Publication, Committed>>;
+    confirmPublication(
+      publicationToken: string,
+      proof: Proof
+    ): Promise<StockReceiveConfirmation<Committed>>;
+  };
 
 export type StockReceiveSingleHopDataPlane<Work, Prepared, Publication, Proof> = {
   execute(work: Work): Promise<Prepared>;
@@ -66,14 +67,7 @@ export type ExecuteStockReceiveSingleHopArgs<
   Committed,
 > = {
   request: Request;
-  authority: StockReceiveSingleHopAuthority<
-    Request,
-    Work,
-    Prepared,
-    Publication,
-    Proof,
-    Committed
-  >;
+  authority: StockReceiveSingleHopAuthority<Request, Work, Prepared, Publication, Proof, Committed>;
   dataPlane: StockReceiveSingleHopDataPlane<Work, Prepared, Publication, Proof>;
   limiter: Limiter;
   logger: Logger;
@@ -96,14 +90,7 @@ export async function executeStockReceiveSingleHop<
   Proof,
   Committed,
 >(
-  args: ExecuteStockReceiveSingleHopArgs<
-    Request,
-    Work,
-    Prepared,
-    Publication,
-    Proof,
-    Committed
-  >
+  args: ExecuteStockReceiveSingleHopArgs<Request, Work, Prepared, Publication, Proof, Committed>
 ): Promise<StockReceiveSingleHopResult<Committed>> {
   const admission = await args.limiter.run("do:stock-receive-admit", () =>
     args.authority.admit(args.request)

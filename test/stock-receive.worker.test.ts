@@ -8,6 +8,7 @@ import { nativeReceiveOperationKey } from "@/worker/do/repo/repoState";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
 import { encodeGitObject } from "@/worker/git/core/objects";
 import { SubrequestLimiter } from "@/worker/git/operations/limits";
+import { publishRepositoryGeneration } from "@/worker/git/generation/publish";
 import { nativeReceiveOperationEvidenceMatches } from "@/worker/git/nativeReceive/types";
 import {
   __test as stockDataPlaneTest,
@@ -31,6 +32,7 @@ import {
   nativeReceiveOutputPackKey,
   packIndexKey,
   packRefsKey,
+  r2PackKey,
 } from "@/worker/keys";
 import { buildPack } from "./util/git-pack";
 import { setupRepoForTests } from "./util/repoSeed";
@@ -91,6 +93,30 @@ afterEach(() => {
 });
 
 describe("stock Smart HTTP receive spike", () => {
+  it("preserves explicit selective receive length rejection semantics", async () => {
+    const seeded = await setupRepoForTests(env, "o", uniqueRepoId("stock-length"));
+    const request = async (contentLength: string) =>
+      await handleStreamingReceivePackPOST(
+        { ...env, NATIVE_RECEIVE_CONTAINER: "1" },
+        seeded.doName,
+        new Request("https://example.invalid/o/stock-length/git-receive-pack", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-git-receive-pack-request",
+            "Content-Length": contentLength,
+            "X-Display-Spike1b-Stock": "1",
+          },
+          body: new Uint8Array([0]),
+        }),
+        createExecutionContext(),
+        { limiter: new SubrequestLimiter(4) }
+      );
+
+    expect((await request("invalid")).status).toBe(411);
+    expect((await request("0")).status).toBe(413);
+    expect((await request(String(Number.MAX_SAFE_INTEGER + 1))).status).toBe(413);
+  });
+
   it("classifies streaming Container failures without exposing provider details", () => {
     const privateDetail = "private-resource-name signed-url credential-value";
     const classified = stockDataPlaneTest.streamingContainerPhaseError(
@@ -335,8 +361,8 @@ describe("stock Smart HTTP receive spike", () => {
     expect(wrongRangeError).toMatchObject({
       code: "replacement-closure-invalid",
       metrics: {
-        rangeRequests: 1,
-        activePackRangeRequests: 1,
+        rangeRequests: 2,
+        activePackRangeRequests: 2,
         activePackWholeRequests: 0,
         activePackUnattributedRequests: 0,
       },
@@ -418,7 +444,7 @@ describe("stock Smart HTTP receive spike", () => {
     ]);
   });
 
-  it("buffers byte-identical receive-pack success until RepoDO commit and ACK authorization", async () => {
+  it("selectively hydrates an ordinary bounded receive and buffers success until RepoDO commit", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stock-receive");
     const seeded = await setupRepoForTests(env, owner, repo);
@@ -427,6 +453,61 @@ describe("stock Smart HTTP receive spike", () => {
       () => stub,
       async (instance) => await instance.seedMinimalRepo()
     );
+    const gc = await stub.beginReachabilityGc();
+    if (!gc.ok) throw new Error("expected GC lease for published-catalog receive test");
+    const [sourcePack] = gc.activeCatalog;
+    if (!sourcePack) throw new Error("expected seeded source pack");
+    const replacementPackKey = r2PackKey(
+      doPrefix(stub.id.toString()),
+      `pack-gc-${gc.lease.token}.pack`
+    );
+    for (const [sourceKey, targetKey] of [
+      [sourcePack.packKey, replacementPackKey],
+      [packIndexKey(sourcePack.packKey), packIndexKey(replacementPackKey)],
+      [packRefsKey(sourcePack.packKey), packRefsKey(replacementPackKey)],
+    ] as const) {
+      const sourceObject = await env.REPO_BUCKET.get(sourceKey);
+      if (!sourceObject) throw new Error("expected seeded GC artifact");
+      await env.REPO_BUCKET.put(targetKey, await sourceObject.arrayBuffer(), {
+        customMetadata: sourceObject.customMetadata,
+      });
+    }
+    expect(
+      await stub.recordReachabilityGcPending({
+        token: gc.lease.token,
+        packKey: replacementPackKey,
+      })
+    ).toEqual({ status: "recorded" });
+    const gcCommit = await stub.commitReachabilityGc({
+      token: gc.lease.token,
+      refsVersion: gc.refsVersion,
+      packsetVersion: gc.packsetVersion,
+      sourcePacks: gc.activeCatalog,
+      stagedPack: {
+        packKey: replacementPackKey,
+        packBytes: sourcePack.packBytes,
+        idxBytes: sourcePack.idxBytes,
+        objectCount: sourcePack.objectCount,
+      },
+    });
+    if (gcCommit.status !== "committed") {
+      throw new Error(`GC catalog publication failed: ${gcCommit.reason}`);
+    }
+    expect(
+      await publishRepositoryGeneration({
+        env,
+        doId: stub.id.toString(),
+        generation: gcCommit.packCatalogVersion,
+        activePackKeys: [replacementPackKey],
+        limiter: new SubrequestLimiter(20),
+        countSubrequest() {},
+        log: createLogger(env.LOG_LEVEL, { service: "StockReceivePublishedGcCatalogTest" }),
+      })
+    ).toBe("published");
+    expect(await stub.completeGenerationPublication(gcCommit.packCatalogVersion)).toBe(true);
+    expect(await stub.getActivePackCatalog()).toEqual([
+      expect.objectContaining({ packKey: replacementPackKey, state: "active" }),
+    ]);
     const author = "Display <display@example.invalid> 0 +0000";
     const commitPayload = new TextEncoder().encode(
       `tree ${active.treeOid}\nparent ${active.commitOid}\nauthor ${author}\ncommitter ${author}\n\nstock\n`
@@ -658,7 +739,6 @@ describe("stock Smart HTTP receive spike", () => {
           "Content-Type": "application/x-git-receive-pack-request",
           "Content-Length": String(requestBody.byteLength),
           "X-Display-Operation-ID": "stock-tiny-operation",
-          "X-Display-Spike1b-Stock": "1",
         },
         body: toRequestBody(requestBody),
       }),
@@ -728,6 +808,12 @@ describe("stock Smart HTTP receive spike", () => {
       "receipt-committed",
       "worker-response-ack",
     ]);
+    expect(await stub.getActivePackCatalog()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ packKey: replacementPackKey, state: "active" }),
+        expect.objectContaining({ kind: "receive", state: "active" }),
+      ])
+    );
     const queryResponse = await workerExports.default.fetch(
       new Request(
         `https://worker.invalid/_internal/receives/${seeded.namespaceSlug}/${seeded.repoSlug}/stock-tiny-operation`,
