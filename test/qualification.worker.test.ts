@@ -2,8 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { createLogger, getRepoStub } from "@/worker/common";
-import { doPrefix } from "@/worker/keys";
-import { getDb, upsertPackCatalogRow, deletePackCatalogRows } from "@/worker/do/repo/db";
+import { doPrefix, packIndexKey, packRefsKey } from "@/worker/keys";
+import {
+  getDb,
+  listPackCatalog,
+  upsertPackCatalogRow,
+  deletePackCatalogRows,
+} from "@/worker/do/repo/db";
 import { setupRepoForTests } from "./util/repoSeed";
 import { buildPack, runDOWithRetry, withEnvOverrides } from "./util/test-helpers";
 import { runQueueMessage } from "./util/queue";
@@ -227,9 +232,13 @@ describe("qualification repository controls", () => {
         updatedAt: Date.now(),
       })
     );
-    const orphan = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
+    const operationId = "qualification-test";
+    const fingerprint = "a".repeat(64);
+    const orphan = `${prefix}/objects/pack/pack-native-${operationId}-${fingerprint}-claim-${crypto.randomUUID()}.pack`;
     await env.REPO_BUCKET.put(orphan, new Uint8Array(17));
-    const authority = `${prefix}/native-receive/authority/qualification-test-${"a".repeat(64)}/ref-0.json`;
+    const authorityPrefix = `${prefix}/native-receive/authority/${operationId}-${fingerprint}`;
+    const authority = `${authorityPrefix}/ref-0.json`;
+    const receipt = `${authorityPrefix}/receipt.json`;
     await env.REPO_BUCKET.put(
       authority,
       JSON.stringify({
@@ -239,12 +248,23 @@ describe("qualification repository controls", () => {
         oid: "a".repeat(40),
       })
     );
+    await env.REPO_BUCKET.put(
+      receipt,
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "operation-receipt",
+        disposition: "committed",
+        refName: "refs/heads/qual-finished",
+        newOid: "a".repeat(40),
+        digest: "b".repeat(64),
+      })
+    );
     await enabled(async () => {
       const inventory = await stub.getQualificationInventory();
       const body = JSON.stringify({
         schemaVersion: 1,
         expectedRefStateDigest: inventory.refStateDigest,
-        expectedObjectCount: 4,
+        expectedObjectCount: 5,
       });
       const init = {
         method: "POST",
@@ -286,9 +306,9 @@ describe("qualification repository controls", () => {
           reason: "repository_active_or_changed",
         });
         clock.mockReturnValue(now + 8 * 60_000);
-        const unknown = `${prefix}/unknown-object`;
+        const unknown = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
         await env.REPO_BUCKET.put(unknown, new Uint8Array(3));
-        const bodyWithUnknown = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 5 });
+        const bodyWithUnknown = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 6 });
         const refused = await qualificationRequest("/storage-recovery", {
           ...init,
           body: bodyWithUnknown,
@@ -304,19 +324,24 @@ describe("qualification repository controls", () => {
         expect(recovered.status).toBe(200);
         expect(await recovered.json()).toMatchObject({
           status: "recovered",
-          deletedObjectCount: 2,
+          deletedObjectCount: 3,
           remainingObjectCount: 2,
         });
         expect(await env.REPO_BUCKET.head(orphan)).toBeNull();
         expect(await env.REPO_BUCKET.head(authority)).toBeNull();
         const inventoryAfter = await stub.getQualificationInventory();
         expect(inventoryAfter).toEqual(inventory);
-        await env.REPO_BUCKET.put(orphan, new Uint8Array(17));
+        const activePack = `${prefix}/objects/pack/pack-native-active-${"b".repeat(64)}-claim-${crypto.randomUUID()}.pack`;
+        const activeIdx = packIndexKey(activePack);
+        const activeRefs = packRefsKey(activePack);
+        await env.REPO_BUCKET.put(activePack, new Uint8Array(17));
+        await env.REPO_BUCKET.put(activeIdx, new Uint8Array(1));
+        await env.REPO_BUCKET.put(activeRefs, new Uint8Array(1));
         await runDOWithRetry(
           () => stub,
           async (_instance, state) => {
             await upsertPackCatalogRow(getDb(state.storage), {
-              packKey: orphan,
+              packKey: activePack,
               kind: "compact",
               state: "active",
               tier: 1,
@@ -330,7 +355,37 @@ describe("qualification repository controls", () => {
             });
           }
         );
-        const protectedBody = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 3 });
+        const runAuthorities: string[] = [];
+        for (const [suffix, oid] of [
+          ["first", "c".repeat(40)],
+          ["second", "d".repeat(40)],
+        ] as const) {
+          const owner = `${prefix}/native-receive/authority/${suffix}-${"e".repeat(64)}`;
+          const refKey = `${owner}/ref-0.json`;
+          const receiptKey = `${owner}/receipt.json`;
+          runAuthorities.push(refKey, receiptKey);
+          await env.REPO_BUCKET.put(
+            refKey,
+            JSON.stringify({
+              schemaVersion: 1,
+              kind: "authoritative-ref",
+              name: `refs/heads/${suffix}`,
+              oid,
+            })
+          );
+          await env.REPO_BUCKET.put(
+            receiptKey,
+            JSON.stringify({
+              schemaVersion: 1,
+              kind: "operation-receipt",
+              disposition: "committed",
+              refName: `refs/heads/${suffix}`,
+              newOid: oid,
+              digest: "f".repeat(64),
+            })
+          );
+        }
+        const protectedBody = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 9 });
         const protectedResult = await qualificationRequest("/storage-recovery", {
           ...init,
           body: protectedBody,
@@ -338,15 +393,30 @@ describe("qualification repository controls", () => {
         });
         expect(await protectedResult.json()).toMatchObject({
           status: "recovered",
-          deletedObjectCount: 0,
+          deletedObjectCount: 4,
+          remainingObjectCount: 5,
         });
-        expect(await env.REPO_BUCKET.head(orphan)).not.toBeNull();
+        for (const key of [activePack, activeIdx, activeRefs]) {
+          expect(await env.REPO_BUCKET.head(key)).not.toBeNull();
+        }
+        for (const key of runAuthorities) expect(await env.REPO_BUCKET.head(key)).toBeNull();
       } finally {
         clock.mockRestore();
         await runDOWithRetry(
           () => stub,
           async (_instance, state) => {
-            await deletePackCatalogRows(getDb(state.storage), [orphan]);
+            const catalog = await listPackCatalog(getDb(state.storage));
+            await env.REPO_BUCKET.delete(
+              catalog.flatMap((row) => [
+                row.packKey,
+                packIndexKey(row.packKey),
+                packRefsKey(row.packKey),
+              ])
+            );
+            await deletePackCatalogRows(
+              getDb(state.storage),
+              catalog.filter((row) => row.packBytes === 17).map((row) => row.packKey)
+            );
           }
         );
         await env.REPO_BUCKET.delete([

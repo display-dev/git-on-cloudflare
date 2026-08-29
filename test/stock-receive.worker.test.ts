@@ -4,6 +4,7 @@ import { env, exports as workerExports } from "cloudflare:workers";
 
 import { asBufferSource, bytesToHex, createLogger, getRepoStub } from "@/worker/common";
 import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
+import { __test as stockContainerHostTest } from "@/worker/do/stockReceiveContainerHost";
 import { nativeReceiveOperationKey } from "@/worker/do/repo/repoState";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
 import { encodeGitObject } from "@/worker/git/core/objects";
@@ -130,6 +131,84 @@ describe("stock Smart HTTP receive spike", () => {
     expect(stockDataPlaneTest.streamingContainerPhaseError("bundle-read", existing)).toBe(existing);
     const physical = new Error("stock-physical-plan:dependency-missing");
     expect(stockDataPlaneTest.streamingContainerPhaseError("bundle-read", physical)).toBe(physical);
+    expect(
+      stockDataPlaneTest.streamingContainerPhaseError(
+        "container-rpc",
+        new Error("stock-data-plane:container-readiness-failed")
+      ).message
+    ).toBe("stock-data-plane:container-readiness-failed");
+    for (const [diagnostic, expected] of [
+      ["readiness-failed", "stock-data-plane:container-readiness-failed"],
+      ["forward-failed", "stock-data-plane:container-forward-failed"],
+      ["unknown", "stock-data-plane:container-transient"],
+    ] as const) {
+      expect(
+        stockDataPlaneTest.containerFailureCode(
+          new Response("unavailable\n", {
+            status: 503,
+            headers: { "X-Display-Stock-Container-Diagnostic": diagnostic },
+          })
+        )
+      ).toBe(expected);
+    }
+    expect(
+      stockDataPlaneTest.containerFailureCode(new Response("rejected\n", { status: 422 }))
+    ).toBe("stock-data-plane:container-rejected");
+  });
+
+  it("restarts a Container that exits during readiness before forwarding receive bytes", async () => {
+    let running = true;
+    let starts = 0;
+    let probes = 0;
+    const container = {
+      get running() {
+        return running;
+      },
+      start() {
+        starts++;
+        running = true;
+      },
+      getTcpPort() {
+        return {
+          async fetch() {
+            probes++;
+            if (probes === 1) {
+              running = false;
+              throw new Error("simulated process exit");
+            }
+            return new Response("ready\n", { status: 200 });
+          },
+        } as unknown as Fetcher;
+      },
+    };
+
+    expect(await stockContainerHostTest.waitForReady(container)).toBe(true);
+    expect(starts).toBe(1);
+    expect(probes).toBe(2);
+  });
+
+  it("issues only one start while a Container remains not running", async () => {
+    let starts = 0;
+    let probes = 0;
+    const container = {
+      running: false,
+      start() {
+        starts++;
+        throw new Error("simulated start already in flight");
+      },
+      getTcpPort() {
+        return {
+          async fetch() {
+            probes++;
+            throw new Error("not ready");
+          },
+        } as unknown as Fetcher;
+      },
+    };
+
+    expect(await stockContainerHostTest.waitForReady(container)).toBe(false);
+    expect(starts).toBe(1);
+    expect(probes).toBe(120);
   });
 
   it("plans the first push into a repository with no active packs", async () => {
@@ -1076,8 +1155,25 @@ describe("stock Smart HTTP receive spike", () => {
       attempts: 2,
     });
     expect(
-      await stub.rejectStockReceiveExecution(second.executionToken, "native-data-plane-failed")
-    ).toMatchObject({ status: "failed" });
+      await stub.rejectStockReceiveExecution(second.executionToken, {
+        code: "native-data-plane-failed",
+        diagnosticCode: "stock-data-plane:container-readiness-failed",
+      })
+    ).toMatchObject({
+      status: "failed",
+      operation: {
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            phase: "worker-data-plane-rejected",
+            detailCode: "stock-data-plane:container-readiness-failed",
+          }),
+          expect.objectContaining({
+            phase: "worker-data-plane-rejected-attempt-2",
+            detailCode: "stock-data-plane:container-readiness-failed",
+          }),
+        ]),
+      },
+    });
     await cleanupStockReceiveWorkerDataPlane({
       env,
       operation: second.operation,

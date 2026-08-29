@@ -11,12 +11,17 @@ const RESPONSE_MAX_BYTES = 96 * 1024 * 1024 + 1024 * 1024 + 12;
 type TestContainerExecutor = (request: Request) => Promise<Response>;
 let testContainerExecutor: TestContainerExecutor | undefined;
 
+type StockContainer = Pick<Container, "running" | "start" | "getTcpPort">;
+
 export const __test = {
   setContainerExecutor(executor: TestContainerExecutor): void {
     testContainerExecutor = executor;
   },
   reset(): void {
     testContainerExecutor = undefined;
+  },
+  async waitForReady(container: StockContainer): Promise<boolean> {
+    return await waitForReady(container, async () => {});
   },
 };
 
@@ -31,17 +36,37 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function waitForReady(container: Container): Promise<boolean> {
-  const port = container.getTcpPort(CONTAINER_PORT);
+async function waitForReady(
+  container: StockContainer,
+  sleep: (milliseconds: number) => Promise<void> = delay
+): Promise<boolean> {
+  let startPending = false;
   for (let attempt = 0; attempt < READY_ATTEMPTS; attempt++) {
+    // `running` is only a point-in-time process state. A Container can exit
+    // after admission but before its port becomes ready; restart that lifecycle
+    // before any receive bytes are forwarded instead of polling a dead port for
+    // the remainder of the readiness window.
+    if (!container.running && !startPending) {
+      startPending = true;
+      try {
+        container.start({ enableInternet: false });
+      } catch {
+        // A concurrent platform start remains inside the bounded readiness
+        // observation. Permanent startup failure becomes readiness-failed.
+      }
+    } else if (container.running) {
+      startPending = false;
+    }
     try {
-      const response = await port.fetch("http://container/ready", { method: "GET" });
+      const response = await container
+        .getTcpPort(CONTAINER_PORT)
+        .fetch("http://container/ready", { method: "GET" });
       await response.body?.cancel();
       if (response.ok) return true;
     } catch {
       // Container startup failures remain inside the bounded readiness loop.
     }
-    await delay(READY_INTERVAL_MS);
+    await sleep(READY_INTERVAL_MS);
   }
   return false;
 }
@@ -89,9 +114,12 @@ export class StockReceiveContainerHost extends DurableObject {
       }
       const container = this.ctx.container;
       if (!container) return new Response("Container unavailable\n", { status: 503 });
-      if (!container.running) container.start({ enableInternet: false });
       if (!(await waitForReady(container))) {
-        return new Response("Container unavailable\n", { status: 503 });
+        logger.warn("stock-container-host:readiness-failed", {});
+        return new Response("Container unavailable\n", {
+          status: 503,
+          headers: { "X-Display-Stock-Container-Diagnostic": "readiness-failed" },
+        });
       }
       const response = await container
         .getTcpPort(CONTAINER_PORT)
@@ -112,7 +140,10 @@ export class StockReceiveContainerHost extends DurableObject {
       return await boundedContainerResponse(response);
     } catch {
       logger.warn("stock-container-host:transport-failed", { retryable: true });
-      return new Response("Container unavailable\n", { status: 503 });
+      return new Response("Container unavailable\n", {
+        status: 503,
+        headers: { "X-Display-Stock-Container-Diagnostic": "forward-failed" },
+      });
     }
   }
 }

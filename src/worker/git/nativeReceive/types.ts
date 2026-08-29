@@ -183,6 +183,8 @@ export type NativeReceiveExecutionRejection = {
     | "finalize-rejected";
   processorResult?: NativeReceiveProcessResult | undefined;
   metrics?: NativeReceiveOperationMetrics | undefined;
+  /** Bounded service-owned phase code; never provider prose. */
+  diagnosticCode?: string | undefined;
 };
 
 export type NativeReceiveCleanupDescriptor = {

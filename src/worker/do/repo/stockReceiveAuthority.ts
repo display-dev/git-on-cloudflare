@@ -1053,6 +1053,7 @@ export async function rejectStockReceiveExecutionState(args: {
     code: string;
     processorResult?: NativeReceiveExecutionRejection["processorResult"];
     metrics?: NativeReceiveExecutionRejection["metrics"];
+    diagnosticCode?: string;
   } = typeof args.rejection === "string" ? { code: args.rejection } : args.rejection;
   return await args.ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
@@ -1076,6 +1077,20 @@ export async function rejectStockReceiveExecutionState(args: {
     }
     const processorResult = supplied.processorResult;
     const rejectionMetrics = supplied.metrics;
+    const diagnosticCode = supplied.diagnosticCode;
+    if (
+      diagnosticCode !== undefined &&
+      (supplied.code !== "native-data-plane-failed" ||
+        !/^(?:stock-plan|stock-physical-plan|stock-data-plane):[a-z0-9-]{1,80}$/.test(
+          diagnosticCode
+        ))
+    ) {
+      args.logger.warn("stock-receive:execution-rejection-diagnostic-invalid", {
+        operationId: operation.id,
+        code: supplied.code,
+      });
+      return { status: "rejected", code: "execution-rejection-diagnostic-invalid" };
+    }
     if (supplied.code === "output-integrity-invalid") {
       if (
         !processorResult ||
@@ -1121,7 +1136,17 @@ export async function rejectStockReceiveExecutionState(args: {
         cleanupPending: true,
         updatedAt: Date.now(),
       },
-      [{ phase: event, detailCode: supplied.code }]
+      [
+        { phase: event, detailCode: diagnosticCode ?? supplied.code },
+        ...(diagnosticCode
+          ? [
+              {
+                phase: `${event}-attempt-${operation.attempts}`,
+                detailCode: diagnosticCode,
+              },
+            ]
+          : []),
+      ]
     );
     await store.put(nativeReceiveOperationKey(operation.id), failed);
     const lease = await store.get("receiveLease");
@@ -1129,6 +1154,7 @@ export async function rejectStockReceiveExecutionState(args: {
     args.logger.warn("stock-receive:execution-rejected", {
       operationId: operation.id,
       code: supplied.code,
+      diagnosticCode: diagnosticCode ?? supplied.code,
     });
     return { status: "failed", operation: nativeReceiveOperationView(failed) };
   });

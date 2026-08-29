@@ -120,6 +120,16 @@ function streamingContainerPhaseError(phase: StreamingContainerPhase, error: unk
   return new Error(`stock-data-plane:${phase}-failed`, { cause: error });
 }
 
+function containerFailureCode(response: Response): string {
+  const diagnostic = response.headers.get("X-Display-Stock-Container-Diagnostic");
+  if (response.status < 500) return "stock-data-plane:container-rejected";
+  if (diagnostic === "readiness-failed") {
+    return "stock-data-plane:container-readiness-failed";
+  }
+  if (diagnostic === "forward-failed") return "stock-data-plane:container-forward-failed";
+  return "stock-data-plane:container-transient";
+}
+
 let workerExecutorForTesting: StockWorkerExecutor | undefined;
 
 type OutputMutationRole = "pack" | "index" | "references";
@@ -151,6 +161,7 @@ export const __test = {
       ? { ...outputMutationFaultForTesting }
       : undefined;
   },
+  containerFailureCode,
   streamingContainerPhaseError,
   reset(): void {
     workerExecutorForTesting = undefined;
@@ -188,7 +199,12 @@ export function classifyStockReceiveDataPlaneError(
       metrics: plannerFailureOperationMetrics(error.metrics),
     };
   }
-  return { code: "native-data-plane-failed" };
+  const diagnosticCode =
+    error instanceof Error &&
+    /^(?:stock-plan|stock-physical-plan|stock-data-plane):[a-z0-9-]{1,80}$/.test(error.message)
+      ? error.message
+      : "stock-data-plane:unclassified";
+  return { code: "native-data-plane-failed", diagnosticCode };
 }
 
 function plannerFailureOperationMetrics(
@@ -740,12 +756,9 @@ async function executeStreamingContainer(args: {
     declaredResponse <= 12 ||
     declaredResponse > BUNDLE_RESPONSE_MAX_BYTES
   ) {
+    const failureCode = containerFailureCode(response);
     await response.body?.cancel();
-    throw new Error(
-      response.status >= 500
-        ? "stock-data-plane:container-transient"
-        : "stock-data-plane:container-rejected"
-    );
+    throw new Error(failureCode);
   }
   const reader = new BundleReader(response.body.getReader());
   if (!equalBytes(await reader.exact(8), RESPONSE_MAGIC)) {

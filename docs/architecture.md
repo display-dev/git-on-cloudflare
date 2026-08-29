@@ -79,6 +79,11 @@ The codebase is organized into focused modules with `index.ts` export files:
   Both paths write immutable output to R2, then RepoDO commits refs and pack-
   catalog metadata atomically through typed RPCs. One active receive lease at a
   time; concurrent pushes receive `503 Retry-After: 10`.
+- `StockReceiveContainerHost` rechecks the low-level Container process state
+  during port readiness, not only before it. A process that exits before any
+  receive bytes are forwarded is restarted within the existing bounded
+  readiness window. Readiness and forwarding failures remain distinct bounded
+  evidence codes; RepoDO still records the one authoritative terminal outcome.
 - Pack metadata lives in `pack_catalog` (SQLite). Exact pack membership lives in `.idx` files in R2.
 
 ### Ownership And Auth

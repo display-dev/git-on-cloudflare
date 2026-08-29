@@ -3,6 +3,35 @@ import type { Limiter } from "@/worker/git/operations/limits";
 import { doPrefix, packIndexKey, packRefsKey } from "@/worker/keys";
 import { readPublishedRepositoryGenerationState } from "@/worker/git/generation/publish";
 import { EXPIRED_WRITER_DRAIN_MS } from "@/worker/do/repo/repositoryLifecycle";
+import { isValidRefName } from "@/worker/git/operations/validation";
+import { isValidNativeReceiveOperationId } from "@/worker/git/nativeReceive/types";
+
+type AuthorityOwner = {
+  operationId: string;
+  fingerprint: string;
+  ref?: { object: R2Object; name: string; oid: string };
+  receipt?: { object: R2Object; name: string; oid: string };
+};
+
+function authorityIdentity(relative: string) {
+  const matched = relative.match(
+    /^native-receive\/authority\/(.+)-([a-f0-9]{64})\/(ref-0|receipt)\.json$/
+  );
+  if (!matched || !isValidNativeReceiveOperationId(matched[1]!)) return null;
+  return {
+    operationId: matched[1]!,
+    fingerprint: matched[2]!,
+    role: matched[3]! as "ref-0" | "receipt",
+  };
+}
+
+function nativeOutputOwner(relative: string) {
+  const matched = relative.match(
+    /^objects\/pack\/pack-native-(.+)-([a-f0-9]{64})-claim-[a-f0-9-]{36}\.(pack|idx|refs)$/
+  );
+  if (!matched || !isValidNativeReceiveOperationId(matched[1]!)) return null;
+  return `${matched[1]}\0${matched[2]}`;
+}
 
 /** Synthetic qualification only. Never accepts caller-selected object keys. */
 export async function recoverQualificationStorage(args: {
@@ -41,6 +70,7 @@ export async function recoverQualificationStorage(args: {
       return { status: "conflict", reason: "storage_state_mismatch" } as const;
     }
     const candidates: R2Object[] = [];
+    const unprotected: Array<{ object: R2Object; relative: string }> = [];
     // Admission already waits for each writer lease's expiry PLUS its drain
     // period. Do not charge the full writer lease again from object upload:
     // that timestamp can be near the end of an already-expired invocation.
@@ -55,17 +85,18 @@ export async function recoverQualificationStorage(args: {
       if (object.uploaded.getTime() > oldestAllowed) {
         return { status: "conflict", reason: "orphan_writer_drain" } as const;
       }
-      const relative = object.key.slice(prefix.length + 1);
-      if (/^objects\/pack\/pack-(cmp|gc)-[a-f0-9-]{36}\.(pack|idx|refs)$/.test(relative)) {
-        candidates.push(object);
-        continue;
-      }
-      // Reset has removed all operation records and all run refs have already
-      // been reconciled. Only proofs for absent synthetic run refs are eligible.
-      if (
-        /^native-receive\/authority\/[^/]+\/(ref-0|receipt)\.json$/.test(relative) &&
-        object.size <= 4096
-      ) {
+      unprotected.push({ object, relative: object.key.slice(prefix.length + 1) });
+    }
+    if (unprotected.length > 100) {
+      return { status: "conflict", reason: "recovery_budget" } as const;
+    }
+
+    // Authority records are the ownership root for native receive output. A
+    // filename or run marker alone can never make a pack eligible.
+    const owners = new Map<string, AuthorityOwner>();
+    for (const { object, relative } of unprotected) {
+      const identity = authorityIdentity(relative);
+      if (identity && object.size <= 4096) {
         const body = await args.env.REPO_BUCKET.get(object.key);
         if (!body || body.etag !== object.etag)
           return { status: "conflict", reason: "orphan_changed" } as const;
@@ -75,17 +106,53 @@ export async function recoverQualificationStorage(args: {
         const recognized =
           value.schemaVersion === 1 &&
           (value.kind === "authoritative-ref" ||
-            (value.kind === "operation-receipt" && value.disposition === "committed"));
+            (value.kind === "operation-receipt" &&
+              value.disposition === "committed" &&
+              typeof value.digest === "string" &&
+              /^[a-f0-9]{64}$/.test(value.digest)));
         if (
           !recognized ||
           typeof ref !== "string" ||
-          !/^refs\/heads\/qual-[A-Za-z0-9_-]+$/.test(ref) ||
+          !isValidRefName(ref) ||
           typeof oid !== "string" ||
           !/^[a-f0-9]{40}$/.test(oid) ||
           held.refs.some((r) => r.name === ref)
         ) {
           return { status: "conflict", reason: "unrecognized_authority" } as const;
         }
+        const ownerKey = `${identity.operationId}\0${identity.fingerprint}`;
+        const owner = owners.get(ownerKey) ?? {
+          operationId: identity.operationId,
+          fingerprint: identity.fingerprint,
+        };
+        const proof = { object, name: ref, oid };
+        if (identity.role === "ref-0") owner.ref = proof;
+        else owner.receipt = proof;
+        owners.set(ownerKey, owner);
+      }
+    }
+    if (
+      [...owners.values()].some(
+        (owner) =>
+          !owner.ref ||
+          !owner.receipt ||
+          owner.ref.name !== owner.receipt.name ||
+          owner.ref.oid !== owner.receipt.oid
+      )
+    ) {
+      return { status: "conflict", reason: "unrecognized_authority" } as const;
+    }
+    for (const { object, relative } of unprotected) {
+      const identity = authorityIdentity(relative);
+      if (identity) {
+        if (!owners.has(`${identity.operationId}\0${identity.fingerprint}`)) {
+          return { status: "conflict", reason: "unrecognized_authority" } as const;
+        }
+        candidates.push(object);
+        continue;
+      }
+      const ownerKey = nativeOutputOwner(relative);
+      if (ownerKey && owners.has(ownerKey)) {
         candidates.push(object);
         continue;
       }

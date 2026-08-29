@@ -133,9 +133,15 @@ default-off, exact-synthetic-repository control never accepts object keys. It
 acquires the existing compaction fence only after every activity lease and
 writer drain period has ended, requires no transient operation or pending
 generation, and protects all catalogued and currently published pack triples.
-It removes only aged uncatalogued compaction/GC outputs and recognized native
-authority proofs for absent `refs/heads/qual-*` refs. Unknown objects, changed
-inventory, recent objects, or incomplete publication block the whole deletion
+It removes only complete recognized native authority pairs for absent valid
+refs and aged uncatalogued native output triples whose operation-ID/fingerprint
+key identity matches those authority records. The ref and receipt bodies must
+also form one complete, content-valid pair. A run marker, filename, timestamp or
+size alone is never ownership evidence. Uncatalogued compaction/GC output
+without retained exact operation ownership is refused rather than guessed.
+Authoritative active-catalog and published-generation pack, index and reference
+artifacts are removed from eligibility before ownership classification. Unknown
+objects, changed inventory, recent objects, or incomplete publication block the whole deletion
 plan. Generation metadata is retained. The response contains aggregate counts
 and bytes, and an independent inventory is still required before removing the
 private recovery record. The sweep is bounded to one 1,000-object inventory
