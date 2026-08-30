@@ -5,6 +5,7 @@ import { createLogger } from "@/worker/common/logger";
 const CONTAINER_PORT = 8080;
 const READY_ATTEMPTS = 120;
 const READY_INTERVAL_MS = 250;
+const START_RETRY_ATTEMPTS = 20;
 const REQUEST_MAX_BYTES = 48 * 1024 * 1024 + 64 * 1024 + 12;
 const RESPONSE_MAX_BYTES = 96 * 1024 * 1024 + 1024 * 1024 + 12;
 
@@ -12,6 +13,12 @@ type TestContainerExecutor = (request: Request) => Promise<Response>;
 let testContainerExecutor: TestContainerExecutor | undefined;
 
 type StockContainer = Pick<Container, "running" | "start" | "getTcpPort">;
+
+type ContainerReadiness = {
+  ready: boolean;
+  startAttempts: number;
+  probeAttempts: number;
+};
 
 export const __test = {
   setContainerExecutor(executor: TestContainerExecutor): void {
@@ -22,6 +29,9 @@ export const __test = {
   },
   async waitForReady(container: StockContainer): Promise<boolean> {
     return await waitForReady(container, async () => {});
+  },
+  async readiness(container: StockContainer): Promise<ContainerReadiness> {
+    return await containerReadiness(container, async () => {});
   },
 };
 
@@ -40,35 +50,47 @@ async function waitForReady(
   container: StockContainer,
   sleep: (milliseconds: number) => Promise<void> = delay
 ): Promise<boolean> {
-  let startPending = false;
+  return (await containerReadiness(container, sleep)).ready;
+}
+
+async function containerReadiness(
+  container: StockContainer,
+  sleep: (milliseconds: number) => Promise<void> = delay
+): Promise<ContainerReadiness> {
+  let lastStartAttempt: number | null = null;
+  let startAttempts = 0;
+  let probeAttempts = 0;
   for (let attempt = 0; attempt < READY_ATTEMPTS; attempt++) {
     // `running` is only a point-in-time process state. A Container can exit
-    // after admission but before its port becomes ready; restart that lifecycle
-    // before any receive bytes are forwarded instead of polling a dead port for
-    // the remainder of the readiness window.
-    if (!container.running && !startPending) {
-      startPending = true;
+    // after a successful start but before its port becomes ready. Reissue start
+    // only while it still reports stopped and at most once every five seconds,
+    // instead of polling a dead lifecycle for the rest of the existing window.
+    if (
+      !container.running &&
+      (lastStartAttempt === null || attempt - lastStartAttempt >= START_RETRY_ATTEMPTS)
+    ) {
+      lastStartAttempt = attempt;
+      startAttempts++;
       try {
         container.start({ enableInternet: false });
       } catch {
-        // A concurrent platform start remains inside the bounded readiness
-        // observation. Permanent startup failure becomes readiness-failed.
+        // A transient platform start failure remains inside the bounded
+        // readiness observation and the same relative retry cadence.
       }
-    } else if (container.running) {
-      startPending = false;
     }
     try {
+      probeAttempts++;
       const response = await container
         .getTcpPort(CONTAINER_PORT)
         .fetch("http://container/ready", { method: "GET" });
       await response.body?.cancel();
-      if (response.ok) return true;
+      if (response.ok) return { ready: true, startAttempts, probeAttempts };
     } catch {
       // Container startup failures remain inside the bounded readiness loop.
     }
     await sleep(READY_INTERVAL_MS);
   }
-  return false;
+  return { ready: false, startAttempts, probeAttempts };
 }
 
 async function boundedContainerResponse(response: Response): Promise<Response> {
@@ -114,8 +136,12 @@ export class StockReceiveContainerHost extends DurableObject {
       }
       const container = this.ctx.container;
       if (!container) return new Response("Container unavailable\n", { status: 503 });
-      if (!(await waitForReady(container))) {
-        logger.warn("stock-container-host:readiness-failed", {});
+      const readiness = await containerReadiness(container);
+      if (!readiness.ready) {
+        logger.warn("stock-container-host:readiness-failed", {
+          startAttempts: readiness.startAttempts,
+          probeAttempts: readiness.probeAttempts,
+        });
         return new Response("Container unavailable\n", {
           status: 503,
           headers: { "X-Display-Stock-Container-Diagnostic": "readiness-failed" },

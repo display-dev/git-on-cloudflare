@@ -240,7 +240,61 @@ describe("stock Smart HTTP receive spike", () => {
     expect(probes).toBe(2);
   });
 
-  it("issues only one start while a Container remains not running", async () => {
+  it("reissues a lost Container start at a bounded cadence", async () => {
+    let running = false;
+    let starts = 0;
+    const container = {
+      get running() {
+        return running;
+      },
+      start() {
+        starts++;
+        if (starts === 1) throw new Error("simulated lost lifecycle start");
+        running = true;
+      },
+      getTcpPort() {
+        return {
+          async fetch() {
+            if (!running) throw new Error("not ready");
+            return new Response("ready\n", { status: 200 });
+          },
+        } as unknown as Fetcher;
+      },
+    };
+
+    expect(await stockContainerHostTest.waitForReady(container)).toBe(true);
+    expect(starts).toBe(2);
+  });
+
+  it("restarts after every successful start exits before readiness", async () => {
+    let running = false;
+    let starts = 0;
+    let probes = 0;
+    const container = {
+      get running() {
+        return running;
+      },
+      start() {
+        starts++;
+        running = true;
+      },
+      getTcpPort() {
+        return {
+          async fetch() {
+            probes++;
+            running = false;
+            throw new Error("simulated exit before readiness");
+          },
+        } as unknown as Fetcher;
+      },
+    };
+
+    expect(await stockContainerHostTest.waitForReady(container)).toBe(false);
+    expect(starts).toBe(6);
+    expect(probes).toBe(120);
+  });
+
+  it("bounds repeated starts while a Container remains not running", async () => {
     let starts = 0;
     let probes = 0;
     const container = {
@@ -260,8 +314,28 @@ describe("stock Smart HTTP receive spike", () => {
     };
 
     expect(await stockContainerHostTest.waitForReady(container)).toBe(false);
-    expect(starts).toBe(1);
+    expect(starts).toBe(6);
     expect(probes).toBe(120);
+  });
+
+  it("retains bounded readiness counters without provider detail", async () => {
+    let starts = 0;
+    const result = await stockContainerHostTest.readiness({
+      running: false,
+      start() {
+        starts++;
+      },
+      getTcpPort() {
+        return {
+          async fetch() {
+            throw new Error("private provider failure");
+          },
+        } as unknown as Fetcher;
+      },
+    });
+
+    expect(result).toEqual({ ready: false, startAttempts: 6, probeAttempts: 120 });
+    expect(starts).toBe(6);
   });
 
   it("plans the first push into a repository with no active packs", async () => {
