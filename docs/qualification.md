@@ -61,6 +61,9 @@ Supply these values outside source control:
 - `QUALIFICATION_REPOSITORY=repo-<16–64 lowercase hex>`;
 - `QUALIFICATION_SECRET` as an independent secret;
 - `QUALIFICATION_OBSERVER_SECRET` as a separate read-only operation-observer secret;
+- `SESSION_SECRET` as an independent qualification-only server-side signing
+  secret, never the production value; recovery journal authentication fails
+  closed without it;
 - `QUALIFICATION_TARGET_REVISION` as the exact deployed 40-character commit;
 - `QUALIFICATION_CONTAINER_IMAGE_DIGEST` as the exact `sha256:` image digest;
 - the synthetic Git credential for the exact repository; and
@@ -87,11 +90,14 @@ bucket with bucket-scoped S3 credentials, commits the import with the existing
 internal bearer, polls its terminal operation view, and verifies the resulting
 base ref. The multi-gigabyte pack does not cross the Worker request body.
 
-`QUALIFICATION_SECRET` and `QUALIFICATION_OBSERVER_SECRET` must be installed
-with `wrangler secret put`; neither may appear in Wrangler vars, generated
-configuration, arguments, or evidence. Only the observer secret enters
+`QUALIFICATION_SECRET`, `QUALIFICATION_OBSERVER_SECRET`, and `SESSION_SECRET`
+must be installed with `wrangler secret put`; none may appear in Wrangler vars,
+generated configuration, arguments, or evidence. All three secret bindings must
+be present in the frozen canonical typed binding array. Only the observer secret enters
 ForgeMark over its bounded JSON stdin request. A deployment lacking the mode
-flag or the applicable secret returns 404 for that qualification surface.
+flag or the applicable bearer secret returns 404 for that qualification surface.
+A missing or blank `SESSION_SECRET` instead refuses storage recovery with
+`recovery_signing_unavailable` before any repository fence is taken.
 
 ## Readiness and reset sequence
 
@@ -137,21 +143,48 @@ It removes only complete recognized native authority pairs after their
 transient operation state has been cleared, including a completed qualification
 operation whose ref name remains active. Those records prove run-output
 ownership; the authoritative ref remains in RepoDO and its complete object
-closure remains in protected catalogued/published pack triples. Aged
-uncatalogued native output triples are eligible only when their
-operation-ID/fingerprint key identity matches those authority records. The ref
-and receipt bodies must also form one complete, content-valid pair. A run
+closure remains in protected catalogued/published pack triples. Legacy authority
+records are not authenticated by a server-owned secret, so they prove only
+their own paired-record shape and can never authorize deletion of an
+uncatalogued pack, index, reference sidecar, or other artifact. The ref and
+receipt bodies must also form one complete, content-valid pair. A run
 marker, filename, timestamp or size alone is never ownership evidence.
 Uncatalogued compaction/GC output
 without retained exact operation ownership is refused rather than guessed.
 Authoritative active-catalog and published-generation pack, index and reference
 artifacts are removed from eligibility before ownership classification. Unknown
-objects, changed inventory, recent objects, or incomplete publication block the whole deletion
-plan. Generation metadata is retained. The response contains aggregate counts
-and bytes, and an independent inventory is still required before removing the
-private recovery record. The sweep is bounded to one 1,000-object inventory
-page and at most 100 deletions; these are recovery safety caps, not service
+objects, any uncatalogued native output artifact, changed inventory, recent objects,
+or incomplete publication block the whole deletion plan. Generation metadata
+is retained. The response contains aggregate counts and bytes, and an
+independent inventory is still required before removing the private recovery
+record. The sweep validates the complete supplied inventory before selecting a
+deterministic prefix of whole operation-owner groups totaling at most 100 keys.
+Before deletion, the control writes an authenticated fixed-key private journal
+binding the validated owner groups and the unchanged full-inventory remainder
+digest, including active and protected artifacts. A
+partially applied or acknowledgement-lost R2 deletion resumes from that journal
+without accepting caller-selected keys or weakening complete-owner validation;
+a journal not authenticated by a domain-separated server-only signing authority
+separate from bucket-scoped R2 authority is refused, and journal execution
+independently revalidates authority-record shape and rejects currently protected
+keys. The existing server-only session
+signing configuration must be present and nonblank or recovery fails closed
+before taking a repository fence. If eligible objects remain after
+a completed batch, the operator supplies the new exact object count to the same
+maintained control. The sweep reserves its complete Worker subrequest envelope
+before acquiring the fence and is bounded to one 1,000-object inventory page and
+at most 800 authority-record reads; these are recovery safety caps, not service
 storage limits.
+
+Once the control has written a recovery journal, the external orchestrator must
+resume that journal before any further receive, reset, GC, or generation
+publication on the repository. The journal intentionally binds the original ref
+digest, packset version, and complete unchanged inventory so interleaved
+repository mutation fails closed rather than silently changing the deletion
+proof. The private recovery record remains required until the journal is gone
+and exact inventory is proven. If that ordering is violated, stop with the
+retained recovery record; do not remove the journal or surviving owner record
+outside the maintained control.
 
 Fixed provider-resource teardown is a separate explicit operator action. An
 ordinary run never deletes the Worker, D1, KV, R2 bucket, Queue, or Container

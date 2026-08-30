@@ -48,6 +48,24 @@ async function enabled<T>(fn: () => Promise<T>): Promise<T> {
   );
 }
 
+async function signQualificationRecoveryJournal(payload: unknown): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.SESSION_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = new Uint8Array(
+    await crypto.subtle.sign(
+      "HMAC",
+      key,
+      new TextEncoder().encode(`qualification-storage-recovery\0${JSON.stringify(payload)}`)
+    )
+  );
+  return [...signature].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 describe("qualification repository controls", () => {
   it.each(["complete", "cancel"])(
     "streams the current GC source despite an older R2 generation and releases its reader on %s",
@@ -209,7 +227,7 @@ describe("qualification repository controls", () => {
     expect(await stub.getGcOperation()).toMatchObject({ phase: "complete" });
     await stub.resetQualificationState((await stub.getQualificationInventory()).refStateDigest);
   });
-  it("recovers only aged uncatalogued artifacts under an exact idle-state fence", async () => {
+  it("recovers only aged authority pairs under an exact idle-state fence", async () => {
     const seeded = await setupRepoForTests(env, namespace, repository, {
       doName: `repo:qualification-storage-${crypto.randomUUID()}`,
     });
@@ -235,7 +253,11 @@ describe("qualification repository controls", () => {
     const operationId = "qualification-test";
     const fingerprint = "a".repeat(64);
     const orphan = `${prefix}/objects/pack/pack-native-${operationId}-${fingerprint}-claim-${crypto.randomUUID()}.pack`;
+    const orphanIdx = packIndexKey(orphan);
+    const orphanRefs = packRefsKey(orphan);
     await env.REPO_BUCKET.put(orphan, new Uint8Array(17));
+    await env.REPO_BUCKET.put(orphanIdx, new Uint8Array(1));
+    await env.REPO_BUCKET.put(orphanRefs, new Uint8Array(1));
     const authorityPrefix = `${prefix}/native-receive/authority/${operationId}-${fingerprint}`;
     const authority = `${authorityPrefix}/ref-0.json`;
     const receipt = `${authorityPrefix}/receipt.json`;
@@ -264,7 +286,7 @@ describe("qualification repository controls", () => {
       const body = JSON.stringify({
         schemaVersion: 1,
         expectedRefStateDigest: inventory.refStateDigest,
-        expectedObjectCount: 5,
+        expectedObjectCount: 7,
       });
       const init = {
         method: "POST",
@@ -272,6 +294,14 @@ describe("qualification repository controls", () => {
         body,
       };
       expect((await qualificationRequest("/storage-recovery", init, "wrong")).status).toBe(401);
+      await withEnvOverrides(env, { SESSION_SECRET: "   " }, async () => {
+        const unsigned = await qualificationRequest("/storage-recovery", init);
+        expect(await unsigned.json()).toMatchObject({
+          status: "conflict",
+          reason: "recovery_signing_unavailable",
+        });
+      });
+      expect(await env.REPO_BUCKET.head(orphan)).not.toBeNull();
       const young = await qualificationRequest("/storage-recovery", init);
       expect(await young.json()).toMatchObject({
         status: "conflict",
@@ -308,7 +338,7 @@ describe("qualification repository controls", () => {
         clock.mockReturnValue(now + 8 * 60_000);
         const unknown = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
         await env.REPO_BUCKET.put(unknown, new Uint8Array(3));
-        const bodyWithUnknown = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 6 });
+        const bodyWithUnknown = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 8 });
         const refused = await qualificationRequest("/storage-recovery", {
           ...init,
           body: bodyWithUnknown,
@@ -320,14 +350,146 @@ describe("qualification repository controls", () => {
         });
         expect(await env.REPO_BUCKET.head(orphan)).not.toBeNull();
         await env.REPO_BUCKET.delete(unknown);
-        const recovered = await qualificationRequest("/storage-recovery", init);
+        const forgedJournal = `${prefix}/qualification/storage-recovery-plan.json`;
+        await env.REPO_BUCKET.put(forgedJournal, "{");
+        const malformedJournalBody = JSON.stringify({
+          ...JSON.parse(body),
+          expectedObjectCount: 8,
+        });
+        const malformedJournal = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: malformedJournalBody,
+          headers: {
+            ...init.headers,
+            "Content-Length": String(malformedJournalBody.length),
+          },
+        });
+        expect(await malformedJournal.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_authority",
+        });
+        await env.REPO_BUCKET.delete(forgedJournal);
+        await env.REPO_BUCKET.put(receipt, "{");
+        const malformedAuthority = await qualificationRequest("/storage-recovery", init);
+        expect(await malformedAuthority.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_authority",
+        });
+        await env.REPO_BUCKET.put(
+          receipt,
+          JSON.stringify({
+            schemaVersion: 1,
+            kind: "authoritative-ref",
+            name: "refs/heads/qual-finished",
+            oid: "a".repeat(40),
+          })
+        );
+        const roleMismatch = await qualificationRequest("/storage-recovery", init);
+        expect(await roleMismatch.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_authority",
+        });
+        await env.REPO_BUCKET.put(
+          receipt,
+          JSON.stringify({
+            schemaVersion: 1,
+            kind: "operation-receipt",
+            disposition: "committed",
+            refName: "refs/heads/qual-finished",
+            newOid: "a".repeat(40),
+            digest: "b".repeat(64),
+          })
+        );
+        await env.REPO_BUCKET.put(
+          forgedJournal,
+          JSON.stringify({
+            schemaVersion: 1,
+            kind: "qualification-storage-recovery-plan",
+            expectedRefStateDigest: inventory.refStateDigest,
+            packsetVersion: 0,
+            unchangedInventoryDigest: "a".repeat(64),
+            ownerGroups: [
+              {
+                ownerKey: `${operationId}\0${fingerprint}`,
+                objects: [
+                  { key: orphan, etag: (await env.REPO_BUCKET.head(orphan))!.etag, size: 17 },
+                ],
+              },
+            ],
+            signature: "b".repeat(64),
+          })
+        );
+        const forgedBody = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 8 });
+        const forgedResult = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: forgedBody,
+          headers: { ...init.headers, "Content-Length": String(forgedBody.length) },
+        });
+        expect(await forgedResult.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_authority",
+        });
+        expect(await env.REPO_BUCKET.head(orphan)).not.toBeNull();
+        await env.REPO_BUCKET.delete(forgedJournal);
+        const forgedArtifactJournalPayload = {
+          schemaVersion: 1 as const,
+          kind: "qualification-storage-recovery-plan" as const,
+          expectedRefStateDigest: inventory.refStateDigest,
+          packsetVersion: 0,
+          unchangedInventoryDigest: "a".repeat(64),
+          ownerGroups: [
+            {
+              ownerKey: `${operationId}\0${fingerprint}`,
+              objects: [
+                { key: orphan, etag: (await env.REPO_BUCKET.head(orphan))!.etag, size: 17 },
+              ],
+            },
+          ],
+        };
+        await env.REPO_BUCKET.put(
+          forgedJournal,
+          JSON.stringify({
+            ...forgedArtifactJournalPayload,
+            signature: await signQualificationRecoveryJournal(forgedArtifactJournalPayload),
+          })
+        );
+        const signedArtifactJournal = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: forgedBody,
+          headers: { ...init.headers, "Content-Length": String(forgedBody.length) },
+        });
+        expect(await signedArtifactJournal.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_authority",
+        });
+        expect(await env.REPO_BUCKET.head(orphan)).not.toBeNull();
+        await env.REPO_BUCKET.delete(forgedJournal);
+        // The content-valid legacy authority pair cannot authorize deletion of
+        // a pack triple carrying the same operation identity.
+        const forgedOwnership = await qualificationRequest("/storage-recovery", init);
+        expect(await forgedOwnership.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_orphan",
+        });
+        for (const key of [orphan, orphanIdx, orphanRefs]) {
+          expect(await env.REPO_BUCKET.head(key)).not.toBeNull();
+        }
+        await env.REPO_BUCKET.delete([orphan, orphanIdx, orphanRefs]);
+        const authorityOnlyBody = JSON.stringify({
+          ...JSON.parse(body),
+          expectedObjectCount: 4,
+        });
+        const recovered = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: authorityOnlyBody,
+          headers: { ...init.headers, "Content-Length": String(authorityOnlyBody.length) },
+        });
         expect(recovered.status).toBe(200);
         expect(await recovered.json()).toMatchObject({
           status: "recovered",
-          deletedObjectCount: 3,
+          deletedObjectCount: 2,
           remainingObjectCount: 2,
         });
-        expect(await env.REPO_BUCKET.head(orphan)).toBeNull();
         expect(await env.REPO_BUCKET.head(authority)).toBeNull();
         const inventoryAfter = await stub.getQualificationInventory();
         expect(inventoryAfter).toEqual(inventory);
@@ -340,9 +502,7 @@ describe("qualification repository controls", () => {
         await runDOWithRetry(
           () => stub,
           async (_instance, state) => {
-            await state.storage.put("refs", [
-              { name: "refs/heads/first", oid: "c".repeat(40) },
-            ]);
+            await state.storage.put("refs", [{ name: "refs/heads/first", oid: "c".repeat(40) }]);
             await upsertPackCatalogRow(getDb(state.storage), {
               packKey: activePack,
               kind: "compact",
@@ -358,6 +518,51 @@ describe("qualification repository controls", () => {
             });
           }
         );
+        const protectedJournalPayload = {
+          schemaVersion: 1 as const,
+          kind: "qualification-storage-recovery-plan" as const,
+          expectedRefStateDigest: (await stub.getQualificationInventory()).refStateDigest,
+          packsetVersion: 0,
+          unchangedInventoryDigest: "a".repeat(64),
+          ownerGroups: [
+            {
+              ownerKey: "forged-protected-owner",
+              objects: [
+                {
+                  key: activeIdx,
+                  etag: (await env.REPO_BUCKET.head(activeIdx))!.etag,
+                  size: 1,
+                },
+              ],
+            },
+          ],
+        };
+        await env.REPO_BUCKET.put(
+          forgedJournal,
+          JSON.stringify({
+            ...protectedJournalPayload,
+            signature: await signQualificationRecoveryJournal(protectedJournalPayload),
+          })
+        );
+        const protectedJournalBody = JSON.stringify({
+          schemaVersion: 1,
+          expectedRefStateDigest: protectedJournalPayload.expectedRefStateDigest,
+          expectedObjectCount: 6,
+        });
+        const protectedJournal = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: protectedJournalBody,
+          headers: {
+            ...init.headers,
+            "Content-Length": String(protectedJournalBody.length),
+          },
+        });
+        expect(await protectedJournal.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_authority",
+        });
+        expect(await env.REPO_BUCKET.head(activeIdx)).not.toBeNull();
+        await env.REPO_BUCKET.delete(forgedJournal);
         const runAuthorities: string[] = [];
         for (const [suffix, oid] of [
           ["first", "c".repeat(40)],
@@ -409,6 +614,154 @@ describe("qualification repository controls", () => {
         }
         for (const key of runAuthorities) expect(await env.REPO_BUCKET.head(key)).toBeNull();
         expect(await stub.getQualificationInventory()).toEqual(protectedInventory);
+
+        const batchedAuthorities: Array<[string, string]> = [];
+        for (let index = 0; index < 68; index++) {
+          const operation = `batch-${index.toString().padStart(2, "0")}`;
+          const owner = `${prefix}/native-receive/authority/${operation}-${"a".repeat(64)}`;
+          const refKey = `${owner}/ref-0.json`;
+          const receiptKey = `${owner}/receipt.json`;
+          batchedAuthorities.push([refKey, receiptKey]);
+          await env.REPO_BUCKET.put(
+            refKey,
+            JSON.stringify({
+              schemaVersion: 1,
+              kind: "authoritative-ref",
+              name: `refs/heads/${operation}`,
+              oid: "b".repeat(40),
+            })
+          );
+          await env.REPO_BUCKET.put(
+            receiptKey,
+            JSON.stringify({
+              schemaVersion: 1,
+              kind: "operation-receipt",
+              disposition: "committed",
+              refName: `refs/heads/${operation}`,
+              newOid: "b".repeat(40),
+              digest: "c".repeat(64),
+            })
+          );
+        }
+        const firstBatchBody = JSON.stringify({
+          schemaVersion: 1,
+          expectedRefStateDigest: protectedInventory.refStateDigest,
+          expectedObjectCount: 141,
+        });
+        const deleteFromBucket = env.REPO_BUCKET.delete.bind(env.REPO_BUCKET);
+        const partialDelete = vi
+          .spyOn(env.REPO_BUCKET, "delete")
+          .mockImplementationOnce(async (keys) => {
+            const selected = typeof keys === "string" ? [keys] : keys;
+            await deleteFromBucket([selected[0]!, activeIdx]);
+            throw new Error("simulated lost partial-delete acknowledgement");
+          });
+        try {
+          const interruptedBatch = await qualificationRequest("/storage-recovery", {
+            ...init,
+            body: firstBatchBody,
+            headers: { ...init.headers, "Content-Length": String(firstBatchBody.length) },
+          });
+          expect(await interruptedBatch.json()).toMatchObject({
+            status: "conflict",
+            reason: "storage_state_mismatch",
+          });
+        } finally {
+          partialDelete.mockRestore();
+        }
+        expect(await env.REPO_BUCKET.head(activeIdx)).toBeNull();
+        await env.REPO_BUCKET.put(activeIdx, new Uint8Array(1));
+        const resumedBatchBody = JSON.stringify({
+          schemaVersion: 1,
+          expectedRefStateDigest: protectedInventory.refStateDigest,
+          expectedObjectCount: 141,
+        });
+        const resumedBatch = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: resumedBatchBody,
+          headers: { ...init.headers, "Content-Length": String(resumedBatchBody.length) },
+        });
+        expect(await resumedBatch.json()).toMatchObject({
+          status: "recovered",
+          deletedObjectCount: 100,
+          remainingObjectCount: 41,
+        });
+        for (const [refKey, receiptKey] of batchedAuthorities) {
+          const retained = [
+            await env.REPO_BUCKET.head(refKey),
+            await env.REPO_BUCKET.head(receiptKey),
+          ];
+          expect(retained[0] === null).toBe(retained[1] === null);
+        }
+        const secondBatchBody = JSON.stringify({
+          schemaVersion: 1,
+          expectedRefStateDigest: protectedInventory.refStateDigest,
+          expectedObjectCount: 41,
+        });
+        const secondBatchResult = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: secondBatchBody,
+          headers: { ...init.headers, "Content-Length": String(secondBatchBody.length) },
+        });
+        expect(await secondBatchResult.json()).toMatchObject({
+          status: "recovered",
+          deletedObjectCount: 36,
+          remainingObjectCount: 5,
+        });
+        for (const keys of batchedAuthorities) {
+          for (const key of keys) expect(await env.REPO_BUCKET.head(key)).toBeNull();
+        }
+        for (const key of [activePack, activeIdx, activeRefs]) {
+          expect(await env.REPO_BUCKET.head(key)).not.toBeNull();
+        }
+        expect(await stub.getQualificationInventory()).toEqual(protectedInventory);
+
+        const incompleteOperation = "incomplete-output";
+        const incompleteFingerprint = "d".repeat(64);
+        const incompleteOwner = `${prefix}/native-receive/authority/${incompleteOperation}-${incompleteFingerprint}`;
+        const incompleteRef = `${incompleteOwner}/ref-0.json`;
+        const incompleteReceipt = `${incompleteOwner}/receipt.json`;
+        const incompletePack = `${prefix}/objects/pack/pack-native-${incompleteOperation}-${incompleteFingerprint}-claim-${crypto.randomUUID()}.pack`;
+        await env.REPO_BUCKET.put(
+          incompleteRef,
+          JSON.stringify({
+            schemaVersion: 1,
+            kind: "authoritative-ref",
+            name: "refs/heads/incomplete-output",
+            oid: "d".repeat(40),
+          })
+        );
+        await env.REPO_BUCKET.put(
+          incompleteReceipt,
+          JSON.stringify({
+            schemaVersion: 1,
+            kind: "operation-receipt",
+            disposition: "committed",
+            refName: "refs/heads/incomplete-output",
+            newOid: "d".repeat(40),
+            digest: "e".repeat(64),
+          })
+        );
+        await env.REPO_BUCKET.put(incompletePack, new Uint8Array(1));
+        const incompleteBody = JSON.stringify({
+          schemaVersion: 1,
+          expectedRefStateDigest: protectedInventory.refStateDigest,
+          expectedObjectCount: 8,
+        });
+        const incompleteResult = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: incompleteBody,
+          headers: { ...init.headers, "Content-Length": String(incompleteBody.length) },
+        });
+        expect(await incompleteResult.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_orphan",
+        });
+        for (const key of [incompleteRef, incompleteReceipt, incompletePack]) {
+          expect(await env.REPO_BUCKET.head(key)).not.toBeNull();
+        }
+        await env.REPO_BUCKET.delete([incompleteRef, incompleteReceipt, incompletePack]);
+        expect(await stub.getQualificationInventory()).toEqual(protectedInventory);
       } finally {
         clock.mockRestore();
         await runDOWithRetry(
@@ -430,6 +783,8 @@ describe("qualification repository controls", () => {
         );
         await env.REPO_BUCKET.delete([
           orphan,
+          orphanIdx,
+          orphanRefs,
           `${prefix}/generations/0.json`,
           `${prefix}/generation-index.json`,
         ]);

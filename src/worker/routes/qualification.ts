@@ -7,8 +7,12 @@ import {
   isValidNativeReceiveOperationId,
   nativeReceiveOperationEvidenceView,
 } from "@/worker/git/nativeReceive/types";
+import { countSubrequest } from "@/worker/git/operations/limits";
 import type { AppContext, AppRouter } from "./hono";
-import { recoverQualificationStorage } from "@/worker/git/maintenance/qualificationStorageRecovery";
+import {
+  qualificationStorageRecoverySubrequestReservation,
+  recoverQualificationStorage,
+} from "@/worker/git/maintenance/qualificationStorageRecovery";
 import { registerQualificationGcRoutes } from "./qualificationGc";
 
 const QUALIFICATION_SCHEMA_VERSION = 2;
@@ -201,13 +205,46 @@ export function registerQualificationRoutes(router: AppRouter): void {
       return json({ schemaVersion: 1, status: "rejected", reason: "invalid_request" }, 400);
     const route = await resolveQualificationTarget(c);
     if (!route) return new Response("Not found\n", { status: 404 });
+    const log = c.var.logFor({ service: "QualificationStorageRecovery", repoId: route.doName });
+    const reservedSubrequests = qualificationStorageRecoverySubrequestReservation(
+      request.expectedObjectCount
+    );
+    if (!countSubrequest(c.var.cacheCtx, reservedSubrequests)) {
+      log.warn("qualification-storage-recovery:subrequest-budget-refused", {
+        reservedSubrequests,
+      });
+      return json({ schemaVersion: 1, status: "conflict", reason: "recovery_budget" }, 409, {
+        "Cache-Control": "no-store",
+      });
+    }
+    let remainingReservedSubrequests = reservedSubrequests;
+    const countRecoverySubrequest = (operation: string, count = 1) => {
+      remainingReservedSubrequests -= Math.max(1, count);
+      if (remainingReservedSubrequests < 0) {
+        log.error("qualification-storage-recovery:reservation-exhausted", { operation, count });
+      }
+    };
     const result = await recoverQualificationStorage({
       env: c.env,
+      log,
       stub: getRepoStub(c.env, route.doName),
       limiter: c.var.limiter,
+      countSubrequest: countRecoverySubrequest,
       expectedRefStateDigest: request.expectedRefStateDigest,
       expectedObjectCount: request.expectedObjectCount,
     });
+    if (result.status === "recovered") {
+      log.info("qualification-storage-recovery:batch-complete", {
+        deletedObjectCount: result.deletedObjectCount,
+        deletedObjectBytes: result.deletedObjectBytes,
+        remainingObjectCount: result.remainingObjectCount,
+      });
+    } else {
+      log.warn("qualification-storage-recovery:refused", {
+        status: result.status,
+        reason: result.reason,
+      });
+    }
     return json({ schemaVersion: 1, ...result }, result.status === "recovered" ? 200 : 409, {
       "Cache-Control": "no-store",
     });
