@@ -139,18 +139,26 @@ default-off, exact-synthetic-repository control never accepts object keys. It
 acquires the existing compaction fence only after every activity lease and
 writer drain period has ended, requires no transient operation or pending
 generation, and protects all catalogued and currently published pack triples.
-It removes only complete recognized native authority pairs after their
-transient operation state has been cleared, including a completed qualification
-operation whose ref name remains active. Those records prove run-output
+It removes only complete recognized native authority pairs and the narrower
+structurally proven pack-only compaction output described below. Native records
+are eligible only after transient operation state has been cleared, including a
+completed qualification operation whose ref name remains active. Those records prove run-output
 ownership; the authoritative ref remains in RepoDO and its complete object
 closure remains in protected catalogued/published pack triples. Legacy authority
 records are not authenticated by a server-owned secret, so they prove only
 their own paired-record shape and can never authorize deletion of an
 uncatalogued pack, index, reference sidecar, or other artifact. The ref and
 receipt bodies must also form one complete, content-valid pair. A run
-marker, filename, timestamp or size alone is never ownership evidence.
-Uncatalogued compaction/GC output
-without retained exact operation ownership is refused rather than guessed.
+marker, filename, timestamp or size alone is never ownership evidence. One
+narrower structural case is recoverable: an aged, uncatalogued
+`pack-cmp-<lease>.pack` with neither an index nor reference sidecar. Under the
+repository-wide recovery lease and completed writer/reader drain, that object
+cannot form a publishable pack triple or still be completed by its expired
+compaction lease. The current catalog and published generation must not
+reference it, and the fixed-key recovery journal revalidates the unchanged
+inventory before deletion. Any sidecar, changed inventory, active writer or
+reader, or other uncatalogued compaction/GC output is refused rather than
+guessed.
 Authoritative active-catalog and published-generation pack, index and reference
 artifacts are removed from eligibility before ownership classification. Unknown
 objects, any uncatalogued native output artifact, changed inventory, recent objects,
@@ -158,7 +166,8 @@ or incomplete publication block the whole deletion plan. Generation metadata
 is retained. The response contains aggregate counts and bytes, and an
 independent inventory is still required before removing the private recovery
 record. The sweep validates the complete supplied inventory before selecting a
-deterministic prefix of whole operation-owner groups totaling at most 100 keys.
+deterministic prefix of whole authority-owner or singleton compaction-output
+groups totaling at most 100 keys.
 Before deletion, the control writes an authenticated fixed-key private journal
 binding the validated owner groups and the unchanged full-inventory remainder
 digest, including active and protected artifacts. A
@@ -166,8 +175,10 @@ partially applied or acknowledgement-lost R2 deletion resumes from that journal
 without accepting caller-selected keys or weakening complete-owner validation;
 a journal not authenticated by a domain-separated server-only signing authority
 separate from bucket-scoped R2 authority is refused, and journal execution
-independently revalidates authority-record shape and rejects currently protected
-keys. The existing server-only session
+independently revalidates recognized authority or compaction key shape and
+rejects currently protected keys. For a compaction output, any sidecar appearing
+after planning changes the bound unchanged-inventory digest and refuses replay.
+The existing server-only session
 signing configuration must be present and nonblank or recovery fails closed
 before taking a repository fence. If eligible objects remain after
 a completed batch, the operator supplies the new exact object count to the same

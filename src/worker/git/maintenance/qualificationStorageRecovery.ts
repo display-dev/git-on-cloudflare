@@ -24,6 +24,10 @@ type AuthorityIdentity = {
   role: "ref-0" | "receipt";
 };
 
+type CompactionOrphanIdentity = {
+  leaseToken: string;
+};
+
 const MAX_AUTHORITY_RECORDS_PER_RECOVERY = 800;
 const MAX_DELETED_OBJECTS_PER_RECOVERY = 100;
 const RECOVERY_JOURNAL_MAX_BYTES = 256 * 1024;
@@ -87,6 +91,13 @@ function authorityIdentity(relative: string): AuthorityIdentity | null {
     fingerprint: matched[2]!,
     role: matched[3]! as AuthorityIdentity["role"],
   };
+}
+
+function compactionOrphanIdentity(relative: string): CompactionOrphanIdentity | null {
+  const matched = relative.match(
+    /^objects\/pack\/pack-cmp-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.pack$/
+  );
+  return matched ? { leaseToken: matched[1]! } : null;
 }
 
 function objectProof(object: R2Object): RecoveryObjectProof {
@@ -166,18 +177,25 @@ async function executeRecoveryJournal(args: {
   for (const group of args.journal.ownerGroups) {
     for (const proof of group.objects) {
       const prefixMatches = proof.key.startsWith(`${args.prefix}/`);
-      const authorityRecord =
-        prefixMatches && authorityIdentity(proof.key.slice(args.prefix.length + 1)) !== null;
+      const relative = prefixMatches ? proof.key.slice(args.prefix.length + 1) : "";
+      const recognizedRecoveryObject =
+        prefixMatches &&
+        (authorityIdentity(relative) !== null || compactionOrphanIdentity(relative) !== null);
       const protectedObject = isProtectedRecoveryObject({
         prefix: args.prefix,
         journalKey: args.journalKey,
         protectedKeys: args.protectedKeys,
         key: proof.key,
       });
-      if (!prefixMatches || !authorityRecord || planned.has(proof.key) || protectedObject) {
+      if (
+        !prefixMatches ||
+        !recognizedRecoveryObject ||
+        planned.has(proof.key) ||
+        protectedObject
+      ) {
         args.log.warn("qualification-storage-recovery:journal-key-refused", {
           prefixMatches,
-          authorityRecord,
+          recognizedRecoveryObject,
           duplicate: planned.has(proof.key),
           protectedObject,
         });
@@ -501,6 +519,7 @@ export async function recoverQualificationStorage(args: {
     }
 
     const candidatesByOwner = new Map<string, R2Object[]>();
+    const inventoryKeys = new Set(page.objects.map((candidate) => candidate.key));
     const addCandidate = (ownerKey: string, object: R2Object) => {
       const owned = candidatesByOwner.get(ownerKey) ?? [];
       owned.push(object);
@@ -516,6 +535,21 @@ export async function recoverQualificationStorage(args: {
         addCandidate(ownerKey, object);
         continue;
       }
+      const compaction = compactionOrphanIdentity(relative);
+      if (compaction) {
+        // Catalogued and currently published packs were removed from this
+        // classification above. A pack-only compaction artifact can remain
+        // after an interrupted write or partially applied reclamation. The
+        // repository-wide recovery lease proves the expired writer cannot
+        // still complete it. Index keys sort before pack keys and are already
+        // rejected as unknown artifacts; a reference sibling sorts after the
+        // pack and therefore needs this explicit fail-closed check.
+        if (inventoryKeys.has(packRefsKey(object.key))) {
+          return { status: "conflict", reason: "unrecognized_orphan" } as const;
+        }
+        addCandidate(`compaction\0${compaction.leaseToken}`, object);
+        continue;
+      }
       // Legacy authority records are not authenticated against a server-owned
       // secret. They may therefore prove only their own paired-record shape;
       // they never authorize deletion of pack, index, reference, or other R2
@@ -525,11 +559,8 @@ export async function recoverQualificationStorage(args: {
 
     const selectedGroups: Array<{ ownerKey: string; objects: R2Object[] }> = [];
     let selectedCount = 0;
-    for (const ownerKey of [...owners.keys()].sort()) {
-      const group = candidatesByOwner.get(ownerKey);
-      if (!group) {
-        return { status: "conflict", reason: "unrecognized_authority" } as const;
-      }
+    for (const ownerKey of [...candidatesByOwner.keys()].sort()) {
+      const group = candidatesByOwner.get(ownerKey)!;
       if (selectedCount + group.length > MAX_DELETED_OBJECTS_PER_RECOVERY) {
         if (selectedCount === 0) {
           return { status: "conflict", reason: "recovery_budget" } as const;

@@ -233,12 +233,13 @@ describe("qualification repository controls", () => {
     });
     const stub = getRepoStub(env, seeded.doName);
     const prefix = doPrefix(stub.id.toString());
+    const publishedOnlyPack = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
     await env.REPO_BUCKET.put(
       `${prefix}/generations/0.json`,
       JSON.stringify({
         schemaVersion: 1,
         generation: 0,
-        packs: [],
+        packs: [{ packKey: publishedOnlyPack }],
       })
     );
     await env.REPO_BUCKET.put(
@@ -336,7 +337,7 @@ describe("qualification repository controls", () => {
           reason: "repository_active_or_changed",
         });
         clock.mockReturnValue(now + 8 * 60_000);
-        const unknown = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
+        const unknown = `${prefix}/objects/pack/pack-unknown-${crypto.randomUUID()}.pack`;
         await env.REPO_BUCKET.put(unknown, new Uint8Array(3));
         const bodyWithUnknown = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 8 });
         const refused = await qualificationRequest("/storage-recovery", {
@@ -493,7 +494,96 @@ describe("qualification repository controls", () => {
         expect(await env.REPO_BUCKET.head(authority)).toBeNull();
         const inventoryAfter = await stub.getQualificationInventory();
         expect(inventoryAfter).toEqual(inventory);
-        const activePack = `${prefix}/objects/pack/pack-native-active-${"b".repeat(64)}-claim-${crypto.randomUUID()}.pack`;
+        const abandonedCompaction = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
+        await env.REPO_BUCKET.put(abandonedCompaction, new Uint8Array(19));
+        const abandonedCompactionBody = JSON.stringify({
+          ...JSON.parse(body),
+          expectedObjectCount: 3,
+        });
+        const deleteCompaction = env.REPO_BUCKET.delete.bind(env.REPO_BUCKET);
+        const lostCompactionDelete = vi
+          .spyOn(env.REPO_BUCKET, "delete")
+          .mockImplementationOnce(async () => {
+            throw new Error("simulated lost compaction-delete acknowledgement");
+          });
+        try {
+          const interruptedCompaction = await qualificationRequest("/storage-recovery", {
+            ...init,
+            body: abandonedCompactionBody,
+            headers: {
+              ...init.headers,
+              "Content-Length": String(abandonedCompactionBody.length),
+            },
+          });
+          expect(await interruptedCompaction.json()).toMatchObject({
+            status: "inconclusive",
+            reason: "deletion_not_proven",
+          });
+        } finally {
+          lostCompactionDelete.mockRestore();
+        }
+        expect(await env.REPO_BUCKET.head(abandonedCompaction)).not.toBeNull();
+        const resumeCompactionBody = JSON.stringify({
+          ...JSON.parse(body),
+          expectedObjectCount: 4,
+        });
+        const reclaimedCompaction = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: resumeCompactionBody,
+          headers: {
+            ...init.headers,
+            "Content-Length": String(resumeCompactionBody.length),
+          },
+        });
+        expect(await reclaimedCompaction.json()).toMatchObject({
+          status: "recovered",
+          deletedObjectCount: 1,
+          remainingObjectCount: 2,
+        });
+        expect(await env.REPO_BUCKET.head(abandonedCompaction)).toBeNull();
+
+        const incompleteCompaction = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
+        const incompleteCompactionIndex = packIndexKey(incompleteCompaction);
+        await env.REPO_BUCKET.put(incompleteCompaction, new Uint8Array(23));
+        await env.REPO_BUCKET.put(incompleteCompactionIndex, new Uint8Array(1));
+        // The index sorts before its pack and must be rejected by the generic
+        // unknown-artifact boundary before pack-only recovery is considered.
+        const incompleteCompactionBody = JSON.stringify({
+          ...JSON.parse(body),
+          expectedObjectCount: 4,
+        });
+        const refusedCompaction = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: incompleteCompactionBody,
+          headers: {
+            ...init.headers,
+            "Content-Length": String(incompleteCompactionBody.length),
+          },
+        });
+        expect(await refusedCompaction.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_orphan",
+        });
+        expect(await env.REPO_BUCKET.head(incompleteCompaction)).not.toBeNull();
+        expect(await env.REPO_BUCKET.head(incompleteCompactionIndex)).not.toBeNull();
+        await env.REPO_BUCKET.delete(incompleteCompactionIndex);
+        const incompleteCompactionRefs = packRefsKey(incompleteCompaction);
+        await env.REPO_BUCKET.put(incompleteCompactionRefs, new Uint8Array(1));
+        const refusedReferences = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: incompleteCompactionBody,
+          headers: {
+            ...init.headers,
+            "Content-Length": String(incompleteCompactionBody.length),
+          },
+        });
+        expect(await refusedReferences.json()).toMatchObject({
+          status: "conflict",
+          reason: "unrecognized_orphan",
+        });
+        await deleteCompaction([incompleteCompaction, incompleteCompactionRefs]);
+        expect(await stub.getQualificationInventory()).toEqual(inventoryAfter);
+        const activePack = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
         const activeIdx = packIndexKey(activePack);
         const activeRefs = packRefsKey(activePack);
         await env.REPO_BUCKET.put(activePack, new Uint8Array(17));
@@ -614,6 +704,26 @@ describe("qualification repository controls", () => {
         }
         for (const key of runAuthorities) expect(await env.REPO_BUCKET.head(key)).toBeNull();
         expect(await stub.getQualificationInventory()).toEqual(protectedInventory);
+
+        await env.REPO_BUCKET.put(publishedOnlyPack, new Uint8Array(19));
+        const publishedInventory = await stub.getQualificationInventory();
+        const publishedBody = JSON.stringify({
+          schemaVersion: 1,
+          expectedRefStateDigest: publishedInventory.refStateDigest,
+          expectedObjectCount: 6,
+        });
+        const publishedResult = await qualificationRequest("/storage-recovery", {
+          ...init,
+          body: publishedBody,
+          headers: { ...init.headers, "Content-Length": String(publishedBody.length) },
+        });
+        expect(await publishedResult.json()).toMatchObject({
+          status: "recovered",
+          deletedObjectCount: 0,
+          remainingObjectCount: 6,
+        });
+        expect(await env.REPO_BUCKET.head(publishedOnlyPack)).not.toBeNull();
+        await env.REPO_BUCKET.delete(publishedOnlyPack);
 
         const batchedAuthorities: Array<[string, string]> = [];
         for (let index = 0; index < 68; index++) {
