@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <title>Repository compatibility fixes implementation notes</title>
+  <body>
+    <h1>Repository compatibility fixes</h1>
+    <p>
+      <strong>Original intent:</strong> Fix the two product defects exposed by the live ForgeMark
+      compatibility run—stock receive cold-start failure and qualification reset/GC retaining
+      orphaned packs—then rerun the unchanged eight-case catalogue. The first rerun also exposed a
+      stock receive stranded after authoritative ref publication; that recovery defect is included
+      because it blocks the same catalogue rather than expanding its scope.
+    </p>
+    <h2>Scope and risk</h2>
+    <ul>
+      <li>
+        Workflow: Full; T2 operational boundary because Worker, Durable Object, container startup,
+        queue GC, and isolated Cloudflare runtime behavior are exercised.
+      </li>
+      <li>
+        Implementation base and release target:
+        <code>187fcbe806b79918aaba3529fb86ece7217924b9</code>.
+      </li>
+      <li>
+        Candidate: the existing reviewed commit range through
+        <code>fb9fc87a168a88cbd1e7d7544fb378002f2e83e1</code>, plus the bounded stock finalization
+        recovery fix recorded by this run; no uncommitted changes from the separate
+        container-idle-retention worktree are included.
+      </li>
+      <li>
+        Reversibility: code is a linear commit range; live verification uses a new isolated Worker,
+        queue, container apps, repository, scoped PAT, and exact R2 prefix, all removed after the
+        run.
+      </li>
+      <li>
+        Protected assets: shared qualification D1/KV/R2 bindings. Isolation uses unique
+        namespace/repository names and exact-prefix cleanup; existing Workers and repositories are
+        excluded.
+      </li>
+    </ul>
+    <h2>Surface dispositions</h2>
+    <ul>
+      <li>
+        Public documentation: none; no customer-visible command, configuration, or recovery workflow
+        changes.
+      </li>
+      <li>Public skill: none; no CLI or MCP interface changes.</li>
+      <li>Threat model: none; existing authority and isolation boundaries remain unchanged.</li>
+      <li>
+        Verification journeys: none; this repository has no maintained
+        <code>engineering/verification-journeys.md</code>, and the behavior is covered by focused
+        worker tests plus the external compatibility catalogue.
+      </li>
+      <li>
+        Changelog: none; qualification/container recovery correctness is not a separately announced
+        customer feature.
+      </li>
+    </ul>
+    <h2>Before-fix evidence</h2>
+    <ul>
+      <li>
+        The isolated live run against main revision <code>187fcbe…</code> failed during case-one
+        setup when the stock receive container remained unavailable.
+      </li>
+      <li>
+        Cleanup then could not restore baseline: reset reactivated four orphaned packs and recreated
+        12 repository objects despite zero refs.
+      </li>
+      <li>
+        The first candidate rerun published its cleanup ref CAS, then remained in
+        <code>finalizing</code>: the queue runner rejected every stock operation before reaching the
+        Worker-owned immutable publication and proof-confirmation path. Recovery now projects only
+        the exact pending plan from RepoDO; its alarm queues Worker publication, confirmation, and
+        cleanup while RepoDO remains state-only.
+      </li>
+      <li>
+        Atomic-case setup used one two-ref successful push although stock authority intentionally
+        accepts one transition. ForgeMark setup now uses two identified single-ref pushes; the
+        measured atomic rejection push is unchanged.
+      </li>
+      <li>
+        Main's focused worker tests passed (2 files, 10 tests), showing the missing regression
+        coverage rather than an inherited red baseline.
+      </li>
+    </ul>
+    <h2>Check plan</h2>
+    <ol>
+      <li>
+        Inspect and verify the exact existing commits for bounded start retries and
+        compaction-orphan recovery.
+      </li>
+      <li>
+        Run focused stock-receive, qualification, durable-GC, and coordination worker tests;
+        typecheck and format-check the candidate.
+      </li>
+      <li>Obtain independent diff review against this intent and the repository invariants.</li>
+      <li>
+        Deploy the immutable candidate to a new isolated qualification target and run all eight
+        unchanged ForgeMark cases.
+      </li>
+      <li>Revoke credentials and delete all isolated resources and exact synthetic storage.</li>
+    </ol>
+    <h2>Verification evidence</h2>
+    <ul>
+      <li>Focused baseline on main before fast-forward: 2 files, 10 tests passed.</li>
+      <li>
+        Candidate focused Worker verification: 6 files, 70 tests passed before the live run; the
+        added finalization regression proves the alarm-to-queue-to-Worker-publication path, and the
+        GC ownership correction remains covered.
+      </li>
+      <li>TypeScript typecheck passed, including generated Cloudflare binding types.</li>
+      <li>
+        Attributable files pass Prettier and <code>git diff --check</code>. Repository-wide
+        format-check remains red only for inherited <code>test/ofs-delta-encode.test.ts</code>.
+      </li>
+      <li>Go container tests passed in the pinned BuildKit test target.</li>
+      <li>
+        ForgeMark's race-enabled Go suite and lint both pass after splitting only atomic setup into
+        two pushes.
+      </li>
+      <li>
+        The Display runner's focused compatibility contracts pass (24 tests), including ambiguous
+        recovery and frozen evidence for the two setup operation IDs.
+      </li>
+      <li>
+        A stale GC test fixture was corrected to advance from its recorded snapshot version and
+        retain the lease needed to distinguish <code>refs-changed</code>; isolated reproduction then
+        passed.
+      </li>
+    </ul>
+  </body>
+</html>

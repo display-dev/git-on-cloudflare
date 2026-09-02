@@ -264,6 +264,20 @@ export type CompleteStockReceiveCleanupResult =
   | { status: "complete"; operation: NativeReceiveOperationView }
   | { status: "rejected"; code: string };
 
+export type RecoverStockReceivePublicationResult =
+  | {
+      status: "publication_pending";
+      publicationToken: string;
+      publication: NativeReceiveAuthorityPublicationPlan;
+      cleanup: NativeReceiveCleanupDescriptor;
+    }
+  | {
+      status: "cleanup_pending";
+      cleanup: NativeReceiveCleanupDescriptor;
+      includeOutputs: boolean;
+    }
+  | { status: "none" };
+
 export type NativeReceiveOperationMetrics = Pick<
   NativeReceiveProcessResult,
   | "elapsedMs"

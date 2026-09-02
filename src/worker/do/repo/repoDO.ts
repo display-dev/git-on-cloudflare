@@ -157,9 +157,11 @@ import {
   admitStockReceiveState,
   completeStockReceiveCleanupState,
   confirmStockReceivePublicationState,
+  recoverStockReceivePublicationState,
   finalizeStockReceiveState,
   rejectStockReceiveExecutionState,
   resumeStockReceiveAuthorityFromAlarm,
+  stockReceiveWorkerRecoveryOperationId,
 } from "./stockReceiveAuthority";
 
 /**
@@ -217,6 +219,24 @@ export class RepoDurableObject extends DurableObject {
     if (await this.ctx.storage.get<boolean>("repositoryDeleting")) {
       await this.ctx.storage.deleteAlarm();
       this.logger.info("alarm:repository-deleted-tombstone-preserved", {});
+      return;
+    }
+
+    const stockWorkerRecovery = await stockReceiveWorkerRecoveryOperationId(this.ctx);
+    if (stockWorkerRecovery) {
+      try {
+        await this.env.REPO_TASKS_QUEUE.send({
+          kind: "native-receive",
+          doId: this.ctx.id.toString(),
+          operationId: stockWorkerRecovery,
+        });
+      } catch (error) {
+        this.logger.warn("stock-receive:recovery-queue-dispatch-failed", {
+          operationId: stockWorkerRecovery,
+          error: String(error),
+        });
+        await this.ctx.storage.setAlarm(Date.now() + 5_000);
+      }
       return;
     }
 
@@ -407,6 +427,10 @@ export class RepoDurableObject extends DurableObject {
       proof,
       logger: this.logger,
     });
+  }
+
+  public async recoverStockReceivePublication(operationId: string) {
+    return await recoverStockReceivePublicationState(this.ctx, operationId);
   }
 
   public async rejectStockReceiveExecution(

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { createExecutionContext } from "cloudflare:test";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createExecutionContext, runDurableObjectAlarm } from "cloudflare:test";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { asBufferSource, bytesToHex, createLogger, getRepoStub } from "@/worker/common";
@@ -39,6 +39,7 @@ import { buildPack } from "./util/git-pack";
 import { buildTreePayload, readRepoCatalogState, seedPackedRepoState } from "./util/packed-repo";
 import { setupRepoForTests } from "./util/repoSeed";
 import { runDOWithRetry, toRequestBody, uniqueRepoId } from "./util/test-helpers";
+import { createQueueSendResponse, runQueueMessage } from "./util/queue";
 
 const stockTrace = [
   "receive_pack_invoked",
@@ -1125,6 +1126,35 @@ describe("stock Smart HTTP receive spike", () => {
     expect((await stub.beginReceive()).ok).toBe(false);
     expect(await stub.beginStockReceiveRecovery("different-operation")).toEqual({
       status: "not_found",
+    });
+
+    const sendSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    await runDurableObjectAlarm(stub);
+    const recoveryMessage = sendSpy.mock.calls
+      .map(([message]) => message)
+      .find(
+        (message): message is { kind: string; doId: string; operationId: string } =>
+          typeof message === "object" &&
+          message !== null &&
+          "kind" in message &&
+          message.kind === "native-receive" &&
+          "operationId" in message &&
+          message.operationId === "stock-tiny-operation" &&
+          "doId" in message &&
+          typeof message.doId === "string"
+      );
+    sendSpy.mockRestore();
+    expect(recoveryMessage).toEqual({
+      kind: "native-receive",
+      doId: stub.id.toString(),
+      operationId: "stock-tiny-operation",
+    });
+    expect(await runQueueMessage(recoveryMessage)).toEqual({ acked: true, retried: false });
+    expect(await stub.getNativeReceiveOperation("stock-tiny-operation")).toMatchObject({
+      state: "committed",
+      result: { authorityPublication: expect.any(Object) },
     });
 
     const publicationRecovery = await handleStreamingReceivePackPOST(

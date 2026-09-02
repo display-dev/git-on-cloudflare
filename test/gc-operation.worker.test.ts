@@ -105,8 +105,8 @@ describe("durable garbage collection ownership", () => {
   it("does not publish a changed source and keeps discard behind the writer drain", async () => {
     const stub = await emptyPublication("source-race");
     await runInDurableObject(stub, async (_, state) => {
-      await state.storage.put("refsVersion", 1);
-      await state.storage.delete("compactLease");
+      const operation = await state.storage.get<GcOperation>(GC_OPERATION_KEY);
+      await state.storage.put("refsVersion", operation!.snapshot!.refsVersion + 1);
     });
     const claimed = await stub.claimGcOperation("source-race");
     if (claimed.status !== "ready" || !claimed.operation.claim) throw new Error("claim failed");

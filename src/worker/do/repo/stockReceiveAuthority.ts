@@ -12,6 +12,7 @@ import type {
   NativeReceiveOperation,
   NativeReceiveOperationMetrics,
   NativeReceivePrepared,
+  RecoverStockReceivePublicationResult,
   RejectStockReceiveExecutionResult,
 } from "@/worker/git/nativeReceive/types";
 
@@ -865,6 +866,7 @@ export async function resumeStockReceiveAuthorityFromAlarm(args: {
       expectedState: "processing",
       expectedClaimId: processing.claimId,
     });
+    await args.ctx.storage.setAlarm(Date.now() + 1);
     return true;
   }
   const ready = operations.find(
@@ -889,6 +891,21 @@ export async function resumeStockReceiveAuthorityFromAlarm(args: {
     }
   }
   return true;
+}
+
+export async function stockReceiveWorkerRecoveryOperationId(
+  ctx: DurableObjectState
+): Promise<string | undefined> {
+  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const operations = await indexedOperations(store);
+  return [...operations]
+    .reverse()
+    .find(
+      (operation) =>
+        operation.stockReceive !== undefined &&
+        ((operation.state === "finalizing" && operation.publicationPlan !== undefined) ||
+          (isNativeReceiveTerminal(operation.state) && operation.cleanupPending))
+    )?.id;
 }
 
 /** State-only confirmation of Worker-observed immutable publication. */
@@ -945,6 +962,32 @@ export async function confirmStockReceivePublicationState(args: {
       cleanup: cleanupDescriptor(committed),
     };
   });
+}
+
+/** Exposes only the Worker-owned recovery work for one exact operation. */
+export async function recoverStockReceivePublicationState(
+  ctx: DurableObjectState,
+  operationId: string
+): Promise<RecoverStockReceivePublicationResult> {
+  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const operation = await store.get(nativeReceiveOperationKey(operationId));
+  if (!operation?.stockReceive) return { status: "none" };
+  if (operation.state === "finalizing" && operation.publicationPlan) {
+    return {
+      status: "publication_pending",
+      publicationToken: operation.publicationPlan.token,
+      publication: operation.publicationPlan,
+      cleanup: cleanupDescriptor(operation),
+    };
+  }
+  if (isNativeReceiveTerminal(operation.state) && operation.cleanupPending) {
+    return {
+      status: "cleanup_pending",
+      cleanup: cleanupDescriptor(operation),
+      includeOutputs: operation.state !== "committed",
+    };
+  }
+  return { status: "none" };
 }
 
 function validPlannerRejectionMetrics(
