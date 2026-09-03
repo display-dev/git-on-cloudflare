@@ -88,6 +88,11 @@ The codebase is organized into focused modules with `index.ts` export files:
   receive bytes are forwarded is restarted within the existing bounded
   readiness window. Readiness and forwarding failures remain distinct bounded
   evidence codes; RepoDO still records the one authoritative terminal outcome.
+  The same repository-bound host configures Cloudflare's low-level inactivity
+  timeout to retain a running process for 120 seconds by default, bounded to
+  5–900 seconds through `STOCK_RECEIVE_CONTAINER_IDLE_SECONDS`. The timeout
+  applies only after inactivity; it does not stop an in-flight receive. Container
+  disk remains disposable and no state on it becomes authoritative.
 - Pack metadata lives in `pack_catalog` (SQLite). Exact pack membership lives in `.idx` files in R2.
 
 ### Ownership And Auth

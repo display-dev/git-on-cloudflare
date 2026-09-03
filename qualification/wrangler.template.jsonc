@@ -63,6 +63,7 @@
   "assets": { "binding": "ASSETS", "directory": "../dist/client", "html_handling": "none" },
   "vars": {
     "REPO_DO_IDLE_MINUTES": "30",
+    "STOCK_RECEIVE_CONTAINER_IDLE_SECONDS": "120",
     "LOG_LEVEL": "info",
     "NATIVE_RECEIVE_CONTAINER": "1",
     "QUALIFICATION_MODE": "1",

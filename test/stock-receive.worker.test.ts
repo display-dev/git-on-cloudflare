@@ -241,6 +241,43 @@ describe("stock Smart HTTP receive spike", () => {
     expect(probes).toBe(2);
   });
 
+  it("installs a finite bounded idle-retention policy", async () => {
+    const configured: Array<number | bigint> = [];
+    const container = {
+      async setInactivityTimeout(durationMs: number | bigint) {
+        configured.push(durationMs);
+      },
+    };
+
+    await stockContainerHostTest.configureIdleRetention(container, undefined);
+    await stockContainerHostTest.configureIdleRetention(container, "30");
+    await stockContainerHostTest.configureIdleRetention(container, "0");
+    await stockContainerHostTest.configureIdleRetention(container, "3600");
+
+    expect(configured).toEqual([120_000, 30_000, 5_000, 900_000]);
+    expect(stockContainerHostTest.idleRetentionMs("invalid")).toBe(120_000);
+  });
+
+  it("does not reactivate an already-running Container", async () => {
+    let starts = 0;
+    const container = {
+      running: true,
+      start() {
+        starts++;
+      },
+      getTcpPort() {
+        return {
+          async fetch() {
+            return new Response("ready\n", { status: 200 });
+          },
+        } as unknown as Fetcher;
+      },
+    };
+
+    expect(await stockContainerHostTest.waitForReady(container)).toBe(true);
+    expect(starts).toBe(0);
+  });
+
   it("reissues a lost Container start at a bounded cadence", async () => {
     let running = false;
     let starts = 0;

@@ -40,6 +40,12 @@ generated Wrangler configuration must bind one qualification-only Worker, D1
 database, KV namespace, R2 bucket, Queue producer/consumer, `RepoDurableObject`,
 `StockReceiveContainerHost`, `MaintenanceContainerHost`, and their three Container applications using the
 same image built from `container/Dockerfile`.
+The stock-receive application sets
+`STOCK_RECEIVE_CONTAINER_IDLE_SECONDS` to a finite 120-second qualification
+default. The host bounds configured values to 5–900 seconds and delegates idle
+shutdown to Cloudflare's inactivity-aware lifecycle, so active receives remain
+outside the stop condition and the same repository-bound process can serve a
+nearby follow-on operation.
 
 [`qualification/wrangler.template.jsonc`](../qualification/wrangler.template.jsonc)
 freezes that composition. The external orchestrator must replace every

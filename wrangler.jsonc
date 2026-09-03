@@ -136,6 +136,8 @@
   "vars": {
     // Repo DO idle cleanup threshold (minutes)
     "REPO_DO_IDLE_MINUTES": "30",
+    // Keep the repository-bound stock-receive process available for nearby Git activity.
+    "STOCK_RECEIVE_CONTAINER_IDLE_SECONDS": "120",
     // Logging level: debug|info|warn|error
     "LOG_LEVEL": "info",
     // Native receive remains an explicit rollout gate. The Container image and

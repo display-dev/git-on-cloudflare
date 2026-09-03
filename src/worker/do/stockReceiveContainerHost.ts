@@ -6,6 +6,9 @@ const CONTAINER_PORT = 8080;
 const READY_ATTEMPTS = 120;
 const READY_INTERVAL_MS = 250;
 const START_RETRY_ATTEMPTS = 20;
+const DEFAULT_IDLE_RETENTION_SECONDS = 120;
+const MIN_IDLE_RETENTION_SECONDS = 5;
+const MAX_IDLE_RETENTION_SECONDS = 15 * 60;
 const REQUEST_MAX_BYTES = 48 * 1024 * 1024 + 64 * 1024 + 12;
 const RESPONSE_MAX_BYTES = 96 * 1024 * 1024 + 1024 * 1024 + 12;
 
@@ -13,6 +16,7 @@ type TestContainerExecutor = (request: Request) => Promise<Response>;
 let testContainerExecutor: TestContainerExecutor | undefined;
 
 type StockContainer = Pick<Container, "running" | "start" | "getTcpPort">;
+type StockContainerLifecycle = Pick<Container, "setInactivityTimeout">;
 
 type ContainerReadiness = {
   ready: boolean;
@@ -33,7 +37,34 @@ export const __test = {
   async readiness(container: StockContainer): Promise<ContainerReadiness> {
     return await containerReadiness(container, async () => {});
   },
+  idleRetentionMs(value: string | undefined): number {
+    return idleRetentionMs(value);
+  },
+  async configureIdleRetention(
+    container: StockContainerLifecycle,
+    value: string | undefined
+  ): Promise<void> {
+    await configureIdleRetention(container, value);
+  },
 };
+
+function idleRetentionMs(value: string | undefined): number {
+  if (!value || !/^\d+$/.test(value)) return DEFAULT_IDLE_RETENTION_SECONDS * 1000;
+  const configuredSeconds = Number(value);
+  if (!Number.isSafeInteger(configuredSeconds)) return DEFAULT_IDLE_RETENTION_SECONDS * 1000;
+  const boundedSeconds = Math.min(
+    MAX_IDLE_RETENTION_SECONDS,
+    Math.max(MIN_IDLE_RETENTION_SECONDS, configuredSeconds)
+  );
+  return boundedSeconds * 1000;
+}
+
+async function configureIdleRetention(
+  container: StockContainerLifecycle,
+  value: string | undefined
+): Promise<void> {
+  await container.setInactivityTimeout(idleRetentionMs(value));
+}
 
 function boundedContentLength(headers: Headers, maximum: number): number | null {
   const value = headers.get("Content-Length");
@@ -113,10 +144,32 @@ async function boundedContainerResponse(response: Response): Promise<Response> {
 
 /**
  * Zero-authority Container lifecycle host. The Worker supplies and receives
- * fixed-length framed streams. This module intentionally has no Env field,
- * R2 binding, RepoDO stub, WorkerEntrypoint, or outbound interception.
+ * fixed-length framed streams. A finite inactivity timeout retains the running
+ * process between nearby requests; Cloudflare still owns idle shutdown, and
+ * the host keeps no R2 binding, RepoDO stub, WorkerEntrypoint, or outbound
+ * interception.
  */
 export class StockReceiveContainerHost extends DurableObject {
+  public constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    const container = ctx.container;
+    if (!container) return;
+
+    // The platform timeout is inactivity-aware, so an in-flight receive is not
+    // stopped. Failure leaves the prior immediate-inactivity behavior intact
+    // and must not make the correctness path unavailable.
+    ctx.blockConcurrencyWhile(async () => {
+      try {
+        await configureIdleRetention(container, env.STOCK_RECEIVE_CONTAINER_IDLE_SECONDS);
+      } catch {
+        createLogger("info", { service: "StockReceiveContainerHost" }).warn(
+          "stock-container-host:idle-retention-configuration-failed",
+          {}
+        );
+      }
+    });
+  }
+
   public async processStockReceive(request: Request): Promise<Response> {
     const logger = createLogger("info", { service: "StockReceiveContainerHost" });
     const requestBytes = boundedContentLength(request.headers, REQUEST_MAX_BYTES);
