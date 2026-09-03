@@ -39,8 +39,12 @@ async function putImmutablePublicationObject(args: {
     throw new Error("immutable authority publication conflicts with existing R2 state");
   }
   const actual = new Uint8Array(await existing.arrayBuffer());
-  if ((await sha256Bytes(actual)) !== args.plan.sha256) {
-    throw new Error("immutable authority publication digest mismatch");
+  const actualSha256 = await sha256Bytes(actual);
+  if (actualSha256 !== args.plan.sha256) {
+    const kind = args.plan.key.endsWith("/receipt.json") ? "receipt" : "ref";
+    throw new Error(
+      `immutable authority ${kind} digest mismatch: expected ${args.plan.sha256}, got ${actualSha256}`
+    );
   }
   return existing.etag;
 }
