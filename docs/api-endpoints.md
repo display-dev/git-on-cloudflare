@@ -55,10 +55,13 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
   Push objects. For a native receive with a positive exact `Content-Length` no
   greater than 16 MiB, the Worker derives the incoming pack's semantic external
   object closure from authenticated active `.idx` and reference sidecars. It
-  downloads only the exact required pack-entry ranges, with at most four
-  independent reads in flight and encoding bases resolved before dependants.
-  Shared physical entries are read once and every range is bound back to the
-  active pack checksum and sidecar digests. Requests outside that planner input
+  materializes only the exact required pack entries. For a selected active pack
+  no larger than 8 MiB, it may preload the complete immutable pack once within
+  a 16 MiB aggregate request budget; larger selected packs use exact entry-range
+  reads with at most four independent reads in flight. Encoding bases resolve
+  before dependants, shared physical entries are materialized once, and every
+  entry remains bound to its exact offsets, canonical object ID, active-pack
+  checksum, and sidecar digests. Requests outside that planner input
   bound retain the generic streaming/native path; the bound is an internal
   routing threshold, not a repository or push quota.
 

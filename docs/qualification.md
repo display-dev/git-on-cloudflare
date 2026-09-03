@@ -308,9 +308,11 @@ retention is safe but is not proof of full reclamation. Bounded ordinary native
 receives now use the selective stock path's existing advertised-closure and
 materialized thin-base validation. The qualification header remains only an
 explicit fail-closed control for exact request-length and durable replay probes;
-ordinary eligible stock Git does not need that header. The planner schedules at
-most four independent exact range reads, shares physical bases across semantic
-roots, and still emits deterministic base-before-dependent evidence.
+ordinary eligible stock Git does not need that header. For a selected active pack
+up to 8 MiB, the planner shares one bounded whole-pack preload within a 16 MiB
+aggregate request budget; larger packs schedule at most four independent exact
+range reads. Both transports retain exact entry/object validation, share physical
+bases across semantic roots, and emit deterministic base-before-dependent evidence.
 
 Publication atomically replaces only the exact snapshotted source rows, merging
 all later receive packs and any conservatively retained sources. Current refs and

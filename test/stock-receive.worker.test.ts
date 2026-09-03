@@ -1493,6 +1493,19 @@ describe("stock Smart HTTP receive spike", () => {
   });
 
   it("derives exact semantic prerequisite ranges from bound active IDX/PREF metadata", async () => {
+    expect(stockPlannerTest.wholeActivePackFits(8 * 1024 * 1024, 8 * 1024 * 1024)).toBe(true);
+    expect(stockPlannerTest.wholeActivePackFits(8 * 1024 * 1024 + 1, 0)).toBe(false);
+    expect(stockPlannerTest.wholeActivePackFits(8 * 1024 * 1024, 8 * 1024 * 1024 + 1)).toBe(false);
+    const eligiblePacks = [
+      { packKey: "pack-c", packBytes: 8 * 1024 * 1024, packChecksum: "c".repeat(40) },
+      { packKey: "pack-a", packBytes: 8 * 1024 * 1024, packChecksum: "a".repeat(40) },
+      { packKey: "pack-b", packBytes: 8 * 1024 * 1024, packChecksum: "b".repeat(40) },
+    ];
+    expect(stockPlannerTest.selectWholeActivePackKeys(eligiblePacks)).toEqual(["pack-a", "pack-b"]);
+    expect(stockPlannerTest.selectWholeActivePackKeys([...eligiblePacks].reverse())).toEqual([
+      "pack-a",
+      "pack-b",
+    ]);
     const owner = "o";
     const repo = uniqueRepoId("stock-plan");
     const seeded = await setupRepoForTests(env, owner, repo);
@@ -1597,9 +1610,25 @@ describe("stock Smart HTTP receive spike", () => {
     stockPlannerTest.reset();
     cacheCtx.memo = {};
 
+    stockPlannerTest.failTransientWholePackRead(planArgs.operationId);
+    const retriedWholePlan = await planStockReceive(planArgs);
+    expect(stockPlannerTest.transientWholePackReadAttempts(planArgs.operationId)).toBe(2);
+    expect(retriedWholePlan.activePackWholeRequests).toBe(1);
+    expect(retriedWholePlan.activePackRangeRequests).toBe(0);
+    stockPlannerTest.reset();
+    cacheCtx.memo = {};
+
+    stockPlannerTest.returnShortWholePackRead(planArgs.operationId);
+    const retriedShortWholePlan = await planStockReceive(planArgs);
+    expect(stockPlannerTest.shortWholePackReadAttempts(planArgs.operationId)).toBe(2);
+    expect(retriedShortWholePlan.activePackWholeRequests).toBe(1);
+    expect(retriedShortWholePlan.activePackRangeRequests).toBe(0);
+    stockPlannerTest.reset();
+    cacheCtx.memo = {};
+
     stockPlannerTest.readWholeActivePack(planArgs.operationId);
     await expect(planStockReceive(planArgs)).rejects.toThrow(
-      "stock-plan:active-pack-read-unattributed"
+      "stock-plan:active-pack-whole-observation-mismatch"
     );
     cacheCtx.memo = {};
 
@@ -1609,27 +1638,38 @@ describe("stock Smart HTTP receive spike", () => {
     expect(plan.thinDeltaBaseOids).toEqual([]);
     expect(plan.requiredRootOids).toEqual(plan.semanticExternalOids);
     expect(plan.ranges).toHaveLength(2);
-    expect(plan.rangeBytes).toBe(
-      plan.ranges.reduce((total, range) => total + range.end - range.start, 0)
-    );
-    expect(plan.activePackRangeBytes).toBe(plan.rangeBytes);
-    expect(plan.activePackRangeRequests).toBe(plan.ranges.length);
+    expect(plan.rangeBytes).toBe(0);
+    expect(plan.rangeRequests).toBe(0);
+    expect(plan.activePackRangeBytes).toBe(0);
+    expect(plan.activePackRangeRequests).toBe(0);
     expect(plan.activePackTrailerBytes).toBe(20);
     expect(plan.activePackTrailerRequests).toBe(1);
-    expect(plan.activePackWholeBytes).toBe(0);
-    expect(plan.activePackWholeRequests).toBe(0);
+    expect(plan.activePackWholeBytes).toBe(catalog!.packBytes);
+    expect(plan.activePackWholeRequests).toBe(1);
     expect(plan.activePackUnattributedBytes).toBe(0);
     expect(plan.activePackUnattributedRequests).toBe(0);
-    expect(plan.activePackReads.filter((read) => read.kind === "required-object")).toEqual(
-      plan.ranges.map((range) => ({
-        packChecksum: range.packChecksum,
-        start: range.start,
-        end: range.end,
-        returnedBytes: range.end - range.start,
-        kind: "required-object",
-        requiredOid: range.requiredOid,
-      }))
-    );
+    expect(plan.activePackReads.filter((read) => read.kind === "required-object")).toEqual([]);
+    expect(plan.activePackReads.filter((read) => read.kind === "whole")).toEqual([
+      {
+        packChecksum: expect.stringMatching(/^[0-9a-f]{40}$/),
+        start: 0,
+        end: catalog!.packBytes,
+        returnedBytes: catalog!.packBytes,
+        kind: "whole",
+      },
+    ]);
+    const activePackObject = await env.REPO_BUCKET.get(catalog!.packKey);
+    expect(activePackObject).not.toBeNull();
+    const originalActivePack = new Uint8Array(await activePackObject!.arrayBuffer());
+    const corruptedActivePack = originalActivePack.slice();
+    const selectedRange = plan.ranges[0]!;
+    corruptedActivePack[selectedRange.end - 1] ^= 1;
+    await env.REPO_BUCKET.put(catalog!.packKey, corruptedActivePack);
+    try {
+      await expect(planStockReceive(planArgs)).rejects.toThrow("Decompression failed.");
+    } finally {
+      await env.REPO_BUCKET.put(catalog!.packKey, originalActivePack);
+    }
     expect(plan.incomingObjectCount).toBe(1);
     expect(plan.visitedIncomingObjectCount).toBe(1);
     expect(plan.logicalEdgeCount).toBe(2);
@@ -2059,8 +2099,8 @@ describe("stock Smart HTTP receive spike", () => {
         activePackTrailerRequests: expectedPlan!.activePackTrailerRequests,
         activePackRangeBytes: expectedPlan!.activePackRangeBytes,
         activePackRangeRequests: expectedPlan!.activePackRangeRequests,
-        activePackWholeBytes: 0,
-        activePackWholeRequests: 0,
+        activePackWholeBytes: expectedPlan!.activePackWholeBytes,
+        activePackWholeRequests: expectedPlan!.activePackWholeRequests,
         activePackUnattributedBytes: 0,
         activePackUnattributedRequests: 0,
         outputValidationBytes: pack.byteLength + 2,
@@ -2365,7 +2405,7 @@ describe("stock Smart HTTP receive spike", () => {
       flushPkt(),
     ]);
     let executionCount = 0;
-    let plannedRangeBytes = -1;
+    let plannedWholePackBytes = -1;
     stockDataPlaneTest.setWorkerExecutor(
       async ({ operation, cacheCtx, limiter, countSubrequest, logger }) => {
         executionCount++;
@@ -2387,7 +2427,7 @@ describe("stock Smart HTTP receive spike", () => {
           countSubrequest: (count) => countSubrequest("test-stock-ref-only-plan", count),
           log: logger,
         });
-        plannedRangeBytes = plan.rangeBytes;
+        plannedWholePackBytes = plan.activePackWholeBytes;
         expect(plan.incomingObjectCount).toBe(3);
         expect(plan.visitedIncomingObjectCount).toBe(0);
         expect(plan.semanticExternalOids).toEqual([base.oid]);
@@ -2407,6 +2447,7 @@ describe("stock Smart HTTP receive spike", () => {
           downloadedBytes:
             plan.inputBytesRead +
             plan.rangeBytes +
+            plan.activePackWholeBytes +
             plan.metadataBytes +
             operation.inputBytes +
             plan.prerequisitePackBytes +
@@ -2456,8 +2497,8 @@ describe("stock Smart HTTP receive spike", () => {
           activePackTrailerRequests: plan.activePackTrailerRequests,
           activePackRangeBytes: plan.activePackRangeBytes,
           activePackRangeRequests: plan.activePackRangeRequests,
-          activePackWholeBytes: 0,
-          activePackWholeRequests: 0,
+          activePackWholeBytes: plan.activePackWholeBytes,
+          activePackWholeRequests: plan.activePackWholeRequests,
           activePackUnattributedBytes: 0,
           activePackUnattributedRequests: 0,
           closureManifestKey: plan.closureManifestKey,
@@ -2483,6 +2524,27 @@ describe("stock Smart HTTP receive spike", () => {
           outputRequests: 0,
         } satisfies NativeReceiveProcessResult;
         expect(await validateStockReceivePreparedProof(operation, result)).toBe(true);
+        const wholeRead = plan.activePackReads.find((read) => read.kind === "whole");
+        expect(wholeRead).toBeDefined();
+        expect(
+          await validateStockReceivePreparedProof(operation, {
+            ...result,
+            activePackReads: plan.activePackReads.filter((read) => read !== wholeRead),
+            activePackWholeBytes: 0,
+            activePackWholeRequests: 0,
+          })
+        ).toBe(false);
+        expect(
+          await validateStockReceivePreparedProof(operation, {
+            ...result,
+            activePackReads: plan.activePackReads.map((read) =>
+              read === wholeRead
+                ? { ...read, end: read.end - 1, returnedBytes: read.returnedBytes - 1 }
+                : read
+            ),
+            activePackWholeBytes: plan.activePackWholeBytes - 1,
+          })
+        ).toBe(false);
         expect(
           await validateStockReceivePreparedProof(operation, {
             ...result,
@@ -2569,7 +2631,7 @@ describe("stock Smart HTTP receive spike", () => {
         outputRequests: 0,
       },
     });
-    expect(plannedRangeBytes).toBeGreaterThan(0);
+    expect(plannedWholePackBytes).toBeGreaterThan(0);
     const after = await readRepoCatalogState(() => stub);
     expect(after).toEqual(before);
     expect(

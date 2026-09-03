@@ -71,10 +71,13 @@ The codebase is organized into focused modules with `index.ts` export files:
   catalog before any old superseded rows are removed.
 - Push: bounded ordinary native receives use Worker-owned selective hydration.
   The Worker reads authenticated `.idx` and reference sidecars, materializes only
-  the exact semantic prerequisite ranges and required encoding bases, and sends
+  the exact semantic prerequisite entries and required encoding bases, and sends
   the incoming request plus that prerequisite pack to the foreground native
-  processor. Independent ranges use fixed concurrency four; shared bases are
-  single-flight and the retained plan remains deterministic and base-first.
+  processor. Selected active packs up to 8 MiB may be loaded once within a 16 MiB
+  aggregate request budget; larger packs use exact entry ranges with fixed
+  concurrency four. Shared packs and bases are single-flight, while every entry
+  remains object-ID and offset verified and the retained plan stays deterministic
+  and base-first.
   Larger or length-unknown requests retain the generic native/streaming path.
   Artifact-producing receives write immutable output to R2, then RepoDO commits
   refs and pack-catalog metadata atomically through typed RPCs. Native Git may

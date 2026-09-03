@@ -67,7 +67,11 @@ function readValid(read: NativeReceiveStockActivePackRead): boolean {
     read.start >= 0 &&
     read.end > read.start &&
     read.returnedBytes === read.end - read.start &&
-    (read.kind === "trailer" ? read.returnedBytes === 20 : OID.test(read.requiredOid))
+    (read.kind === "trailer"
+      ? read.returnedBytes === 20
+      : read.kind === "whole"
+        ? read.start === 0
+        : OID.test(read.requiredOid))
   );
 }
 
@@ -360,10 +364,17 @@ async function physicalPlanValid(args: {
     }
   }
   const requiredReads = args.reads.filter((read) => read.kind === "required-object");
+  const wholeChecksums = new Set(
+    args.reads.filter((read) => read.kind === "whole").map((read) => read.packChecksum)
+  );
   return (
-    requiredReads.length === nodes.length &&
     args.ranges.every((range, index) => range.entryId === topology[index]) &&
-    requiredReads.every((read, index) => rangeKey(read) === rangeKey(args.ranges[index]!))
+    args.ranges.every((range) =>
+      wholeChecksums.has(range.packChecksum)
+        ? true
+        : requiredReads.some((read) => rangeKey(read) === rangeKey(range))
+    ) &&
+    requiredReads.every((read) => args.ranges.some((range) => rangeKey(read) === rangeKey(range)))
   );
 }
 
@@ -458,23 +469,43 @@ export async function stockReceivePreparedProofFailure(
 
   const trailerReads = reads.filter((read) => read.kind === "trailer");
   const rangeReads = reads.filter((read) => read.kind === "required-object");
+  const wholeReads = reads.filter((read) => read.kind === "whole");
   const bindingChecksums = result.activePackBindings!.map((binding) => binding.packChecksum).sort();
+  const bindingByChecksum = new Map(
+    result.activePackBindings!.map((binding) => [binding.packChecksum, binding])
+  );
+  const wholeChecksums = wholeReads.map((read) => read.packChecksum);
+  const rangeBackedRanges = ranges.filter((range) => !wholeChecksums.includes(range.packChecksum));
   if (
     reads.some((read) => !readValid(read)) ||
     trailerReads.length !== operation.activeCatalog.length ||
     !equalStrings(trailerReads.map((read) => read.packChecksum).sort(), bindingChecksums) ||
-    rangeReads.length !== ranges.length ||
-    rangeReads.some((read, index) => rangeKey(read) !== rangeKey(ranges[index]!)) ||
-    ranges.reduce((total, range) => total + range.end - range.start, 0) !== result.rangeBytes ||
-    result.rangeRequests !== ranges.length ||
+    new Set(wholeChecksums).size !== wholeChecksums.length ||
+    wholeReads.some((read) => {
+      const binding = bindingByChecksum.get(read.packChecksum);
+      return (
+        !binding ||
+        !result.selectedPackChecksums!.includes(read.packChecksum) ||
+        read.start !== 0 ||
+        read.end !== binding.packBytes
+      );
+    }) ||
+    rangeReads.length !== rangeBackedRanges.length ||
+    rangeReads.some(
+      (read) => !rangeBackedRanges.some((range) => rangeKey(read) === rangeKey(range))
+    ) ||
+    rangeBackedRanges.reduce((total, range) => total + range.end - range.start, 0) !==
+      result.rangeBytes ||
+    result.rangeRequests !== rangeBackedRanges.length ||
     result.packsTouched !== result.selectedPackChecksums!.length ||
     result.activePackTrailerRequests !== trailerReads.length ||
     result.activePackTrailerBytes !== trailerReads.length * 20 ||
     result.activePackRangeRequests !== rangeReads.length ||
     result.activePackRangeRequests !== result.rangeRequests ||
     result.activePackRangeBytes !== result.rangeBytes ||
-    result.activePackWholeBytes !== 0 ||
-    result.activePackWholeRequests !== 0 ||
+    result.activePackWholeBytes !==
+      wholeReads.reduce((total, read) => total + read.returnedBytes, 0) ||
+    result.activePackWholeRequests !== wholeReads.length ||
     result.activePackUnattributedBytes !== 0 ||
     result.activePackUnattributedRequests !== 0
   ) {

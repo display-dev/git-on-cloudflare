@@ -98,6 +98,13 @@ export type NativeReceiveStockActivePackRead =
       returnedBytes: number;
       kind: "required-object";
       requiredOid: string;
+    }
+  | {
+      packChecksum: string;
+      start: number;
+      end: number;
+      returnedBytes: number;
+      kind: "whole";
     };
 
 export type NativeReceiveStockClosureProof = {

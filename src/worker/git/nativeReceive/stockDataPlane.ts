@@ -372,7 +372,11 @@ function plannerFailureOperationMetrics(
     elapsedMs: metrics.elapsedMs,
     scratchBytes: 0,
     hydratedBytes: 0,
-    downloadedBytes: metrics.metadataBytes + metrics.inputBytesRead + metrics.rangeBytes,
+    downloadedBytes:
+      metrics.metadataBytes +
+      metrics.inputBytesRead +
+      metrics.rangeBytes +
+      metrics.activePackWholeBytes,
     cacheHitBytes: 0,
     metadataBytes: metrics.metadataBytes,
     metadataRequests: metrics.metadataRequests,
@@ -763,6 +767,7 @@ function mergeResult(args: {
     downloadedBytes:
       args.plan.inputBytesRead +
       args.plan.rangeBytes +
+      args.plan.activePackWholeBytes +
       args.plan.metadataBytes +
       args.operation.inputBytes +
       args.plan.prerequisitePackBytes +

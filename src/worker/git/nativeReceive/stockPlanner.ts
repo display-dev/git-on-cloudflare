@@ -20,7 +20,7 @@ import { createStockPhysicalDependencyPlanner } from "@/worker/git/nativeReceive
 import { resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/resolve";
 import { scanPack } from "@/worker/git/pack/indexer/scan";
 import { findOidIndex, getOidHexAt, parseIdxView } from "@/worker/git/object-store";
-import { readPackRange } from "@/worker/git/pack/packMeta";
+import { readExactPackRangeWithRetry, readPackRange } from "@/worker/git/pack/packMeta";
 import {
   getPackRefObjectType,
   getPackRefRefsAt,
@@ -37,7 +37,34 @@ const MAX_PREREQUISITE_PAYLOAD_BYTES = 16 * 1024 * 1024;
 const MAX_CLOSURE_OBJECTS = 100_000;
 const MAX_CLOSURE_EDGES = 500_000;
 const MAX_RANGE_RECORDS = 256;
+const WHOLE_ACTIVE_PACK_MAX_BYTES = 8 * 1024 * 1024;
+const WHOLE_ACTIVE_PACK_TOTAL_BUDGET = 16 * 1024 * 1024;
 const ZERO_OID = "0".repeat(40);
+
+function wholeActivePackFits(packBytes: number, reservedBytes: number): boolean {
+  return (
+    packBytes <= WHOLE_ACTIVE_PACK_MAX_BYTES &&
+    reservedBytes + packBytes <= WHOLE_ACTIVE_PACK_TOTAL_BUDGET
+  );
+}
+
+function selectWholeActivePackKeys(
+  active: Array<{ source: { packKey: string; packBytes: number }; packChecksum: string }>
+): Set<string> {
+  const selected = new Set<string>();
+  let reservedBytes = 0;
+  const ordered = [...active].sort(
+    (left, right) =>
+      left.packChecksum.localeCompare(right.packChecksum) ||
+      left.source.packKey.localeCompare(right.source.packKey)
+  );
+  for (const pack of ordered) {
+    if (!wholeActivePackFits(pack.source.packBytes, reservedBytes)) continue;
+    selected.add(pack.source.packKey);
+    reservedBytes += pack.source.packBytes;
+  }
+  return selected;
+}
 
 type WrongPrerequisiteRangeFault = {
   operationId: string;
@@ -81,6 +108,8 @@ type TransientR2ReadFault = {
 let wrongPrerequisiteRangeFaultForTesting: WrongPrerequisiteRangeFault | undefined;
 let transientR2ReadFaultForTesting: TransientR2ReadFault | undefined;
 let unexpectedWholePackReadOperationForTesting: string | undefined;
+let transientWholePackReadForTesting: { operationId: string; attempts: number } | undefined;
+let shortWholePackReadForTesting: { operationId: string; attempts: number } | undefined;
 
 export const __test = {
   failWrongPrerequisiteRange(operationId: string): void {
@@ -128,10 +157,43 @@ export const __test = {
   readWholeActivePack(operationId: string): void {
     unexpectedWholePackReadOperationForTesting = operationId;
   },
+  failTransientWholePackRead(operationId: string): void {
+    transientWholePackReadForTesting = { operationId, attempts: 0 };
+  },
+  transientWholePackReadAttempts(operationId: string): number | undefined {
+    return transientWholePackReadForTesting?.operationId === operationId
+      ? transientWholePackReadForTesting.attempts
+      : undefined;
+  },
+  returnShortWholePackRead(operationId: string): void {
+    shortWholePackReadForTesting = { operationId, attempts: 0 };
+  },
+  shortWholePackReadAttempts(operationId: string): number | undefined {
+    return shortWholePackReadForTesting?.operationId === operationId
+      ? shortWholePackReadForTesting.attempts
+      : undefined;
+  },
+  wholeActivePackFits(packBytes: number, reservedBytes: number): boolean {
+    return wholeActivePackFits(packBytes, reservedBytes);
+  },
+  selectWholeActivePackKeys(
+    active: Array<{ packKey: string; packBytes: number; packChecksum: string }>
+  ): string[] {
+    return [
+      ...selectWholeActivePackKeys(
+        active.map(({ packKey, packBytes, packChecksum }) => ({
+          source: { packKey, packBytes },
+          packChecksum,
+        }))
+      ),
+    ].sort();
+  },
   reset(): void {
     wrongPrerequisiteRangeFaultForTesting = undefined;
     transientR2ReadFaultForTesting = undefined;
     unexpectedWholePackReadOperationForTesting = undefined;
+    transientWholePackReadForTesting = undefined;
+    shortWholePackReadForTesting = undefined;
   },
 };
 
@@ -295,6 +357,13 @@ export type StockObservedActivePackRead =
       returnedBytes: number;
       kind: "required-object";
       requiredOid: string;
+    }
+  | {
+      packChecksum: string;
+      start: number;
+      end: number;
+      returnedBytes: number;
+      kind: "whole";
     };
 
 export type StockReceivePlan = {
@@ -490,11 +559,25 @@ function requestedActivePackRange(
 
 function observeReturnedActivePackBody(
   object: R2ObjectBody,
-  read: RuntimeActivePackRead
+  read: RuntimeActivePackRead,
+  discard: () => void,
+  expectedLength?: number,
+  beforeConsume?: () => void,
+  transformBytes?: (bytes: Uint8Array) => Uint8Array
 ): R2ObjectBody {
   let observedBody: ReadableStream<Uint8Array> | undefined;
+  let consumptionStarted = false;
+  const startConsumption = (): void => {
+    if (consumptionStarted) return;
+    consumptionStarted = true;
+    beforeConsume?.();
+  };
   const record = (returnedBytes: number): void => {
     if (read.consumed) throw new Error("stock-plan:active-pack-body-consumed-twice");
+    if (expectedLength !== undefined && returnedBytes !== expectedLength) {
+      discard();
+      return;
+    }
     read.consumed = true;
     read.returnedBytes = returnedBytes;
   };
@@ -504,14 +587,20 @@ function observeReturnedActivePackBody(
     let returnedBytes = 0;
     observedBody = new ReadableStream<Uint8Array>({
       async pull(controller) {
-        const next = await reader.read();
-        if (next.done) {
-          record(returnedBytes);
-          controller.close();
-          return;
+        try {
+          startConsumption();
+          const next = await reader.read();
+          if (next.done) {
+            record(returnedBytes);
+            controller.close();
+            return;
+          }
+          returnedBytes += next.value.byteLength;
+          controller.enqueue(next.value);
+        } catch (error) {
+          discard();
+          controller.error(error);
         }
-        returnedBytes += next.value.byteLength;
-        controller.enqueue(next.value);
       },
       async cancel(reason?: unknown) {
         await reader.cancel(reason);
@@ -524,16 +613,37 @@ function observeReturnedActivePackBody(
     get(target, property) {
       if (property === "arrayBuffer") {
         return async (): Promise<ArrayBuffer> => {
-          const bytes = await target.arrayBuffer();
-          record(bytes.byteLength);
-          return bytes;
+          try {
+            startConsumption();
+            const raw = await target.arrayBuffer();
+            if (!transformBytes) {
+              record(raw.byteLength);
+              return raw;
+            }
+            const returned = transformBytes(new Uint8Array(raw));
+            record(returned.byteLength);
+            return returned.buffer.slice(
+              returned.byteOffset,
+              returned.byteOffset + returned.byteLength
+            ) as ArrayBuffer;
+          } catch (error) {
+            discard();
+            throw error;
+          }
         };
       }
       if (property === "bytes") {
         return async (): Promise<Uint8Array> => {
-          const bytes = await target.bytes();
-          record(bytes.byteLength);
-          return bytes;
+          try {
+            startConsumption();
+            const bytes = await target.bytes();
+            const returned = transformBytes?.(bytes) ?? bytes;
+            record(returned.byteLength);
+            return returned;
+          } catch (error) {
+            discard();
+            throw error;
+          }
         };
       }
       if (property === "body") return streamBody();
@@ -545,7 +655,8 @@ function observeReturnedActivePackBody(
 
 function observeActivePackReads(
   env: Env,
-  activePacks: StockPlannerActivePack[]
+  activePacks: StockPlannerActivePack[],
+  operationId: string
 ): ActivePackReadObservation {
   const byKey = new Map(activePacks.map((pack) => [pack.packKey, pack]));
   const reads: RuntimeActivePackRead[] = [];
@@ -590,9 +701,53 @@ function observeActivePackReads(
             }
             reads.push(read);
           }
-          const object = options ? await target.get(key, options) : await target.get(key);
+          let object: R2ObjectBody | null;
+          try {
+            object = options ? await target.get(key, options) : await target.get(key);
+          } catch (error) {
+            const index = read ? reads.indexOf(read) : -1;
+            if (index >= 0) reads.splice(index, 1);
+            throw error;
+          }
           if (!read || !object || !("arrayBuffer" in object)) return object;
-          return observeReturnedActivePackBody(object, read);
+          const discard = (): void => {
+            const index = reads.indexOf(read!);
+            if (index >= 0) reads.splice(index, 1);
+          };
+          const beforeConsume =
+            read.kind === "whole"
+              ? () => {
+                  const fault = transientWholePackReadForTesting;
+                  if (fault?.operationId !== operationId) return;
+                  fault.attempts++;
+                  if (fault.attempts === 1) {
+                    throw new Error("injected transient whole-pack body read");
+                  }
+                }
+              : undefined;
+          const transformBytes =
+            read.kind === "whole" && shortWholePackReadForTesting?.operationId === operationId
+              ? (bytes: Uint8Array): Uint8Array => {
+                  const fault = shortWholePackReadForTesting;
+                  if (!fault) return bytes;
+                  fault.attempts++;
+                  return fault.attempts === 1 ? bytes.subarray(0, bytes.byteLength - 1) : bytes;
+                }
+              : undefined;
+          const expectedLength =
+            read.kind === "whole"
+              ? pack?.packBytes
+              : read.start !== undefined && read.end !== undefined
+                ? read.end - read.start
+                : undefined;
+          return observeReturnedActivePackBody(
+            object,
+            read,
+            discard,
+            expectedLength,
+            beforeConsume,
+            transformBytes
+          );
         };
       }
       const value = Reflect.get(target, property, target);
@@ -634,6 +789,7 @@ function reconcileActivePackReads(args: {
     end: number;
     returnedBytes: number;
   }> = [];
+  const wholeReads: StockObservedActivePackRead[] = [];
   let wholeBytes = 0;
   let wholeRequests = 0;
   let unattributedBytes = 0;
@@ -645,6 +801,13 @@ function reconcileActivePackReads(args: {
     if (read.kind === "whole") {
       wholeRequests++;
       wholeBytes += read.returnedBytes;
+      wholeReads.push({
+        packChecksum,
+        start: 0,
+        end: read.returnedBytes,
+        returnedBytes: read.returnedBytes,
+        kind: "whole",
+      });
       continue;
     }
     if (read.kind === "unattributed" || read.start === undefined || read.end === undefined) {
@@ -673,8 +836,24 @@ function reconcileActivePackReads(args: {
     });
   }
 
-  if (wholeRequests !== 0 || unattributedRequests !== 0) {
+  if (unattributedRequests !== 0) {
     throw new Error("stock-plan:active-pack-read-unattributed");
+  }
+  const activeByChecksum = new Map(args.active.map((pack) => [pack.packChecksum, pack]));
+  const wholeChecksums = new Set<string>();
+  wholeReads.sort(compareRuntimeRead);
+  for (const read of wholeReads) {
+    const pack = activeByChecksum.get(read.packChecksum);
+    if (
+      !pack ||
+      wholeChecksums.has(read.packChecksum) ||
+      read.start !== 0 ||
+      read.end !== pack.source.packBytes ||
+      read.returnedBytes !== pack.source.packBytes
+    ) {
+      throw new Error("stock-plan:active-pack-whole-observation-mismatch");
+    }
+    wholeChecksums.add(read.packChecksum);
   }
   const expectedTrailerPackKeys = args.active.map((pack) => pack.source.packKey).sort();
   const observedTrailerPackKeys = args.observation.reads
@@ -699,10 +878,12 @@ function reconcileActivePackReads(args: {
     throw new Error("stock-plan:active-pack-trailer-observation-mismatch");
   }
 
-  const expectedRanges = [...args.ranges].sort(
-    (left, right) =>
-      compareRuntimeRead(left, right) || left.requiredOid.localeCompare(right.requiredOid)
-  );
+  const expectedRanges = args.ranges
+    .filter((range) => !wholeChecksums.has(range.packChecksum))
+    .sort(
+      (left, right) =>
+        compareRuntimeRead(left, right) || left.requiredOid.localeCompare(right.requiredOid)
+    );
   bodyReads.sort(compareRuntimeRead);
   if (
     bodyReads.length !== expectedRanges.length ||
@@ -722,16 +903,18 @@ function reconcileActivePackReads(args: {
   // projected in the planner's deterministic base-first topology after the
   // exact observed multiset has been reconciled above.
   const observedRanges = args.ranges.map((range) => ({ ...range }));
-  const requiredReads: StockObservedActivePackRead[] = observedRanges.map((range) => ({
-    packChecksum: range.packChecksum,
-    start: range.start,
-    end: range.end,
-    returnedBytes: range.end - range.start,
-    kind: "required-object",
-    requiredOid: range.requiredOid,
-  }));
+  const requiredReads: StockObservedActivePackRead[] = observedRanges
+    .filter((range) => !wholeChecksums.has(range.packChecksum))
+    .map((range) => ({
+      packChecksum: range.packChecksum,
+      start: range.start,
+      end: range.end,
+      returnedBytes: range.end - range.start,
+      kind: "required-object",
+      requiredOid: range.requiredOid,
+    }));
   return {
-    activePackReads: [...trailerReads, ...requiredReads],
+    activePackReads: [...trailerReads, ...requiredReads, ...wholeReads],
     ranges: observedRanges,
     trailerBytes: trailerReads.reduce((total, read) => total + read.returnedBytes, 0),
     trailerRequests: trailerReads.length,
@@ -741,6 +924,71 @@ function reconcileActivePackReads(args: {
     wholeRequests,
     unattributedBytes,
     unattributedRequests,
+  };
+}
+
+function createBoundedWholePackReader(args: {
+  env: Env;
+  operationId: string;
+  active: BoundActivePack[];
+  limiter: Limiter;
+  countSubrequest: (n?: number) => void;
+  log: Logger;
+  signal?: AbortSignal;
+}): (candidate: PackedObjectCandidate) => Promise<Uint8Array | undefined> {
+  const activeByKey = new Map(args.active.map((pack) => [pack.source.packKey, pack]));
+  const selectedKeys = selectWholeActivePackKeys(args.active);
+  const loadedByKey = new Map<string, Promise<Uint8Array>>();
+
+  return async (candidate) => {
+    if (wrongPrerequisiteRangeFaultForTesting?.operationId === args.operationId) {
+      return undefined;
+    }
+    const pack = activeByKey.get(candidate.source.packKey);
+    if (!pack || !selectedKeys.has(pack.source.packKey)) return undefined;
+
+    let loaded = loadedByKey.get(pack.source.packKey);
+    if (!loaded) {
+      loaded = (async () => {
+        const bytes = await readExactPackRangeWithRetry(
+          async () => {
+            args.countSubrequest();
+            const object = await args.limiter.run("r2:stock-plan-whole-active-pack", async () => {
+              return await args.env.REPO_BUCKET.get(pack.source.packKey);
+            });
+            if (!object) return undefined;
+            return new Uint8Array(await object.arrayBuffer());
+          },
+          pack.source.packBytes,
+          {
+            signal: args.signal,
+            log: args.log,
+            retryContext: async () => ({
+              kind: "whole-active-pack",
+              packBytes: pack.source.packBytes,
+            }),
+          }
+        );
+        if (!bytes) {
+          throw new Error("stock-plan:whole-active-pack-length");
+        }
+        if (
+          bytes.byteLength !== pack.source.packBytes ||
+          bytesToHex(bytes.subarray(bytes.byteLength - 20)) !== pack.packChecksum
+        ) {
+          throw new Error("stock-plan:whole-active-pack-checksum");
+        }
+        args.log.debug("stock-plan:whole-active-pack-loaded", {
+          packKey: pack.source.packKey,
+          packBytes: pack.source.packBytes,
+        });
+        return bytes;
+      })();
+      loadedByKey.set(pack.source.packKey, loaded);
+    }
+
+    const bytes = await loaded;
+    return bytes.subarray(candidate.offset, candidate.nextOffset);
   };
 }
 
@@ -1259,9 +1507,13 @@ async function planStockReceiveImpl(
     throw new Error("stock-plan:input-sha256");
   }
   // Observe the platform response at the R2 bucket boundary rather than
-  // trusting callbacks from the materializer. This catches any active-pack
-  // GET introduced below the planner, including an accidental whole-pack read.
-  const activePackObservation = observeActivePackReads(args.env, args.activePacks);
+  // trusting callbacks from the materializer. This binds every exact range or
+  // bounded whole-pack preload to the active pack that actually supplied it.
+  const activePackObservation = observeActivePackReads(
+    args.env,
+    args.activePacks,
+    args.operationId
+  );
   args = { ...args, env: activePackObservation.env };
   const counters: PlannerCounters = {
     metadataBytes: 0,
@@ -1315,6 +1567,15 @@ async function planStockReceiveImpl(
 
   const thinDeltaBaseOids = new Set<string>();
   const activeByChecksum = new Map(active.map((pack) => [pack.packChecksum, pack]));
+  const readFromBoundedWholePack = createBoundedWholePackReader({
+    env: args.env,
+    operationId: args.operationId,
+    active,
+    limiter: args.limiter,
+    countSubrequest: args.countSubrequest,
+    log,
+    signal: args.signal,
+  });
   const physicalPlanner = createStockPhysicalDependencyPlanner({
     sources: active.map((pack) => ({
       source: pack.source,
@@ -1335,19 +1596,21 @@ async function planStockReceiveImpl(
         active.length
       );
       const length = selectedCandidate.nextOffset - selectedCandidate.offset;
-      const bytes = await readPackRange(
-        args.env,
-        selectedCandidate.source.packKey,
-        selectedCandidate.offset,
-        length,
-        {
-          limiter: args.limiter,
-          countSubrequest: args.countSubrequest,
-          signal: args.signal,
-          exactLength: true,
-          log,
-        }
-      );
+      const bytes =
+        (await readFromBoundedWholePack(selectedCandidate)) ??
+        (await readPackRange(
+          args.env,
+          selectedCandidate.source.packKey,
+          selectedCandidate.offset,
+          length,
+          {
+            limiter: args.limiter,
+            countSubrequest: args.countSubrequest,
+            signal: args.signal,
+            exactLength: true,
+            log,
+          }
+        ));
       if (bytes) {
         recordWrongPrerequisiteRangeRead(
           args.operationId,
