@@ -1151,6 +1151,13 @@ describe("stock Smart HTTP receive spike", () => {
       doId: stub.id.toString(),
       operationId: "stock-tiny-operation",
     });
+    await stub.getNativeReceiveOperation("stock-tiny-operation");
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        expect(await state.storage.getAlarm()).toBeGreaterThan(Date.now() + 1_000);
+      }
+    );
     expect(await runQueueMessage(recoveryMessage)).toEqual({ acked: true, retried: false });
     expect(await stub.getNativeReceiveOperation("stock-tiny-operation")).toMatchObject({
       state: "committed",

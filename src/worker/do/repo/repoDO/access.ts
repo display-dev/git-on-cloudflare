@@ -12,6 +12,10 @@ export type RepoDOAccessContext = {
   setLastAccessMemMs(value: number): void;
 };
 
+export function shouldPreserveDueAlarm(alarm: number | null, now: number): boolean {
+  return alarm !== null && alarm <= now;
+}
+
 export async function touchAndMaybeSchedule(args: RepoDOAccessContext): Promise<void> {
   const now = Date.now();
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
@@ -28,6 +32,10 @@ export async function touchAndMaybeSchedule(args: RepoDOAccessContext): Promise<
       args.setLastAccessMemMs(now);
     }
   } catch {}
+  const alarm = await args.ctx.storage.getAlarm();
+  if (shouldPreserveDueAlarm(alarm, now)) {
+    return;
+  }
   await ensureScheduled(args.ctx, args.env, now);
 }
 
