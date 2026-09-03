@@ -57,21 +57,19 @@ export async function publishNativeReceiveAuthorityPlan(args: {
   countSubrequest(op: string, n?: number): void;
   logger: Logger;
 }): Promise<NativeReceiveAuthorityPublication> {
-  const refs = [];
-  for (const ref of args.plan.refs) {
-    refs.push({
-      name: ref.name,
-      oid: ref.oid,
-      key: ref.key,
-      bytes: ref.bytes,
-      sha256: ref.sha256,
-      etag: await putImmutablePublicationObject({ ...args, plan: ref }),
-    });
-  }
-  const receiptEtag = await putImmutablePublicationObject({
-    ...args,
-    plan: args.plan.receipt,
-  });
+  const [refs, receiptEtag] = await Promise.all([
+    Promise.all(
+      args.plan.refs.map(async (ref) => ({
+        name: ref.name,
+        oid: ref.oid,
+        key: ref.key,
+        bytes: ref.bytes,
+        sha256: ref.sha256,
+        etag: await putImmutablePublicationObject({ ...args, plan: ref }),
+      }))
+    ),
+    putImmutablePublicationObject({ ...args, plan: args.plan.receipt }),
+  ]);
   args.logger.info("stock-receive:authority-published", {
     operationId: args.plan.operationId,
     refCount: refs.length,

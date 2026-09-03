@@ -1802,6 +1802,65 @@ describe("stock Smart HTTP receive spike", () => {
     expect(await env.REPO_BUCKET.head(packIndexKey(outputPackKey))).not.toBeNull();
     expect(await env.REPO_BUCKET.head(packRefsKey(outputPackKey))).not.toBeNull();
 
+    const failedOutputPackKey = nativeReceiveOutputPackKey(
+      prefix,
+      "direct-pack-integrity-failure",
+      "e".repeat(64)
+    );
+    const failedInputPackKey = `${prefix}/native-receive/direct-pack-integrity.request`;
+    const failedInput = await env.REPO_BUCKET.put(failedInputPackKey, pack, {
+      customMetadata: { sha256: inputRequestSha256 },
+    });
+    const failedOperation = {
+      ...operation,
+      id: "direct-pack-integrity-failure",
+      fingerprint: "e".repeat(64),
+      inputPackKey: failedInputPackKey,
+      inputEtag: failedInput.etag,
+      outputPackKey: failedOutputPackKey,
+      outputIdxKey: packIndexKey(failedOutputPackKey),
+      outputRefsKey: packRefsKey(failedOutputPackKey),
+    } satisfies NativeReceiveOperation;
+    stockDataPlaneTest.failOutputIntegrity(failedOperation.id, "pack");
+    const integrityFailure = await executeStockReceiveWorkerDataPlane({
+      env: { ...env, STOCK_RECEIVE_DIRECT_PACK: "1" } as Env,
+      operation: failedOperation,
+      cacheCtx: {
+        req: new Request("https://example.invalid/stock-direct-pack-integrity"),
+        ctx: createExecutionContext(),
+        memo: {},
+      },
+      limiter: new SubrequestLimiter(50),
+      countSubrequest() {},
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackIntegrityTest" }),
+    }).catch((error: unknown) => error);
+    expect(integrityFailure).toMatchObject({
+      rejection: {
+        code: "output-integrity-invalid",
+        processorResult: {
+          outputValidationBytes: pack.byteLength,
+          outputValidationRequests: 1,
+          outputIntegrityRejectedRole: "pack",
+          outputIntegrityRejectedAt: "body",
+        },
+      },
+    });
+    expect(stockDataPlaneTest.outputMutationFault(failedOperation.id)).toEqual({
+      operationId: failedOperation.id,
+      role: "pack",
+      triggered: true,
+      bytesMutated: true,
+      staleCustomMetadataSha256Preserved: true,
+    });
+    await cleanupStockReceiveWorkerDataPlane({
+      env,
+      operation: failedOperation,
+      limiter: new SubrequestLimiter(20),
+      countSubrequest() {},
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackFailureCleanupTest" }),
+      includeOutputs: true,
+    });
+
     await cleanupStockReceiveWorkerDataPlane({
       env,
       operation,

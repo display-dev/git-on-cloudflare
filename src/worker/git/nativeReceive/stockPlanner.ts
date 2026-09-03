@@ -1252,81 +1252,82 @@ async function loadBoundActivePacks(
   if (args.activePacks.length > MAX_ACTIVE_PACKS) {
     throw new Error("stock-plan:active-pack-count-limit");
   }
-  const out: BoundActivePack[] = [];
   args.cacheCtx.memo = args.cacheCtx.memo || {};
   args.cacheCtx.memo.flags = args.cacheCtx.memo.flags || new Set();
   args.cacheCtx.memo.flags.add("no-isolate-idx-cache");
   args.cacheCtx.memo.idxViews = args.cacheCtx.memo.idxViews || new Map();
+  const idxViews = args.cacheCtx.memo.idxViews;
 
-  for (const pack of args.activePacks) {
-    throwIfAborted(args.signal);
-    assertSafeBytes(pack.packBytes, "active-pack-bytes", Number.MAX_SAFE_INTEGER);
-    assertSafeBytes(pack.idxBytes, "active-idx-bytes", MAX_METADATA_BYTES);
-    const idxObject = await getBoundedObject({
-      env: args.env,
-      key: packIndexKey(pack.packKey),
-      maximumBytes: MAX_METADATA_BYTES,
-      expectedBytes: pack.idxBytes,
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-      counters,
-    });
-    const idx = parseIdxView(pack.packKey, idxObject.bytes, pack.packBytes);
-    if (!idx) throw new Error("stock-plan:idx-invalid");
-    const computedIdxChecksum = await digestHex(
-      "SHA-1",
-      idxObject.bytes.subarray(0, idxObject.bytes.byteLength - 20)
-    );
-    if (computedIdxChecksum !== bytesToHex(idx.idxChecksum)) {
-      throw new Error("stock-plan:idx-checksum-mismatch");
-    }
-    const idxSha256 = await digestHex("SHA-256", idxObject.bytes);
-    if (pack.idxSha256 !== undefined && pack.idxSha256 !== idxSha256) {
-      throw new Error("stock-plan:idx-authority-digest-mismatch");
-    }
+  return await Promise.all(
+    args.activePacks.map(async (pack): Promise<BoundActivePack> => {
+      throwIfAborted(args.signal);
+      assertSafeBytes(pack.packBytes, "active-pack-bytes", Number.MAX_SAFE_INTEGER);
+      assertSafeBytes(pack.idxBytes, "active-idx-bytes", MAX_METADATA_BYTES);
+      const idxObject = await getBoundedObject({
+        env: args.env,
+        key: packIndexKey(pack.packKey),
+        maximumBytes: MAX_METADATA_BYTES,
+        expectedBytes: pack.idxBytes,
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+        counters,
+      });
+      const idx = parseIdxView(pack.packKey, idxObject.bytes, pack.packBytes);
+      if (!idx) throw new Error("stock-plan:idx-invalid");
+      const computedIdxChecksum = await digestHex(
+        "SHA-1",
+        idxObject.bytes.subarray(0, idxObject.bytes.byteLength - 20)
+      );
+      if (computedIdxChecksum !== bytesToHex(idx.idxChecksum)) {
+        throw new Error("stock-plan:idx-checksum-mismatch");
+      }
+      const idxSha256 = await digestHex("SHA-256", idxObject.bytes);
+      if (pack.idxSha256 !== undefined && pack.idxSha256 !== idxSha256) {
+        throw new Error("stock-plan:idx-authority-digest-mismatch");
+      }
 
-    const trailer = await readExactRange({
-      env: args.env,
-      key: pack.packKey,
-      offset: pack.packBytes - 20,
-      length: 20,
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-      kind: "metadata",
-      counters,
-    });
-    if (!bytesEqual(trailer, idx.packChecksum)) {
-      throw new Error("stock-plan:pack-trailer-mismatch");
-    }
-    if (pack.packChecksum !== undefined && pack.packChecksum !== bytesToHex(idx.packChecksum)) {
-      throw new Error("stock-plan:pack-authority-checksum-mismatch");
-    }
+      const trailer = await readExactRange({
+        env: args.env,
+        key: pack.packKey,
+        offset: pack.packBytes - 20,
+        length: 20,
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+        kind: "metadata",
+        counters,
+      });
+      if (!bytesEqual(trailer, idx.packChecksum)) {
+        throw new Error("stock-plan:pack-trailer-mismatch");
+      }
+      if (pack.packChecksum !== undefined && pack.packChecksum !== bytesToHex(idx.packChecksum)) {
+        throw new Error("stock-plan:pack-authority-checksum-mismatch");
+      }
 
-    const refsObject = await getBoundedObject({
-      env: args.env,
-      key: packRefsKey(pack.packKey),
-      maximumBytes: MAX_METADATA_BYTES,
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-      counters,
-    });
-    const parsedRefs = parsePackRefView(pack.packKey, refsObject.bytes, idx);
-    if (parsedRefs.type !== "Ready") throw new Error("stock-plan:pref-invalid");
-    const refsSha256 = await digestHex("SHA-256", refsObject.bytes);
-    if (pack.refsSha256 !== undefined && pack.refsSha256 !== refsSha256) {
-      throw new Error("stock-plan:pref-authority-digest-mismatch");
-    }
-    args.cacheCtx.memo.idxViews.set(pack.packKey, idx);
-    out.push({
-      source: { packKey: pack.packKey, packBytes: pack.packBytes, idx },
-      idxBytes: pack.idxBytes,
-      refs: parsedRefs.view,
-      packChecksum: bytesToHex(idx.packChecksum),
-      idxSha256,
-      refsSha256,
-    });
-  }
-  return out;
+      const refsObject = await getBoundedObject({
+        env: args.env,
+        key: packRefsKey(pack.packKey),
+        maximumBytes: MAX_METADATA_BYTES,
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+        counters,
+      });
+      const parsedRefs = parsePackRefView(pack.packKey, refsObject.bytes, idx);
+      if (parsedRefs.type !== "Ready") throw new Error("stock-plan:pref-invalid");
+      const refsSha256 = await digestHex("SHA-256", refsObject.bytes);
+      if (pack.refsSha256 !== undefined && pack.refsSha256 !== refsSha256) {
+        throw new Error("stock-plan:pref-authority-digest-mismatch");
+      }
+      idxViews.set(pack.packKey, idx);
+      return {
+        source: { packKey: pack.packKey, packBytes: pack.packBytes, idx },
+        idxBytes: pack.idxBytes,
+        refs: parsedRefs.view,
+        packChecksum: bytesToHex(idx.packChecksum),
+        idxSha256,
+        refsSha256,
+      };
+    })
+  );
 }
 
 function activeNode(
@@ -1882,18 +1883,32 @@ async function planStockReceiveImpl(
     if (closureManifestPut.created) ownedImmutableKeys.push(keys.closureManifestKey);
 
     const directOutputUploadStartedAt = Date.now();
-    for (const artifact of [
+    const directArtifacts = [
       { key: args.outputPackKey, bytes: inputPack, sha256: tempSha256 },
       { key: args.outputIdxKey, bytes: idxBytes, sha256: idxSha256 },
       { key: args.outputRefsKey, bytes: refsBytes, sha256: refsSha256 },
-    ]) {
-      const put = await putImmutableBytes({
-        env: args.env,
-        ...artifact,
-        limiter: args.limiter,
-        countSubrequest: args.countSubrequest,
-      });
+    ];
+    const directPuts = await Promise.allSettled(
+      directArtifacts.map(async (artifact) => ({
+        artifact,
+        put: await putImmutableBytes({
+          env: args.env,
+          ...artifact,
+          limiter: args.limiter,
+          countSubrequest: args.countSubrequest,
+        }),
+      }))
+    );
+    for (const result of directPuts) {
+      if (result.status !== "fulfilled") continue;
+      const { artifact, put } = result.value;
       if (put.created) ownedImmutableKeys.push(artifact.key);
+    }
+    const directPutFailures = directPuts
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    if (directPutFailures.length > 0) {
+      throw new AggregateError(directPutFailures, "stock-plan:direct-output-put-failed");
     }
     const directOutputUploadMs = Date.now() - directOutputUploadStartedAt;
 

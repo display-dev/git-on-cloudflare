@@ -339,6 +339,8 @@ class VerifiedR2ObjectError extends Error {
   }
 }
 
+class DirectOutputHeadMismatch extends Error {}
+
 export class StockReceiveDataPlaneError extends Error {
   constructor(
     readonly rejection: NativeReceiveExecutionRejection,
@@ -691,6 +693,121 @@ async function verifyOutputArtifacts(args: {
     outputPackEtag: etags[0],
     outputIdxEtag: etags[1],
     outputRefsEtag: etags[2],
+  };
+}
+
+async function verifyDirectOutputArtifacts(args: {
+  env: Env;
+  operation: NativeReceiveOperation;
+  result: NativeReceiveProcessResult;
+  limiter: Limiter;
+  countSubrequest(op: string, n?: number): void;
+}): Promise<NativeReceiveProcessResult> {
+  const artifacts = [
+    {
+      role: "pack" as const,
+      key: args.operation.outputPackKey,
+      bytes: args.result.packBytes,
+      sha256: args.result.packSha256,
+    },
+    {
+      role: "index" as const,
+      key: args.operation.outputIdxKey,
+      bytes: args.result.idxBytes,
+      sha256: args.result.idxSha256,
+    },
+    {
+      role: "references" as const,
+      key: args.operation.outputRefsKey,
+      bytes: args.result.refsBytes,
+      sha256: args.result.refsSha256,
+    },
+  ];
+  if (artifacts.some((artifact) => !artifact.sha256 || artifact.bytes > ARTIFACT_MAX_BYTES)) {
+    throw new Error("stock-data-plane:output-declaration-invalid");
+  }
+  const verified = await Promise.all(
+    artifacts.map(async (artifact) => {
+      const mutation = outputMutationFaultForTesting;
+      if (
+        mutation?.operationId === args.operation.id &&
+        mutation.role === artifact.role &&
+        !mutation.triggered
+      ) {
+        args.countSubrequest(`r2:test-mutate-direct-output-${artifact.role}`, 2);
+        const current = await args.limiter.run(`r2:test-read-direct-output-${artifact.role}`, () =>
+          args.env.REPO_BUCKET.get(artifact.key)
+        );
+        if (!current) throw new Error("stock-data-plane:test-output-missing");
+        const bytes = new Uint8Array(await current.arrayBuffer());
+        bytes[Math.floor(bytes.byteLength / 2)]! ^= 0x01;
+        const changed = await args.limiter.run(
+          `r2:test-mutate-direct-output-${artifact.role}`,
+          () =>
+            args.env.REPO_BUCKET.put(artifact.key, bytes, {
+              httpMetadata: { contentType: "application/octet-stream" },
+              customMetadata: { sha256: artifact.sha256! },
+            })
+        );
+        mutation.triggered = true;
+        mutation.bytesMutated = true;
+        mutation.staleCustomMetadataSha256Preserved =
+          changed.customMetadata?.sha256 === artifact.sha256;
+      }
+      try {
+        const object = await readVerifiedR2Object({
+          ...args,
+          key: artifact.key,
+          bytes: artifact.bytes,
+          sha256: artifact.sha256!,
+          role: `output-${artifact.role}`,
+        });
+        args.countSubrequest(`r2:head-stock-output-${artifact.role}`);
+        const head = await args.limiter.run(`r2:head-stock-output-${artifact.role}`, () =>
+          args.env.REPO_BUCKET.head(artifact.key)
+        );
+        if (
+          !head ||
+          head.etag !== object.etag ||
+          head.size !== artifact.bytes ||
+          head.customMetadata?.sha256 !== artifact.sha256
+        ) {
+          throw new DirectOutputHeadMismatch("head-mismatch");
+        }
+        return { ...artifact, etag: head.etag };
+      } catch (error) {
+        const bodyFailure = error instanceof VerifiedR2ObjectError;
+        if (
+          !(error instanceof DirectOutputHeadMismatch) &&
+          (!bodyFailure || error.bytesRead <= 0)
+        ) {
+          throw error;
+        }
+        throw new StockReceiveDataPlaneError(
+          {
+            code: "output-integrity-invalid",
+            processorResult: {
+              ...args.result,
+              outputValidationBytes: bodyFailure ? error.bytesRead : artifact.bytes,
+              outputValidationRequests: 1,
+              outputIntegrityRejectedRole: artifact.role,
+              outputIntegrityRejectedAt: bodyFailure ? "body" : "head",
+            },
+          },
+          "stock-data-plane:output-integrity-rejected"
+        );
+      }
+    })
+  );
+  return {
+    ...args.result,
+    outputValidationBytes: verified.reduce((total, artifact) => total + artifact.bytes, 0),
+    outputValidationRequests: verified.length,
+    downloadedBytes:
+      args.result.downloadedBytes + verified.reduce((total, artifact) => total + artifact.bytes, 0),
+    outputPackEtag: verified[0]!.etag,
+    outputIdxEtag: verified[1]!.etag,
+    outputRefsEtag: verified[2]!.etag,
   };
 }
 
@@ -1214,7 +1331,10 @@ export async function executeStockReceiveWorkerDataPlane(args: {
     };
   } else {
     try {
-      result = await verifyOutputArtifacts({ ...args, result });
+      result =
+        result.executionMode === "direct-pack"
+          ? await verifyDirectOutputArtifacts({ ...args, result })
+          : await verifyOutputArtifacts({ ...args, result });
     } catch (error) {
       throw streamingContainerPhaseError("output-verification", error);
     }
