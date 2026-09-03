@@ -38,6 +38,7 @@ const (
 	objectIDBytes        = 20
 	containerHTTPClient  = 30 * time.Minute
 	persistentCacheRoot  = "/tmp/repository-git-cache"
+	maxStockProcessSlots = 8
 )
 
 func listenAddress() string {
@@ -60,6 +61,7 @@ var (
 	objectIDPattern      = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	refNamePattern       = regexp.MustCompile(`^refs/[^\x00-\x20~^:?*\\\[]+$`)
 	processSlot          = make(chan struct{}, 1)
+	stockProcessSlots    = make(chan struct{}, maxStockProcessSlots)
 	maintenanceStatusMu  sync.RWMutex
 	maintenanceOperation string
 )
@@ -265,6 +267,19 @@ func acquireProcessSlot() bool {
 	default:
 		return false
 	}
+}
+
+func acquireStockProcessSlot() bool {
+	select {
+	case stockProcessSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func releaseStockProcessSlot() {
+	<-stockProcessSlots
 }
 
 func releaseProcessSlot() {

@@ -167,11 +167,15 @@ func stockReceiveBundleHandler(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusBadRequest, "invalid_request", "stock bundle length mismatch")
 		return
 	}
-	if !acquireProcessSlot() {
+	// RepoDO admits at most eight stock preparations. Each uses a fresh bundle
+	// root, repository, Git config, hooks, and quarantine, so the dedicated stock
+	// Container can process that bounded set in parallel. Generic and maintenance
+	// Container applications retain their separate single-operation guard.
+	if !acquireStockProcessSlot() {
 		writeProcessError(writer, transientFailure("repository processor busy", errors.New("another operation is active")))
 		return
 	}
-	defer releaseProcessSlot()
+	defer releaseStockProcessSlot()
 
 	bundleRoot, err := os.MkdirTemp("", "repository-stock-bundle-")
 	if err != nil {

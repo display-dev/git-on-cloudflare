@@ -70,6 +70,24 @@ func TestProcessHandlerRejectsConcurrentOperationAsRetryable(t *testing.T) {
 	}
 }
 
+func TestStockProcessSlotsBoundParallelWork(t *testing.T) {
+	for index := 0; index < maxStockProcessSlots; index++ {
+		if !acquireStockProcessSlot() {
+			t.Fatalf("stock processor slot %d was unexpectedly occupied", index)
+		}
+	}
+	if acquireStockProcessSlot() {
+		t.Fatal("stock processing exceeded its bounded concurrency")
+	}
+	for index := 0; index < maxStockProcessSlots; index++ {
+		releaseStockProcessSlot()
+	}
+	if !acquireStockProcessSlot() {
+		t.Fatal("released stock processor capacity was not reusable")
+	}
+	releaseStockProcessSlot()
+}
+
 func TestProcessErrorCategoryDoesNotExposeGitErrorDetails(t *testing.T) {
 	privateDetail := "fatal: object deadbeefdeadbeefdeadbeefdeadbeefdeadbeef is missing"
 	if category := processErrorCategory(errors.New(privateDetail)); category != "rejected" {

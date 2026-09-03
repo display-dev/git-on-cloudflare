@@ -260,8 +260,10 @@ Changed internally:
 
 - generic push handling remains one active receive lease per repo; bounded
   stock pushes exchange the snapshot lease for a durable reservation in a
-  finite preparation pool before request-body staging, and receive
-  `503 Retry-After: 10` only when staging or pool capacity is unavailable. At
+  finite preparation pool before request-body staging. Each admitted operation
+  runs in an isolated temporary repository inside the dedicated stock Container,
+  whose native concurrency is bounded by the maximum pool size. Requests receive
+  `503 Retry-After: 10` when staging, pool, or native capacity is unavailable. At
   a coordinated-GC checkpoint they retain the exclusive lease instead.
 - `X-Repo-Changed` and `X-Repo-Empty` are computed in the Worker after DO finalization, not forwarded from a DO HTTP endpoint.
 

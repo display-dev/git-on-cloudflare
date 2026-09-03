@@ -84,8 +84,11 @@ The codebase is organized into focused modules with `index.ts` export files:
   row or fabricating an empty artifact triple. A short exclusive snapshot lease
   atomically becomes a durable preparation reservation before request-body
   staging. Bounded stock receives then share a configurable 1–8 preparation
-  pool (default four). Request staging and immutable preparation may overlap,
-  while RepoDO serializes exact-old ref and catalog publication. A bounded
+  pool (default four). Request staging and immutable preparation may overlap.
+  The dedicated repository-bound stock Container accepts at most eight native
+  preparations concurrently; each runs in its own temporary repository, Git
+  configuration, hook, and quarantine boundary. RepoDO still serializes
+  exact-old ref and catalog publication. A bounded
   candidate keeps the exclusive lease at a coordinated-GC checkpoint instead
   of entering the pool, preserving that checkpoint's source protection.
   Same-base contenders therefore have
