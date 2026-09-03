@@ -572,6 +572,7 @@ export async function handleStreamingReceivePackPOST(
       packStream,
       bytesConsumed,
       rawPrefix,
+      responseMode,
       stockReceive,
       stockRecovery: begin.stockRecovery,
       advertisedRefs: begin.refs,

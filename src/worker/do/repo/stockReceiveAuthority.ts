@@ -63,6 +63,8 @@ const STOCK_TRACE_PHASES = new Map<string, string>([
   ["logical_closure_completed", "replacement-closure-complete"],
   ["pre_receive_succeeded", "pre-receive-complete"],
   ["disposable_ref_update_observed", "disposable-ref-updated"],
+  ["worker_direct_closure_validated", "direct-closure-validated"],
+  ["worker_direct_artifacts_published", "direct-artifacts-published"],
 ]);
 
 let afterPublicationLeaseForTesting: (() => Promise<void>) | undefined;
@@ -619,9 +621,13 @@ async function finalizeStockReceiveWithPublicationLease(args: {
       .filter((phase): phase is string => phase !== undefined)
       .map((phase) => ({ phase }));
     const processorStartedAt = prepared.processorResult.processorStartedAt;
+    const processorStartPhase =
+      prepared.processorResult.executionMode === "direct-pack"
+        ? "worker-processor-start"
+        : "go-processor-start";
     const correctedEvents = operation.events?.map((event) =>
       event.phase === "go-processor-start" && processorStartedAt !== undefined
-        ? { ...event, at: processorStartedAt }
+        ? { ...event, phase: processorStartPhase, at: processorStartedAt }
         : event
     );
     operation = withEvidence(
@@ -636,7 +642,7 @@ async function finalizeStockReceiveWithPublicationLease(args: {
       },
       [
         {
-          phase: "go-processor-start",
+          phase: processorStartPhase,
           at: processorStartedAt,
         },
         ...hostTraceEvents,
@@ -803,7 +809,9 @@ async function finalizeStockReceiveWithPublicationLease(args: {
     }
     // The stock planner/proof restricts every semantic external edge to the
     // advertised closure, which is already covered by the GC snapshot or a
-    // previous protected receive. Native output includes its encoding bases.
+    // previous protected receive. Container output includes its encoding bases;
+    // direct-pack output instead binds any external encoding base to that same
+    // advertised and protected closure.
     await advanceGcReceiveVersions(
       transaction,
       refsVersion,

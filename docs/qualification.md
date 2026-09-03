@@ -314,6 +314,18 @@ aggregate request budget; larger packs schedule at most four independent exact
 range reads. Both transports retain exact entry/object validation, share physical
 bases across semantic roots, and emit deterministic base-before-dependent evidence.
 
+The latency campaign may set `STOCK_RECEIVE_DIRECT_PACK=1` only in the disposable
+qualification Worker. A reportable direct sample must expose
+`metrics.executionMode=direct-pack`, preserve exact first-fetch visibility and
+object/ref equality, and show zero Container phases. Planning time excludes the
+separately reported direct immutable-output upload time. The variation admits
+only a single non-empty command whose incoming pack contains exactly the objects
+reachable from its proposed tip; other shapes fall through to the existing stock
+Container path. The comparison must retain the same Git client, protocol,
+credentials, fixture OIDs, alternating provider order, and predeclared latency
+thresholds. Enabling the flag without a commit-pinned Worker version is not
+evidence.
+
 Publication atomically replaces only the exact snapshotted source rows, merging
 all later receive packs and any conservatively retained sources. Current refs and
 HEAD are not overwritten. Accounted versions, source-row identity, live claim,

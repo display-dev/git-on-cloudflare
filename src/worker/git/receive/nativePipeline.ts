@@ -88,6 +88,7 @@ type ExecuteNativeReceivePipelineArgs = {
   packStream: ReadableStream<Uint8Array>;
   bytesConsumed: number;
   rawPrefix?: Uint8Array | undefined;
+  responseMode?: "plain" | "side-band-64k" | undefined;
   stockReceive?: boolean | undefined;
   stockRecovery?: { operationId: string; token: string } | undefined;
   advertisedRefs?: Array<{ name: string; oid: string }> | undefined;
@@ -587,6 +588,7 @@ export async function executeNativeReceivePipeline(
               inputRequestSha256: staged.requestSha256,
               packOffset: staged.packOffset,
               advertisedRefs: args.advertisedRefs ?? [],
+              sideBand64k: args.responseMode === "side-band-64k",
             }
           : undefined,
     });
@@ -607,6 +609,7 @@ export async function executeNativeReceivePipeline(
               packOffset: staged.packOffset,
               packBytes: staged.packBytes,
               advertisedRefs: args.advertisedRefs ?? [],
+              sideBand64k: args.responseMode === "side-band-64k",
             }
           : undefined,
       outputPackKey,

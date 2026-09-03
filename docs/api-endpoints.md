@@ -65,6 +65,13 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
   bound retain the generic streaming/native path; the bound is an internal
   routing threshold, not a repository or push quota.
 
+  Qualification deployments may additionally enable the bounded direct-pack
+  variation. It reuses the same scanner, delta resolution, advertised-closure
+  proof, immutable output verification, and RepoDO exact-old publication, but
+  publishes a fully reachable non-empty incoming pack directly instead of
+  rebuilding semantic prerequisites for stock `receive-pack`. Inputs outside
+  that narrow admission predicate retain the stock Container path.
+
   The native processor receives the incoming request plus the validated
   prerequisite pack and completes stock `receive-pack` plus hook validation.
   When new objects remain, it writes immutable `.pack`, `.idx`, and

@@ -367,6 +367,19 @@ export type StockObservedActivePackRead =
     };
 
 export type StockReceivePlan = {
+  executionMode: "stock-container" | "direct-pack";
+  directPackKey?: string | undefined;
+  directPackBytes?: number | undefined;
+  directPackSha1?: string | undefined;
+  directPackSha256?: string | undefined;
+  directIdxKey?: string | undefined;
+  directIdxBytes?: number | undefined;
+  directIdxSha256?: string | undefined;
+  directRefsKey?: string | undefined;
+  directRefsBytes?: number | undefined;
+  directRefsSha256?: string | undefined;
+  directOutputUploadMs?: number | undefined;
+  incomingOids?: string[] | undefined;
   prerequisitePackKey: string;
   prerequisitePackBytes: number;
   prerequisitePackSha256: string;
@@ -462,6 +475,9 @@ export type PlanStockReceiveArgs = {
   inputRequestKey: string;
   inputRequestBytes: number;
   inputRequestSha256: string;
+  outputPackKey?: string | undefined;
+  outputIdxKey?: string | undefined;
+  outputRefsKey?: string | undefined;
   packOffset: number;
   packBytes: number;
   advertisedRefs: Array<{ name: string; oid: string }>;
@@ -1641,7 +1657,9 @@ async function planStockReceiveImpl(
 
   let incomingIdx: IdxView;
   let incomingRefs: PackRefView;
+  let incomingRefsBytes: Uint8Array | undefined;
   let incomingObjectCount = 0;
+  let incomingIdxBytes = 0;
   const noteInputRead = (read: { length: number }): void => {
     counters.inputRequests++;
     counters.inputBytesRead += read.length;
@@ -1692,6 +1710,7 @@ async function planStockReceiveImpl(
       onRead: noteInputRead,
     });
     incomingIdx = resolve.idxView;
+    incomingIdxBytes = resolve.idxBytes;
     incomingObjectCount = resolve.objectCount;
     const generatedRefs = await getBoundedObject({
       env: args.env,
@@ -1705,6 +1724,7 @@ async function planStockReceiveImpl(
     const parsed = parsePackRefView(keys.temporaryPackKey, generatedRefs.bytes, incomingIdx);
     if (parsed.type !== "Ready") throw new Error("stock-plan:generated-pref-invalid");
     incomingRefs = parsed.view;
+    incomingRefsBytes = generatedRefs.bytes;
   } catch (error) {
     throwWrongRangePlannerFailure({
       operationId: args.operationId,
@@ -1728,6 +1748,228 @@ async function planStockReceiveImpl(
     if (!visitedIncoming.has(oid) && !advertisedReachable.has(oid)) {
       throw new Error("stock-plan:unreachable-input-object");
     }
+  }
+  const directSemanticExternal = new Set(boundary.semanticExternalOids);
+  const directThinBasesEligible = [...thinDeltaBaseOids].every(
+    (oid) => advertisedReachable.has(oid) && !directSemanticExternal.has(oid)
+  );
+
+  // Qualification-only fast path: the incoming pack has already passed the
+  // bounded scanner, delta resolver, object-graph closure proof, and exact
+  // advertised-object boundary above. Publish those immutable bytes directly
+  // instead of rebuilding the advertised repository into a prerequisite pack
+  // and asking stock receive-pack to emit the same quarantine pack again.
+  // RepoDO still owns exact-old admission/finalization; R2 remains the object
+  // authority. Inputs outside the direct admission predicate below continue
+  // through the existing stock-Container path.
+  if (
+    (args.env as Env & { STOCK_RECEIVE_DIRECT_PACK?: string }).STOCK_RECEIVE_DIRECT_PACK === "1" &&
+    args.commands.length === 1 &&
+    incomingObjectCount > 0 &&
+    incomingObjectCount === boundary.visitedIncomingObjectCount &&
+    directThinBasesEligible
+  ) {
+    if (!args.outputPackKey || !args.outputIdxKey || !args.outputRefsKey) {
+      throw new Error("stock-plan:direct-output-keys-missing");
+    }
+    const requiredRootOids = [...thinDeltaBaseOids].sort();
+    let physicalPlan: StockPhysicalDependencyPlan;
+    try {
+      await physicalPlanner.materializeSemanticRoots(requiredRootOids);
+      physicalPlan = await physicalPlanner.finalize(requiredRootOids);
+    } catch (error) {
+      throwWrongRangePlannerFailure({
+        operationId: args.operationId,
+        error,
+        observation: activePackObservation,
+        active,
+        counters,
+        startedAt,
+      });
+    }
+    const plannedRanges: StockRequiredRange[] = physicalPlan.ranges.map((range) => ({
+      entryId: range.entryId,
+      packChecksum: range.packChecksum,
+      start: range.start,
+      end: range.end,
+      reason: "required-object",
+      requiredOid: range.oid,
+      semanticRootOids: range.semanticRootOids,
+    }));
+    const observed = reconcileActivePackReads({
+      observation: activePackObservation,
+      active,
+      ranges: plannedRanges,
+    });
+    const idxObject = await getBoundedObject({
+      env: args.env,
+      key: packIndexKey(keys.temporaryPackKey),
+      maximumBytes: MAX_METADATA_BYTES,
+      expectedBytes: incomingIdxBytes,
+      limiter: args.limiter,
+      countSubrequest: args.countSubrequest,
+      counters,
+    });
+    const idxBytes = idxObject.bytes;
+    const refsBytes = incomingRefsBytes;
+    if (!refsBytes) throw new Error("stock-plan:generated-pref-missing");
+    const idxSha256 = await digestHex("SHA-256", idxBytes);
+    const refsSha256 = await digestHex("SHA-256", refsBytes);
+    const activePackBindings = active.map((pack) => ({
+      packKey: pack.source.packKey,
+      packBytes: pack.source.packBytes,
+      idxBytes: pack.idxBytes,
+      packChecksum: pack.packChecksum,
+      idxSha256: pack.idxSha256,
+      prefSha256: pack.refsSha256,
+    }));
+    const selectedPackChecksums = [
+      ...new Set(physicalPlan.physicalNodes.map((node) => node.packChecksum)),
+    ].sort();
+    const selectedPackBytes = selectedPackChecksums.reduce((total, checksum) => {
+      const pack = activeByChecksum.get(checksum);
+      if (!pack) throw new Error("stock-plan:selected-pack-missing");
+      return total + pack.source.packBytes;
+    }, 0);
+    const planDocument = {
+      schemaVersion: 3,
+      executionMode: "direct-pack",
+      operationId: args.operationId,
+      repositoryId: args.repoId,
+      input: {
+        key: args.inputRequestKey,
+        bytes: args.inputRequestBytes,
+        sha256: args.inputRequestSha256,
+        packOffset: args.packOffset,
+        packBytes: args.packBytes,
+        packSha256: tempSha256,
+        idxSha256,
+        refsSha256,
+      },
+      commands: args.commands,
+      advertisedRefs: args.advertisedRefs,
+      activePackBindings,
+      advertisedReachableOids,
+      incomingOids: boundary.visitedIncomingOids,
+      semanticExternalOids: boundary.semanticExternalOids,
+      thinDeltaBaseOids: requiredRootOids,
+      physicalNodes: physicalPlan.physicalNodes,
+      dependencies: physicalPlan.dependencies,
+      topologicalEntryIds: physicalPlan.topologicalEntryIds,
+      ranges: observed.ranges,
+      activePackReads: observed.activePackReads,
+      closure: {
+        incomingObjectCount,
+        visitedIncomingObjectCount: boundary.visitedIncomingObjectCount,
+        logicalEdgeCount: boundary.logicalEdgeCount,
+        internalEdgeCount: boundary.internalEdgeCount,
+        externalEdgeCount: boundary.externalEdgeCount,
+        missingObjectCount: boundary.missingObjectCount,
+        objectTypeCounts: boundary.objectTypeCounts,
+      },
+    };
+    const manifest = new TextEncoder().encode(JSON.stringify(planDocument));
+    if (manifest.byteLength > MAX_MANIFEST_BYTES) throw new Error("stock-plan:manifest-limit");
+    const closureManifestSha256 = await digestHex("SHA-256", manifest);
+    const closureManifestPut = await putImmutableBytes({
+      env: args.env,
+      key: keys.closureManifestKey,
+      bytes: manifest,
+      sha256: closureManifestSha256,
+      limiter: args.limiter,
+      countSubrequest: args.countSubrequest,
+    });
+    if (closureManifestPut.created) ownedImmutableKeys.push(keys.closureManifestKey);
+
+    const directOutputUploadStartedAt = Date.now();
+    for (const artifact of [
+      { key: args.outputPackKey, bytes: inputPack, sha256: tempSha256 },
+      { key: args.outputIdxKey, bytes: idxBytes, sha256: idxSha256 },
+      { key: args.outputRefsKey, bytes: refsBytes, sha256: refsSha256 },
+    ]) {
+      const put = await putImmutableBytes({
+        env: args.env,
+        ...artifact,
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+      });
+      if (put.created) ownedImmutableKeys.push(artifact.key);
+    }
+    const directOutputUploadMs = Date.now() - directOutputUploadStartedAt;
+
+    await deletePlannerKeys({
+      env: args.env,
+      keys: [
+        keys.temporaryPackKey,
+        packIndexKey(keys.temporaryPackKey),
+        packRefsKey(keys.temporaryPackKey),
+      ],
+      limiter: args.limiter,
+      countSubrequest: args.countSubrequest,
+    });
+    const temporaryOwnedIndex = ownedImmutableKeys.indexOf(keys.temporaryPackKey);
+    if (temporaryOwnedIndex >= 0) ownedImmutableKeys.splice(temporaryOwnedIndex, 1);
+    return {
+      executionMode: "direct-pack",
+      directPackKey: args.outputPackKey,
+      directPackBytes: inputPack.byteLength,
+      directPackSha1: bytesToHex(inputPack.subarray(-20)),
+      directPackSha256: tempSha256,
+      directIdxKey: args.outputIdxKey,
+      directIdxBytes: idxBytes.byteLength,
+      directIdxSha256: idxSha256,
+      directRefsKey: args.outputRefsKey,
+      directRefsBytes: refsBytes.byteLength,
+      directRefsSha256: refsSha256,
+      directOutputUploadMs,
+      incomingOids: boundary.visitedIncomingOids,
+      prerequisitePackKey: "",
+      prerequisitePackBytes: 0,
+      prerequisitePackSha256: "",
+      prerequisitePackEtag: "",
+      closureManifestKey: keys.closureManifestKey,
+      closureManifestBytes: manifest.byteLength,
+      closureManifestSha256,
+      closureManifestEtag: closureManifestPut.etag,
+      planSha256: closureManifestSha256,
+      advertisedReachableOids,
+      semanticExternalOids: boundary.semanticExternalOids,
+      thinDeltaBaseOids: requiredRootOids,
+      requiredRootOids,
+      physicalNodes: physicalPlan.physicalNodes,
+      dependencies: physicalPlan.dependencies,
+      topologicalEntryIds: physicalPlan.topologicalEntryIds,
+      selectedPackChecksums,
+      activePackBindings,
+      incomingObjectCount,
+      visitedIncomingObjectCount: boundary.visitedIncomingObjectCount,
+      logicalEdgeCount: boundary.logicalEdgeCount,
+      internalEdgeCount: boundary.internalEdgeCount,
+      externalEdgeCount: boundary.externalEdgeCount,
+      missingObjectCount: boundary.missingObjectCount,
+      objectTypeCounts: boundary.objectTypeCounts,
+      ranges: observed.ranges,
+      rangeBytes: observed.rangeBytes,
+      rangeRequests: observed.rangeRequests,
+      activePackReads: observed.activePackReads,
+      activePackTrailerBytes: observed.trailerBytes,
+      activePackTrailerRequests: observed.trailerRequests,
+      activePackRangeBytes: observed.rangeBytes,
+      activePackRangeRequests: observed.rangeRequests,
+      activePackWholeBytes: observed.wholeBytes,
+      activePackWholeRequests: observed.wholeRequests,
+      activePackUnattributedBytes: observed.unattributedBytes,
+      activePackUnattributedRequests: observed.unattributedRequests,
+      packsTouched: selectedPackChecksums.length,
+      selectedPackBytes,
+      activePackCount: active.length,
+      metadataBytes: counters.metadataBytes + manifest.byteLength,
+      metadataRequests: counters.metadataRequests + 1,
+      inputBytesRead: counters.inputBytesRead,
+      inputRequests: counters.inputRequests,
+      prerequisitePayloadBytes: 0,
+      prerequisiteHydratedBytes: 0,
+    };
   }
   // receive-pack validates each command against a disposable ref at the exact
   // old OID. A rollback target can be an advertised ancestor that does not
@@ -1927,6 +2169,7 @@ async function planStockReceiveImpl(
   });
 
   return {
+    executionMode: "stock-container",
     prerequisitePackKey: keys.prerequisitePackKey,
     prerequisitePackBytes: prerequisitePack.byteLength,
     prerequisitePackSha256,

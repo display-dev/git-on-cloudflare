@@ -15,6 +15,8 @@ import { z } from "zod";
 
 import { asBufferSource, bytesToHex, createDigestStream } from "@/worker/common";
 import { packIndexKey, packRefsKey } from "@/worker/keys";
+import { buildSidebandReceiveBody } from "@/worker/git/receive/response";
+import { buildReceiveReportStatus } from "@/worker/git/receive/support";
 import { planStockReceive, stockReceivePlanKeys, StockReceivePlannerError } from "./stockPlanner";
 import { stockReceivePreparedProofFailure } from "./stockProof";
 
@@ -837,6 +839,140 @@ function mergeResult(args: {
   };
 }
 
+function binaryBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function directPackResult(args: {
+  operation: NativeReceiveOperation;
+  plan: StockReceivePlan;
+  elapsedMs: number;
+  processorStartedAt: number;
+  planningMs: number;
+}): NativeReceiveProcessResult {
+  const plan = args.plan;
+  if (
+    plan.executionMode !== "direct-pack" ||
+    !plan.directPackBytes ||
+    !plan.directPackSha1 ||
+    !plan.directPackSha256 ||
+    !plan.directIdxBytes ||
+    !plan.directIdxSha256 ||
+    !plan.directRefsBytes ||
+    !plan.directRefsSha256 ||
+    !plan.incomingOids
+  ) {
+    throw new Error("stock-data-plane:direct-plan-invalid");
+  }
+  const reportStatus = buildReceiveReportStatus({
+    unpackOk: true,
+    commands: args.operation.commands,
+    statuses: args.operation.commands.map((command) => ({ ref: command.ref, ok: true })),
+  });
+  const receivePackResponse = args.operation.stockReceive!.sideBand64k
+    ? buildSidebandReceiveBody(reportStatus)
+    : reportStatus;
+  return {
+    operationId: args.operation.id,
+    executionMode: "direct-pack",
+    resultKind: "artifacts",
+    packBytes: plan.directPackBytes,
+    idxBytes: plan.directIdxBytes,
+    refsBytes: plan.directRefsBytes,
+    objectCount: plan.incomingObjectCount,
+    inputPackObjectCount: plan.incomingObjectCount,
+    packSha1: plan.directPackSha1,
+    elapsedMs: args.elapsedMs,
+    processorStartedAt: args.processorStartedAt,
+    stockTiming: {
+      planningMs: Math.max(0, args.planningMs - (plan.directOutputUploadMs ?? 0)),
+      bundleReadMs: 0,
+      containerRpcMs: 0,
+      containerProcessMs: 0,
+      containerReadinessMs: 0,
+      outputUploadMs: plan.directOutputUploadMs ?? 0,
+      outputVerificationMs: 0,
+      proofValidationMs: 0,
+      containerStartAttempts: 0,
+      containerProbeAttempts: 0,
+      containerWasRunning: false,
+    },
+    scratchBytes: plan.directPackBytes + plan.directIdxBytes + plan.directRefsBytes,
+    hydratedBytes: 0,
+    downloadedBytes:
+      plan.inputBytesRead + plan.metadataBytes + plan.rangeBytes + plan.activePackWholeBytes,
+    cacheHitBytes: 0,
+    receivePackResponse: binaryBase64(receivePackResponse),
+    inputRequestSha256: args.operation.stockReceive!.inputRequestSha256,
+    packSha256: plan.directPackSha256,
+    idxSha256: plan.directIdxSha256,
+    refsSha256: plan.directRefsSha256,
+    stockTrace: [
+      { sequence: 1, event: "worker_direct_closure_validated" },
+      { sequence: 2, event: "worker_direct_artifacts_published" },
+    ],
+    metadataBytes: plan.metadataBytes,
+    metadataRequests: plan.metadataRequests,
+    inputBytesRead: plan.inputBytesRead,
+    inputRequests: plan.inputRequests,
+    rangeBytes: plan.rangeBytes,
+    rangeRequests: plan.rangeRequests,
+    packsTouched: plan.packsTouched,
+    planSha256: plan.planSha256,
+    closureProof: {
+      planSha256: plan.planSha256,
+      incomingOids: plan.incomingOids,
+      semanticExternalOids: plan.semanticExternalOids,
+      visitedIncomingObjectCount: plan.visitedIncomingObjectCount,
+      logicalEdgeCount: plan.logicalEdgeCount,
+      internalEdgeCount: plan.internalEdgeCount,
+      externalEdgeCount: plan.externalEdgeCount,
+      missingObjectCount: plan.missingObjectCount,
+      objectTypeCounts: plan.objectTypeCounts,
+    },
+    semanticExternalOids: plan.semanticExternalOids,
+    thinDeltaBaseOids: plan.thinDeltaBaseOids,
+    requiredRootOids: plan.requiredRootOids,
+    prerequisiteObjectOids: plan.requiredRootOids,
+    physicalNodes: plan.physicalNodes,
+    physicalDependencies: plan.dependencies,
+    topologicalEntryIds: plan.topologicalEntryIds,
+    selectedPackChecksums: plan.selectedPackChecksums,
+    activePackBindings: plan.activePackBindings,
+    ranges: plan.ranges,
+    activePackReads: plan.activePackReads,
+    activePackTrailerBytes: plan.activePackTrailerBytes,
+    activePackTrailerRequests: plan.activePackTrailerRequests,
+    activePackRangeBytes: plan.activePackRangeBytes,
+    activePackRangeRequests: plan.activePackRangeRequests,
+    activePackWholeBytes: plan.activePackWholeBytes,
+    activePackWholeRequests: plan.activePackWholeRequests,
+    activePackUnattributedBytes: plan.activePackUnattributedBytes,
+    activePackUnattributedRequests: plan.activePackUnattributedRequests,
+    closureManifestKey: plan.closureManifestKey,
+    closureManifestBytes: plan.closureManifestBytes,
+    closureManifestSha256: plan.closureManifestSha256,
+    closureManifestEtag: plan.closureManifestEtag,
+    prerequisitePackKey: "",
+    prerequisitePackBytes: 0,
+    prerequisitePackSha256: "",
+    prerequisitePackEtag: "",
+    incomingObjectCount: plan.incomingObjectCount,
+    visitedIncomingObjectCount: plan.visitedIncomingObjectCount,
+    logicalEdgeCount: plan.logicalEdgeCount,
+    internalEdgeCount: plan.internalEdgeCount,
+    externalEdgeCount: plan.externalEdgeCount,
+    missingObjectCount: plan.missingObjectCount,
+    objectTypeCounts: plan.objectTypeCounts,
+    selectedPackBytes: plan.selectedPackBytes,
+    activePackCount: plan.activePackCount,
+    outputBytesWritten: plan.directPackBytes + plan.directIdxBytes + plan.directRefsBytes,
+    outputRequests: 3,
+  };
+}
+
 async function executeStreamingContainer(args: {
   env: Env;
   operation: NativeReceiveOperation;
@@ -1032,6 +1168,9 @@ export async function executeStockReceiveWorkerDataPlane(args: {
       inputRequestKey: args.operation.inputPackKey,
       inputRequestBytes: args.operation.inputBytes,
       inputRequestSha256: stock.inputRequestSha256,
+      outputPackKey: args.operation.outputPackKey,
+      outputIdxKey: args.operation.outputIdxKey,
+      outputRefsKey: args.operation.outputRefsKey,
       packOffset: stock.packOffset,
       packBytes: stock.packBytes,
       advertisedRefs: stock.advertisedRefs,
@@ -1043,16 +1182,26 @@ export async function executeStockReceiveWorkerDataPlane(args: {
       log: args.logger,
     });
     const planningMs = Date.now() - planningStartedAt;
-    const execution = await executeStreamingContainer({ ...args, plan });
-    result = mergeResult({
-      operation: args.operation,
-      plan,
-      host: execution.host,
-      elapsedMs: Date.now() - dataPlaneStartedAt,
-      processorStartedAt: dataPlaneStartedAt,
-      planningMs,
-      timing: execution.timing,
-    });
+    if (plan.executionMode === "direct-pack") {
+      result = directPackResult({
+        operation: args.operation,
+        plan,
+        elapsedMs: Date.now() - dataPlaneStartedAt,
+        processorStartedAt: dataPlaneStartedAt,
+        planningMs,
+      });
+    } else {
+      const execution = await executeStreamingContainer({ ...args, plan });
+      result = mergeResult({
+        operation: args.operation,
+        plan,
+        host: execution.host,
+        elapsedMs: Date.now() - dataPlaneStartedAt,
+        processorStartedAt: dataPlaneStartedAt,
+        planningMs,
+        timing: execution.timing,
+      });
+    }
   }
   const outputVerificationStartedAt = Date.now();
   if (result.resultKind === "ref-only") {

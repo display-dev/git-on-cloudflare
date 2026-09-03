@@ -78,6 +78,16 @@ The codebase is organized into focused modules with `index.ts` export files:
   concurrency four. Shared packs and bases are single-flight, while every entry
   remains object-ID and offset verified and the retained plan stays deterministic
   and base-first.
+  A qualification-only `STOCK_RECEIVE_DIRECT_PACK=1` variation tests the
+  architecture's append-only fast path. For one non-empty command whose entire
+  incoming pack is reachable from the proposed tip, the Worker publishes the
+  already scanned and resolved incoming pack plus its generated index/reference
+  sidecars directly as immutable R2 artifacts. Cross-pack delta bases still
+  receive the physical active-pack proof; semantic external objects do not get
+  redundantly materialized. RepoDO retains the same exact-old CAS, catalog, and
+  receipt authority. Empty/ref-only, multi-command, or partially reachable packs
+  continue through the stock Container path. This flag is a bounded spike seam,
+  not a production default.
   Larger or length-unknown requests retain the generic native/streaming path.
   Artifact-producing receives write immutable output to R2, then RepoDO commits
   refs and pack-catalog metadata atomically through typed RPCs. Native Git may

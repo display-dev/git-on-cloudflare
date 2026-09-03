@@ -124,6 +124,7 @@ export type NativeReceiveStockInput = {
   packOffset: number;
   packBytes: number;
   advertisedRefs: Array<{ name: string; oid: string }>;
+  sideBand64k?: boolean | undefined;
 };
 
 export type NativeReceiveOperation = {
@@ -303,6 +304,7 @@ export type RecoverStockReceivePublicationResult =
 
 export type NativeReceiveOperationMetrics = Pick<
   NativeReceiveProcessResult,
+  | "executionMode"
   | "elapsedMs"
   | "processorStartedAt"
   | "stockTiming"
@@ -397,6 +399,8 @@ export type NativeReceiveProcessRequest = {
 
 export type NativeReceiveProcessResult = {
   operationId: string;
+  /** Which bounded processor established the immutable output proof. */
+  executionMode?: "stock-container" | "direct-pack" | undefined;
   /** Native receive either produced immutable artifacts or only validated a ref transaction. */
   /** Required by the stock-receive host protocol; absent on non-stock native work. */
   resultKind?: "artifacts" | "ref-only" | undefined;
@@ -517,6 +521,7 @@ export function nativeReceiveOperationView(
 ): NativeReceiveOperationView {
   const processorMetrics: NativeReceiveOperationMetrics | undefined = operation.processorResult
     ? {
+        executionMode: operation.processorResult.executionMode,
         elapsedMs: operation.processorResult.elapsedMs,
         processorStartedAt: operation.processorResult.processorStartedAt,
         stockTiming: operation.processorResult.stockTiming,

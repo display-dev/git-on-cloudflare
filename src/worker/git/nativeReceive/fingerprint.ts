@@ -14,6 +14,7 @@ export async function fingerprintNativeReceive(args: {
     inputRequestSha256: string;
     packOffset: number;
     advertisedRefs: Array<{ name: string; oid: string }>;
+    sideBand64k?: boolean | undefined;
   };
 }): Promise<string> {
   const canonical = JSON.stringify(
@@ -25,6 +26,7 @@ export async function fingerprintNativeReceive(args: {
           stockReceive: {
             inputRequestSha256: args.stockReceive.inputRequestSha256,
             packOffset: args.stockReceive.packOffset,
+            sideBand64k: args.stockReceive.sideBand64k === true,
           },
         }
       : {

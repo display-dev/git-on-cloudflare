@@ -16,11 +16,13 @@ import { EXPIRED_WRITER_DRAIN_MS } from "@/worker/do/repo/repositoryLifecycle";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
 import { encodeGitObject } from "@/worker/git/core/objects";
 import { SubrequestLimiter } from "@/worker/git/operations/limits";
+import { readObject } from "@/worker/git/object-store";
 import { publishRepositoryGeneration } from "@/worker/git/generation/publish";
 import { nativeReceiveOperationEvidenceMatches } from "@/worker/git/nativeReceive/types";
 import {
   __test as stockDataPlaneTest,
   cleanupStockReceiveWorkerDataPlane,
+  executeStockReceiveWorkerDataPlane,
 } from "@/worker/git/nativeReceive/stockDataPlane";
 import type {
   AdmitStockReceiveResult,
@@ -38,6 +40,7 @@ import {
 import { validateStockReceivePreparedProof } from "@/worker/git/nativeReceive/stockProof";
 import { __test as nativePipelineTest } from "@/worker/git/receive/nativePipeline";
 import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
+import { buildSidebandReceiveBody } from "@/worker/git/receive/response";
 import {
   doPrefix,
   nativeReceiveInputRequestKey,
@@ -46,7 +49,7 @@ import {
   packRefsKey,
   r2PackKey,
 } from "@/worker/keys";
-import { buildPack } from "./util/git-pack";
+import { buildAppendOnlyDelta, buildPack } from "./util/git-pack";
 import { buildTreePayload, readRepoCatalogState, seedPackedRepoState } from "./util/packed-repo";
 import { setupRepoForTests } from "./util/repoSeed";
 import { runDOWithRetry, toRequestBody, uniqueRepoId, withEnvOverrides } from "./util/test-helpers";
@@ -1712,6 +1715,188 @@ describe("stock Smart HTTP receive spike", () => {
       emptyPlan.prerequisitePackKey,
       emptyPlan.closureManifestKey,
     ]);
+  });
+
+  it("publishes a proven ordinary pack directly without rebuilding advertised history", async () => {
+    const seeded = await setupRepoForTests(env, "o", uniqueRepoId("stock-direct-pack"));
+    const stub = getRepoStub(env, seeded.doName);
+    const active = await runDOWithRetry(
+      () => stub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    const [catalog] = await stub.getActivePackCatalog();
+    if (!catalog) throw new Error("expected seeded active pack");
+    const author = "Display <display@example.invalid> 0 +0000";
+    const commitPayload = new TextEncoder().encode(
+      `tree ${active.treeOid}\nparent ${active.commitOid}\nauthor ${author}\ncommitter ${author}\n\ndirect\n`
+    );
+    const commit = await encodeGitObject("commit", commitPayload);
+    const pack = await buildPack([{ type: "commit", payload: commitPayload }]);
+    const prefix = catalog.packKey.slice(0, catalog.packKey.indexOf("/objects/pack/"));
+    const inputPackKey = `${prefix}/native-receive/direct-pack.request`;
+    const inputRequestSha256 = await sha256(pack);
+    const input = await env.REPO_BUCKET.put(inputPackKey, pack, {
+      customMetadata: { sha256: inputRequestSha256 },
+    });
+    const outputPackKey = nativeReceiveOutputPackKey(
+      prefix,
+      "direct-pack-operation",
+      "f".repeat(64)
+    );
+    const operation = {
+      id: "direct-pack-operation",
+      fingerprint: "f".repeat(64),
+      leaseToken: "lease",
+      repositoryId: seeded.doName,
+      state: "processing",
+      inputPackKey,
+      inputBytes: pack.byteLength,
+      inputEtag: input.etag,
+      stockReceive: {
+        inputRequestSha256,
+        packOffset: 0,
+        packBytes: pack.byteLength,
+        advertisedRefs: [{ name: "refs/heads/main", oid: active.commitOid }],
+      },
+      outputPackKey,
+      outputIdxKey: packIndexKey(outputPackKey),
+      outputRefsKey: packRefsKey(outputPackKey),
+      commands: [{ oldOid: active.commitOid, newOid: commit.oid, ref: "refs/heads/main" }],
+      acceptedWrites: [],
+      activeCatalog: [catalog],
+      catalogGeneration: 1,
+      createdAt: 1,
+      updatedAt: 1,
+      attempts: 1,
+      cleanupPending: false,
+    } satisfies NativeReceiveOperation;
+    const result = await executeStockReceiveWorkerDataPlane({
+      env: { ...env, STOCK_RECEIVE_DIRECT_PACK: "1" } as Env,
+      operation,
+      cacheCtx: {
+        req: new Request("https://example.invalid/stock-direct-pack"),
+        ctx: createExecutionContext(),
+        memo: {},
+      },
+      limiter: new SubrequestLimiter(40),
+      countSubrequest() {},
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackTest" }),
+    });
+
+    expect(result.processorResult).toMatchObject({
+      executionMode: "direct-pack",
+      packBytes: pack.byteLength,
+      objectCount: 1,
+      inputPackObjectCount: 1,
+      hydratedBytes: 0,
+      activePackWholeBytes: 0,
+      activePackWholeRequests: 0,
+      prerequisitePackBytes: 0,
+      outputRequests: 3,
+      outputValidationRequests: 3,
+    });
+    expect(await validateStockReceivePreparedProof(operation, result.processorResult)).toBe(true);
+    expect(new Uint8Array(await (await env.REPO_BUCKET.get(outputPackKey))!.arrayBuffer())).toEqual(
+      pack
+    );
+    expect(await env.REPO_BUCKET.head(packIndexKey(outputPackKey))).not.toBeNull();
+    expect(await env.REPO_BUCKET.head(packRefsKey(outputPackKey))).not.toBeNull();
+
+    await cleanupStockReceiveWorkerDataPlane({
+      env,
+      operation,
+      limiter: new SubrequestLimiter(20),
+      countSubrequest() {},
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackCleanupTest" }),
+      includeOutputs: true,
+    });
+  });
+
+  it("commits and reads a thin direct pack while returning negotiated sideband status", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stock-direct-thin");
+    const seeded = await setupRepoForTests(env, owner, repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const active = await runDOWithRetry(
+      () => stub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    const author = "You <you@example.com> 0 +0000";
+    const basePayload = new TextEncoder().encode(
+      `tree ${active.treeOid}\nauthor ${author}\ncommitter ${author}\n\ninitial\n`
+    );
+    const suffix = new TextEncoder().encode("direct thin\n");
+    const nextPayload = concatChunks([basePayload, suffix]);
+    const next = await encodeGitObject("commit", nextPayload);
+    const pack = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: active.commitOid,
+        delta: buildAppendOnlyDelta(basePayload, suffix),
+      },
+    ]);
+    const rawPrefix = concatChunks([
+      pktLine(
+        `${active.commitOid} ${next.oid} refs/heads/main\0 report-status side-band-64k agent=git/2.50.1\n`
+      ),
+      flushPkt(),
+    ]);
+    const requestBody = concatChunks([rawPrefix, pack]);
+    const plainStatus = concatChunks([
+      pktLine("unpack ok\n"),
+      pktLine("ok refs/heads/main\n"),
+      flushPkt(),
+    ]);
+    const response = await handleStreamingReceivePackPOST(
+      {
+        ...env,
+        NATIVE_RECEIVE_CONTAINER: "1",
+        STOCK_RECEIVE_DIRECT_PACK: "1",
+      } as Env,
+      seeded.doName,
+      new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-request",
+          "Content-Length": String(requestBody.byteLength),
+          "X-Display-Operation-ID": "stock-direct-thin-operation",
+        },
+        body: toRequestBody(requestBody),
+      }),
+      createExecutionContext(),
+      {
+        limiter: new SubrequestLimiter(900),
+        acceptedWriteContext: {
+          repositoryId: seeded.doName,
+          actor: "stock-direct-thin-test",
+          sourceSurface: "git-push",
+          idempotencyKey: null,
+        },
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(
+      buildSidebandReceiveBody(plainStatus)
+    );
+    expect((await stub.listRefs()).find((ref) => ref.name === "refs/heads/main")?.oid).toBe(
+      next.oid
+    );
+    expect(await stub.getNativeReceiveOperation("stock-direct-thin-operation")).toMatchObject({
+      state: "committed",
+      metrics: {
+        executionMode: "direct-pack",
+        activePackWholeRequests: 1,
+        outputValidationRequests: 3,
+      },
+    });
+    const loaded = await readObject(env, seeded.doName, next.oid, {
+      req: new Request("https://example.invalid/stock-direct-thin-read"),
+      ctx: createExecutionContext(),
+      memo: {},
+    });
+    expect(loaded?.type).toBe("commit");
+    expect(loaded?.payload).toEqual(nextPayload);
   });
 
   it("selectively hydrates an ordinary bounded receive and buffers success until RepoDO commit", async () => {

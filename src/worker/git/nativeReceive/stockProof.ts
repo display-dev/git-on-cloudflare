@@ -378,11 +378,121 @@ async function physicalPlanValid(args: {
   );
 }
 
+async function directPackPreparedProofFailure(
+  operation: NativeReceiveOperation,
+  result: NativeReceiveProcessResult
+): Promise<string | undefined> {
+  const proof = result.closureProof;
+  const semantic = result.semanticExternalOids;
+  const thin = result.thinDeltaBaseOids;
+  const roots = result.requiredRootOids;
+  const ranges = result.ranges;
+  const reads = result.activePackReads;
+  if (
+    !operation.stockReceive ||
+    result.operationId !== operation.id ||
+    result.inputRequestSha256 !== operation.stockReceive.inputRequestSha256 ||
+    result.resultKind !== "artifacts" ||
+    !result.packSha256 ||
+    !result.idxSha256 ||
+    !result.refsSha256 ||
+    !proof ||
+    !semantic ||
+    !thin ||
+    !roots ||
+    !ranges ||
+    !reads ||
+    !result.planSha256 ||
+    result.planSha256 !== result.closureManifestSha256 ||
+    proof.planSha256 !== result.planSha256 ||
+    !result.closureManifestKey ||
+    !result.closureManifestBytes ||
+    !SHA256.test(result.closureManifestSha256 ?? "") ||
+    !result.closureManifestEtag ||
+    result.closureManifestEtag.length > 256 ||
+    result.prerequisitePackBytes !== 0 ||
+    result.outputBytesWritten !== result.packBytes + result.idxBytes + result.refsBytes ||
+    result.outputRequests !== 3 ||
+    !sortedUnique(proof.incomingOids, OID, MAX_LOGICAL_OBJECTS) ||
+    !sortedUnique(semantic, OID, MAX_LOGICAL_OBJECTS) ||
+    !sortedUnique(thin, OID, MAX_PHYSICAL_NODES) ||
+    !sortedUnique(roots, OID, MAX_PHYSICAL_NODES) ||
+    !equalStrings(roots, thin) ||
+    !equalStrings(proof.semanticExternalOids, semantic) ||
+    proof.visitedIncomingObjectCount !== result.visitedIncomingObjectCount ||
+    proof.incomingOids.length !== result.visitedIncomingObjectCount ||
+    result.inputPackObjectCount !== result.incomingObjectCount ||
+    result.objectCount !== result.incomingObjectCount ||
+    result.incomingObjectCount !== result.visitedIncomingObjectCount ||
+    proof.logicalEdgeCount !== result.logicalEdgeCount ||
+    proof.internalEdgeCount !== result.internalEdgeCount ||
+    proof.externalEdgeCount !== result.externalEdgeCount ||
+    proof.internalEdgeCount + proof.externalEdgeCount !== proof.logicalEdgeCount ||
+    proof.missingObjectCount !== 0 ||
+    result.missingObjectCount !== 0 ||
+    JSON.stringify(proof.objectTypeCounts) !== JSON.stringify(result.objectTypeCounts) ||
+    Object.values(proof.objectTypeCounts).reduce((total, count) => total + count, 0) !==
+      proof.visitedIncomingObjectCount ||
+    result.activePackCount !== operation.activeCatalog.length ||
+    ranges.length > MAX_PHYSICAL_NODES ||
+    reads.length > MAX_ACTIVE_PACK_READS
+  ) {
+    return "direct-identity-or-counts";
+  }
+  if (!(await physicalPlanValid({ operation, result, roots, ranges, reads }))) {
+    return "direct-physical-plan";
+  }
+  const semanticSet = new Set(semantic);
+  if (thin.some((oid) => semanticSet.has(oid))) return "direct-root-overlap";
+  const trailerReads = reads.filter((read) => read.kind === "trailer");
+  const rangeReads = reads.filter((read) => read.kind === "required-object");
+  const wholeReads = reads.filter((read) => read.kind === "whole");
+  const bindings = result.activePackBindings!;
+  const bindingChecksums = bindings.map((binding) => binding.packChecksum).sort();
+  const bindingByChecksum = new Map(bindings.map((binding) => [binding.packChecksum, binding]));
+  const wholeChecksums = new Set(wholeReads.map((read) => read.packChecksum));
+  const rangeBackedRanges = ranges.filter((range) => !wholeChecksums.has(range.packChecksum));
+  if (
+    reads.some((read) => !readValid(read)) ||
+    trailerReads.length !== operation.activeCatalog.length ||
+    !equalStrings(trailerReads.map((read) => read.packChecksum).sort(), bindingChecksums) ||
+    wholeReads.some((read) => {
+      const binding = bindingByChecksum.get(read.packChecksum);
+      return !binding || read.start !== 0 || read.end !== binding.packBytes;
+    }) ||
+    rangeReads.length !== rangeBackedRanges.length ||
+    rangeReads.some(
+      (read) => !rangeBackedRanges.some((range) => rangeKey(read) === rangeKey(range))
+    ) ||
+    result.activePackTrailerRequests !== trailerReads.length ||
+    result.activePackRangeRequests !== rangeReads.length ||
+    result.activePackRangeBytes !==
+      rangeReads.reduce((total, read) => total + read.returnedBytes, 0) ||
+    result.activePackWholeRequests !== wholeReads.length ||
+    result.activePackWholeBytes !==
+      wholeReads.reduce((total, read) => total + read.returnedBytes, 0) ||
+    result.activePackUnattributedBytes !== 0 ||
+    result.activePackUnattributedRequests !== 0
+  ) {
+    return "direct-read-accounting";
+  }
+  const expectedTrace = ["worker_direct_closure_validated", "worker_direct_artifacts_published"];
+  return result.stockTrace?.length === expectedTrace.length &&
+    result.stockTrace.every(
+      (event, index) => event.sequence === index + 1 && event.event === expectedTrace[index]
+    )
+    ? undefined
+    : "direct-trace";
+}
+
 /** Pure, bounded proof diagnosis. It performs no I/O or runtime callbacks. */
 export async function stockReceivePreparedProofFailure(
   operation: NativeReceiveOperation,
   result: NativeReceiveProcessResult
 ): Promise<string | undefined> {
+  if (result.executionMode === "direct-pack") {
+    return await directPackPreparedProofFailure(operation, result);
+  }
   const proof = result.closureProof;
   const semantic = result.semanticExternalOids;
   const thin = result.thinDeltaBaseOids;
