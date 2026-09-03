@@ -46,6 +46,16 @@ default. The host bounds configured values to 5–900 seconds and delegates idle
 shutdown to Cloudflare's inactivity-aware lifecycle, so active receives remain
 outside the stop condition and the same repository-bound process can serve a
 nearby follow-on operation.
+Committed operation evidence includes actual timestamps for route start,
+processor start, prepared/output-verification observation, and client
+acknowledgement plus an optional bounded `metrics.stockTiming` projection.
+Replayed native trace and publication events are ordinal and intentionally have
+no fabricated occurrence timestamp. A latency campaign must require the timing
+projection before attributing time to planning/materialization, Container
+readiness/prestate, Container-native processing, output transfer/verification,
+proof validation, or the bounded post-preparation publication/ack interval; the
+aggregate `metrics.elapsedMs` is one Worker data-plane wall duration and must not
+be added to `stockTiming.containerProcessMs`.
 
 [`qualification/wrangler.template.jsonc`](../qualification/wrangler.template.jsonc)
 freezes that composition. The external orchestrator must replace every

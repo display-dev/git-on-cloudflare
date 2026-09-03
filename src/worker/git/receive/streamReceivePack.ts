@@ -154,6 +154,7 @@ function getErrorStatus(error: unknown): number {
 function createSidebandReceiveResponse(args: {
   env: Env;
   repoId: string;
+  routeStartedAt: number;
   request: Request;
   ctx: ExecutionContext;
   stub: RepoStub;
@@ -195,6 +196,7 @@ function createSidebandReceiveResponse(args: {
         const result = await executePipeline({
           env: args.env,
           repoId: args.repoId,
+          routeStartedAt: args.routeStartedAt,
           request: args.request,
           ctx: args.ctx,
           packStream: args.packStream,
@@ -277,6 +279,7 @@ export async function handleStreamingReceivePackPOST(
     acceptedWriteContext?: AcceptedWriteContext | undefined;
   }
 ): Promise<Response> {
+  const routeStartedAt = Date.now();
   const stub = getRepoStub(env, repoId);
   const log = createLogger(env.LOG_LEVEL, {
     service: "StreamingReceivePack",
@@ -471,6 +474,7 @@ export async function handleStreamingReceivePackPOST(
       return createSidebandReceiveResponse({
         env,
         repoId,
+        routeStartedAt,
         request,
         ctx,
         stub,
@@ -497,6 +501,7 @@ export async function handleStreamingReceivePackPOST(
     const result = await executePipeline({
       env,
       repoId,
+      routeStartedAt,
       request,
       ctx,
       packStream,

@@ -26,6 +26,7 @@ import {
   StockReceivePlannerError,
 } from "@/worker/git/nativeReceive/stockPlanner";
 import { validateStockReceivePreparedProof } from "@/worker/git/nativeReceive/stockProof";
+import { __test as nativePipelineTest } from "@/worker/git/receive/nativePipeline";
 import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
 import {
   doPrefix,
@@ -93,6 +94,7 @@ afterEach(() => {
   stockDataPlaneTest.reset();
   receiveCatalogTest.reset();
   stockPlannerTest.reset();
+  nativePipelineTest.reset();
 });
 
 describe("stock Smart HTTP receive spike", () => {
@@ -208,6 +210,99 @@ describe("stock Smart HTTP receive spike", () => {
         new TextEncoder().encode(JSON.stringify({ operationId: "private-provider-value" }))
       )
     ).toThrow("stock-data-plane:response-header-receivepackresponse");
+  });
+
+  it("forwards and accepts only a complete bounded Container lifecycle timing projection", async () => {
+    const forwarded = await stockContainerHostTest.forwardResponse(
+      new Response(new Uint8Array([1]), {
+        headers: {
+          "Content-Type": "application/x-display-stock-receive-output",
+          "Content-Length": "1",
+        },
+      }),
+      {
+        ready: true,
+        wasRunning: true,
+        readinessMs: 7,
+        startAttempts: 0,
+        probeAttempts: 1,
+      }
+    );
+    const headers = forwarded.headers;
+    expect(new Uint8Array(await forwarded.arrayBuffer())).toEqual(new Uint8Array([1]));
+    expect(headers.get("Content-Length")).toBe("1");
+    expect(stockDataPlaneTest.containerLifecycleTiming(headers)).toEqual({
+      containerReadinessMs: 7,
+      containerStartAttempts: 0,
+      containerProbeAttempts: 1,
+      containerWasRunning: true,
+    });
+
+    const generatedHeaders = stockContainerHostTest.timingHeaders({
+      ready: true,
+      wasRunning: true,
+      readinessMs: 7,
+      startAttempts: 0,
+      probeAttempts: 1,
+    });
+    generatedHeaders.set("X-Display-Stock-Container-Probe-Attempts", "121");
+    expect(stockDataPlaneTest.containerLifecycleTiming(generatedHeaders)).toBeUndefined();
+    generatedHeaders.set("X-Display-Stock-Container-Probe-Attempts", "1");
+    generatedHeaders.delete("X-Display-Stock-Container-Was-Running");
+    expect(stockDataPlaneTest.containerLifecycleTiming(generatedHeaders)).toBeUndefined();
+  });
+
+  it("records the Worker data-plane total once while retaining Container process time", () => {
+    expect(
+      stockDataPlaneTest.measuredStockTiming({
+        processorStartedAt: 1_787_731_200_100,
+        elapsedMs: 100,
+        planningMs: 11,
+        containerProcessMs: 40,
+        timing: {
+          bundleReadMs: 7,
+          containerRpcMs: 53,
+          outputUploadMs: 9,
+          containerReadinessMs: 3,
+          containerStartAttempts: 0,
+          containerProbeAttempts: 1,
+          containerWasRunning: true,
+        },
+      })
+    ).toEqual({
+      elapsedMs: 100,
+      processorStartedAt: 1_787_731_200_100,
+      stockTiming: {
+        planningMs: 11,
+        bundleReadMs: 7,
+        containerRpcMs: 53,
+        containerProcessMs: 40,
+        containerReadinessMs: 3,
+        outputUploadMs: 9,
+        outputVerificationMs: 0,
+        proofValidationMs: 0,
+        containerStartAttempts: 0,
+        containerProbeAttempts: 1,
+        containerWasRunning: true,
+      },
+    });
+    expect(
+      stockDataPlaneTest.measuredStockTiming({
+        processorStartedAt: 1_787_731_200_100,
+        elapsedMs: 300_001,
+        planningMs: 300_001,
+        containerProcessMs: 40,
+        timing: {
+          bundleReadMs: 7,
+          containerRpcMs: 53,
+          outputUploadMs: 9,
+          containerReadinessMs: 3,
+          containerStartAttempts: 0,
+          containerProbeAttempts: 1,
+          containerWasRunning: true,
+        },
+      })
+    ).toEqual({ elapsedMs: 300_001, processorStartedAt: 1_787_731_200_100 });
   });
 
   it("restarts a Container that exits during readiness before forwarding receive bytes", async () => {
@@ -870,6 +965,20 @@ describe("stock Smart HTTP receive spike", () => {
           receivePackResponse: btoa(String.fromCharCode(...receivePackResponse)),
           stockTrace: stockTrace.map((event, index) => ({ sequence: index + 1, event })),
           elapsedMs: 1,
+          processorStartedAt: operation.createdAt,
+          stockTiming: {
+            planningMs: 1,
+            bundleReadMs: 2,
+            containerRpcMs: 3,
+            containerProcessMs: 2,
+            containerReadinessMs: 1,
+            outputUploadMs: 1,
+            outputVerificationMs: 1,
+            proofValidationMs: 1,
+            containerStartAttempts: 0,
+            containerProbeAttempts: 1,
+            containerWasRunning: true,
+          },
           scratchBytes: requestBody.byteLength + pack.byteLength + 2,
           hydratedBytes: 0,
           downloadedBytes: requestBody.byteLength,
@@ -997,29 +1106,40 @@ describe("stock Smart HTTP receive spike", () => {
       }
     );
 
-    const response = await handleStreamingReceivePackPOST(
-      { ...env, NATIVE_RECEIVE_CONTAINER: "1" },
-      seeded.doName,
-      new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-git-receive-pack-request",
-          "Content-Length": String(requestBody.byteLength),
-          "X-Display-Operation-ID": "stock-tiny-operation",
-        },
-        body: toRequestBody(requestBody),
-      }),
-      createExecutionContext(),
-      {
-        limiter: new SubrequestLimiter(900),
-        acceptedWriteContext: {
-          repositoryId: seeded.doName,
-          actor: "stock-spike-test",
-          sourceSurface: "git-push",
-          idempotencyKey: null,
-        },
-      }
-    );
+    const routeStartedAt = Date.now();
+    const nowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(routeStartedAt)
+      .mockReturnValue(routeStartedAt + 1_000);
+    let response: Response;
+    try {
+      response = await handleStreamingReceivePackPOST(
+        { ...env, NATIVE_RECEIVE_CONTAINER: "1" },
+        seeded.doName,
+        new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-git-receive-pack-request",
+            "Content-Length": String(requestBody.byteLength),
+            "X-Display-Operation-ID": "stock-tiny-operation",
+          },
+          body: toRequestBody(requestBody),
+        }),
+        createExecutionContext(),
+        {
+          limiter: new SubrequestLimiter(900),
+          acceptedWriteContext: {
+            repositoryId: seeded.doName,
+            actor: "stock-spike-test",
+            sourceSurface: "git-push",
+            idempotencyKey: null,
+          },
+        }
+      );
+    } finally {
+      nowSpy.mockRestore();
+      nativePipelineTest.reset();
+    }
 
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toBe("application/x-git-receive-pack-result");
@@ -1029,6 +1149,12 @@ describe("stock Smart HTTP receive spike", () => {
       commit.oid
     );
     const committedOperation = await stub.getNativeReceiveOperation("stock-tiny-operation");
+    expect(committedOperation?.createdAt).toBe(routeStartedAt + 1_000);
+    expect(committedOperation?.events?.[0]).toEqual({
+      sequence: 1,
+      phase: "worker-route-receive-start",
+      at: routeStartedAt,
+    });
     expect(committedOperation).toMatchObject({
       state: "committed",
       result: {
@@ -1045,6 +1171,21 @@ describe("stock Smart HTTP receive spike", () => {
       },
       clientAckReadyAt: expect.any(Number),
       metrics: {
+        elapsedMs: 1,
+        processorStartedAt: expect.any(Number),
+        stockTiming: {
+          planningMs: 1,
+          bundleReadMs: 2,
+          containerRpcMs: 3,
+          containerProcessMs: 2,
+          containerReadinessMs: 1,
+          outputUploadMs: 1,
+          outputVerificationMs: 1,
+          proofValidationMs: 1,
+          containerStartAttempts: 0,
+          containerProbeAttempts: 1,
+          containerWasRunning: true,
+        },
         activePackReads: expectedPlan!.activePackReads,
         activePackTrailerBytes: expectedPlan!.activePackTrailerBytes,
         activePackTrailerRequests: expectedPlan!.activePackTrailerRequests,
@@ -1075,6 +1216,20 @@ describe("stock Smart HTTP receive spike", () => {
       "receipt-committed",
       "worker-response-ack",
     ]);
+    const timestampedEvents = (committedOperation?.events ?? []).filter(
+      (event): event is typeof event & { at: number } => event.at !== undefined
+    );
+    expect(timestampedEvents.map((event) => event.phase)).toEqual([
+      "worker-route-receive-start",
+      "go-processor-start",
+      "output-integrity-verified",
+      "worker-response-ack",
+    ]);
+    expect(
+      timestampedEvents.every(
+        (event, index, events) => index === 0 || event.at >= events[index - 1]!.at
+      )
+    ).toBe(true);
     expect(await stub.getActivePackCatalog()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ packKey: replacementPackKey, state: "active" }),

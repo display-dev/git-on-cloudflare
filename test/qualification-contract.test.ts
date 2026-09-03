@@ -41,6 +41,7 @@ describe("qualification contract fixtures", () => {
       "createdAt",
       "events",
       "id",
+      "metrics",
       "result",
       "schemaVersion",
       "state",
@@ -51,6 +52,14 @@ describe("qualification contract fixtures", () => {
       id: "qualification-operation-v1",
       state: "committed",
       attempts: 1,
+      metrics: {
+        elapsedMs: 100,
+        processorStartedAt: 1787731200100,
+        stockTiming: {
+          containerProcessMs: 40,
+          containerWasRunning: true,
+        },
+      },
     });
   });
 
@@ -92,5 +101,8 @@ describe("qualification contract fixtures", () => {
       expect(status.ref).toMatch(/^refs\//);
       expect(typeof status.ok).toBe("boolean");
     }
+    expect(contract("native-receive-operation-active-v1.json")).toMatchObject({
+      events: [{ sequence: 1, phase: "worker-route-receive-start", at: expect.any(Number) }],
+    });
   });
 });

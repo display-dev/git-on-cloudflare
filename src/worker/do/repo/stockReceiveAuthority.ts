@@ -83,7 +83,13 @@ function withEvidence(
     if (events.length >= MAX_EVIDENCE_EVENTS) {
       throw new Error("FUBAR: stock receive evidence bound exceeded");
     }
-    events = [...events, { ...addition, sequence: (events.at(-1)?.sequence ?? 0) + 1 }];
+    events = [
+      ...events,
+      {
+        ...addition,
+        sequence: (events.at(-1)?.sequence ?? 0) + 1,
+      },
+    ];
   }
   return { ...operation, events };
 }
@@ -578,6 +584,7 @@ export async function finalizeStockReceiveState(args: {
       acceptedWriteContext: acceptedWriteContext(operation),
       createdAt: Date.now(),
     };
+    const preparedObservedAt = Date.now();
     publicationPlan = await buildNativeReceiveAuthorityPublicationPlan({
       operation,
       processorResult: prepared.processorResult,
@@ -586,9 +593,16 @@ export async function finalizeStockReceiveState(args: {
       .stockTrace!.map((entry) => STOCK_TRACE_PHASES.get(entry.event))
       .filter((phase): phase is string => phase !== undefined)
       .map((phase) => ({ phase }));
+    const processorStartedAt = prepared.processorResult.processorStartedAt;
+    const correctedEvents = operation.events?.map((event) =>
+      event.phase === "go-processor-start" && processorStartedAt !== undefined
+        ? { ...event, at: processorStartedAt }
+        : event
+    );
     operation = withEvidence(
       {
         ...operation,
+        events: correctedEvents,
         state: "ready",
         processorResult: prepared.processorResult,
         publicationPlan,
@@ -596,10 +610,14 @@ export async function finalizeStockReceiveState(args: {
         updatedAt: Date.now(),
       },
       [
-        { phase: "go-processor-start" },
+        {
+          phase: "go-processor-start",
+          at: processorStartedAt,
+        },
         ...hostTraceEvents,
         {
           phase: "output-integrity-verified",
+          at: preparedObservedAt,
           bytes: prepared.processorResult.outputValidationBytes,
         },
         { phase: "wal-put-complete", durable: true },

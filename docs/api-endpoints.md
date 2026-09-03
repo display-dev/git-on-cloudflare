@@ -89,7 +89,10 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
   authoritative Durable Object cannot be queried. Authentication runs before
   repository lookup. Once native processing has completed, the result includes
   bounded `elapsedMs`, `scratchBytes`, `hydratedBytes`, `downloadedBytes`, and
-  `cacheHitBytes` metrics; it never returns R2 keys or Container diagnostics.
+  `cacheHitBytes` metrics. Stock receive results may additionally include the
+  bounded, fail-open `stockTiming` phase and Container-lifecycle scalar metrics
+  documented in the qualification contract. It never returns R2 keys,
+  repository coordinates, provider identifiers, or Container logs.
 
 ### Qualification controls (schema v1)
 
@@ -100,10 +103,13 @@ lookup. The `:owner` must exactly match the configured high-entropy
 response is `Cache-Control: no-store`.
 
 - **`GET /_internal/qualification/:owner/:repo/operations/:operationId`** uses
-  the separate read-only `QUALIFICATION_OBSERVER_SECRET`. It returns only the
-  operation schema, ID, state, timestamps, and attempt count: `202` while
-  active, `200` when terminal, and `404` when absent. The control credential
-  cannot authorize this route.
+  the separate read-only `QUALIFICATION_OBSERVER_SECRET`. It returns the
+  bounded operation evidence view: schema, identity, state, timestamps,
+  attempts, phase events, terminal result, and metrics including optional
+  `processorStartedAt` and `stockTiming`: `202` while active, `200` when
+  terminal, and `404` when absent. It never returns credentials, R2 keys,
+  repository coordinates, provider identifiers, or Container logs. The
+  control credential cannot authorize this route.
 
 - **`GET /_internal/qualification/:owner/:repo`** returns a bounded,
   identity-free inventory plus the exact configured target revision and

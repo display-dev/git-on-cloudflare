@@ -5,5 +5,12 @@
   "createdAt": 1787731200000,
   "updatedAt": 1787731200500,
   "attempts": 1,
-  "events": [{ "sequence": 1, "phase": "native-processing", "durable": false }]
+  "events": [
+    {
+      "sequence": 1,
+      "phase": "worker-route-receive-start",
+      "at": 1787731200000,
+      "durable": false
+    }
+  ]
 }

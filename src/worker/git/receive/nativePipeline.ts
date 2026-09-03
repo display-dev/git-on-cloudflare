@@ -82,6 +82,7 @@ type RepoStub = DurableObjectStub<RepoDurableObject>;
 type ExecuteNativeReceivePipelineArgs = {
   env: Env;
   repoId: string;
+  routeStartedAt: number;
   request: Request;
   packStream: ReadableStream<Uint8Array>;
   bytesConsumed: number;
@@ -504,6 +505,7 @@ async function executeConcreteStockReceiveSingleHop(args: {
 export async function executeNativeReceivePipeline(
   args: ExecuteNativeReceivePipelineArgs
 ): Promise<ReceivePipelineResult> {
+  const routeStartedAt = args.routeStartedAt;
   // Display-managed clients supply a stable id so a disconnected caller can
   // query the durable result. Plain Git clients retain the lease-token
   // fallback and existing behavior.
@@ -601,7 +603,7 @@ export async function executeNativeReceivePipeline(
       attempts: 0,
       cleanupPending: false,
       events: args.stockReceive
-        ? [{ sequence: 1, phase: "worker-route-receive-start" }]
+        ? [{ sequence: 1, phase: "worker-route-receive-start", at: routeStartedAt }]
         : undefined,
     };
 

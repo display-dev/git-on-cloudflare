@@ -121,6 +121,28 @@ const stockActivePackReadSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
+const stockTimingMsSchema = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(5 * 60 * 1000);
+
+const nativeReceiveStockTimingSchema = z
+  .object({
+    planningMs: stockTimingMsSchema,
+    bundleReadMs: stockTimingMsSchema,
+    containerRpcMs: stockTimingMsSchema,
+    containerProcessMs: stockTimingMsSchema,
+    containerReadinessMs: stockTimingMsSchema,
+    outputUploadMs: stockTimingMsSchema,
+    outputVerificationMs: stockTimingMsSchema,
+    proofValidationMs: stockTimingMsSchema,
+    containerStartAttempts: z.number().int().nonnegative().max(120),
+    containerProbeAttempts: z.number().int().positive().max(120),
+    containerWasRunning: z.boolean(),
+  })
+  .strict();
+
 export const nativeReceiveProcessResultSchema = z
   .object({
     operationId: z.string().min(1),
@@ -131,6 +153,8 @@ export const nativeReceiveProcessResultSchema = z
     inputPackObjectCount: z.number().int().positive().max(100_000).optional(),
     packSha1: z.string().regex(/^[0-9a-f]{40}$/),
     elapsedMs: z.number().int().nonnegative(),
+    processorStartedAt: z.number().int().nonnegative().optional(),
+    stockTiming: nativeReceiveStockTimingSchema.optional(),
     scratchBytes: z.number().int().nonnegative(),
     hydratedBytes: z.number().int().nonnegative().default(0),
     downloadedBytes: z.number().int().nonnegative().default(0),
@@ -666,11 +690,14 @@ export async function recordNativeReceiveClientAckState(
       return false;
     }
     if (operation.clientAckReadyAt !== undefined) return true;
-    const acknowledged = withEvidenceEvents(operation, [{ phase: "worker-response-ack" }]);
+    const acknowledgedAt = Date.now();
+    const acknowledged = withEvidenceEvents(operation, [
+      { phase: "worker-response-ack", at: acknowledgedAt },
+    ]);
     await store.put(nativeReceiveOperationKey(operationId), {
       ...acknowledged,
-      clientAckReadyAt: Date.now(),
-      updatedAt: Date.now(),
+      clientAckReadyAt: acknowledgedAt,
+      updatedAt: acknowledgedAt,
     });
     return true;
   });

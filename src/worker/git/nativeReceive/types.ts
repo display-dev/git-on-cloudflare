@@ -49,9 +49,24 @@ export type NativeReceiveAuthorityPublication = {
 
 export type NativeReceiveStockTraceEvent = { sequence: number; event: string };
 
+export type NativeReceiveStockTiming = {
+  planningMs: number;
+  bundleReadMs: number;
+  containerRpcMs: number;
+  containerProcessMs: number;
+  containerReadinessMs: number;
+  outputUploadMs: number;
+  outputVerificationMs: number;
+  proofValidationMs: number;
+  containerStartAttempts: number;
+  containerProbeAttempts: number;
+  containerWasRunning: boolean;
+};
+
 export type NativeReceiveEvidenceEvent = {
   sequence: number;
   phase: string;
+  at?: number | undefined;
   durable?: boolean | undefined;
   bytes?: number | undefined;
   digest?: string | undefined;
@@ -281,6 +296,8 @@ export type RecoverStockReceivePublicationResult =
 export type NativeReceiveOperationMetrics = Pick<
   NativeReceiveProcessResult,
   | "elapsedMs"
+  | "processorStartedAt"
+  | "stockTiming"
   | "scratchBytes"
   | "hydratedBytes"
   | "downloadedBytes"
@@ -382,6 +399,8 @@ export type NativeReceiveProcessResult = {
   inputPackObjectCount?: number | undefined;
   packSha1: string;
   elapsedMs: number;
+  processorStartedAt?: number | undefined;
+  stockTiming?: NativeReceiveStockTiming | undefined;
   scratchBytes: number;
   hydratedBytes: number;
   downloadedBytes: number;
@@ -491,6 +510,8 @@ export function nativeReceiveOperationView(
   const processorMetrics: NativeReceiveOperationMetrics | undefined = operation.processorResult
     ? {
         elapsedMs: operation.processorResult.elapsedMs,
+        processorStartedAt: operation.processorResult.processorStartedAt,
+        stockTiming: operation.processorResult.stockTiming,
         scratchBytes: operation.processorResult.scratchBytes,
         hydratedBytes: operation.processorResult.hydratedBytes,
         downloadedBytes: operation.processorResult.downloadedBytes,

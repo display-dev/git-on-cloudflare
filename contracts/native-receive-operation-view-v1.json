@@ -6,6 +6,23 @@
   "updatedAt": 1787731201000,
   "attempts": 1,
   "events": [],
+  "metrics": {
+    "elapsedMs": 100,
+    "processorStartedAt": 1787731200100,
+    "stockTiming": {
+      "planningMs": 10,
+      "bundleReadMs": 5,
+      "containerRpcMs": 50,
+      "containerProcessMs": 40,
+      "containerReadinessMs": 2,
+      "outputUploadMs": 10,
+      "outputVerificationMs": 5,
+      "proofValidationMs": 3,
+      "containerStartAttempts": 0,
+      "containerProbeAttempts": 1,
+      "containerWasRunning": true
+    }
+  },
   "result": {
     "statuses": [
       {

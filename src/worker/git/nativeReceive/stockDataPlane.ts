@@ -25,6 +25,8 @@ const HOST_RESULT_MAX_BYTES = 1024 * 1024;
 const ARTIFACT_MAX_BYTES = 32 * 1024 * 1024;
 const BUNDLE_REQUEST_MAX_BYTES = 48 * 1024 * 1024 + BUNDLE_HEADER_MAX_BYTES + 12;
 const BUNDLE_RESPONSE_MAX_BYTES = 96 * 1024 * 1024 + HOST_RESULT_MAX_BYTES + 12;
+const CONTAINER_TIMING_HEADER_PREFIX = "X-Display-Stock-Container-";
+const CONTAINER_TIMING_MS_MAX = 5 * 60 * 1000;
 
 const oidSchema = z.string().regex(/^[0-9a-f]{40}$/);
 const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
@@ -116,6 +118,110 @@ const hostResultSchema = z
 
 type HostResult = z.infer<typeof hostResultSchema>;
 
+type ContainerLifecycleTiming = {
+  containerReadinessMs: number;
+  containerStartAttempts: number;
+  containerProbeAttempts: number;
+  containerWasRunning: boolean;
+};
+
+type StockHostExecution = {
+  host: HostResult;
+  timing?:
+    | (ContainerLifecycleTiming & {
+        bundleReadMs: number;
+        containerRpcMs: number;
+        outputUploadMs: number;
+      })
+    | undefined;
+};
+
+function boundedPhaseMilliseconds(value: number): number | undefined {
+  return Number.isSafeInteger(value) && value >= 0 && value <= CONTAINER_TIMING_MS_MAX
+    ? value
+    : undefined;
+}
+
+function measuredStockTiming(args: {
+  processorStartedAt: number;
+  elapsedMs: number;
+  planningMs: number;
+  containerProcessMs: number;
+  timing?: StockHostExecution["timing"];
+}): Pick<NativeReceiveProcessResult, "elapsedMs" | "processorStartedAt" | "stockTiming"> {
+  if (!args.timing) {
+    return { elapsedMs: args.elapsedMs, processorStartedAt: args.processorStartedAt };
+  }
+  const phaseMilliseconds = [
+    args.planningMs,
+    args.timing.bundleReadMs,
+    args.timing.containerRpcMs,
+    args.containerProcessMs,
+    args.timing.containerReadinessMs,
+    args.timing.outputUploadMs,
+  ];
+  if (phaseMilliseconds.some((value) => boundedPhaseMilliseconds(value) === undefined)) {
+    return { elapsedMs: args.elapsedMs, processorStartedAt: args.processorStartedAt };
+  }
+  return {
+    elapsedMs: args.elapsedMs,
+    processorStartedAt: args.processorStartedAt,
+    stockTiming: {
+      planningMs: args.planningMs,
+      bundleReadMs: args.timing.bundleReadMs,
+      containerRpcMs: args.timing.containerRpcMs,
+      containerProcessMs: args.containerProcessMs,
+      containerReadinessMs: args.timing.containerReadinessMs,
+      outputUploadMs: args.timing.outputUploadMs,
+      outputVerificationMs: 0,
+      proofValidationMs: 0,
+      containerStartAttempts: args.timing.containerStartAttempts,
+      containerProbeAttempts: args.timing.containerProbeAttempts,
+      containerWasRunning: args.timing.containerWasRunning,
+    },
+  };
+}
+
+function boundedTimingHeader(
+  headers: Headers,
+  suffix: string,
+  maximum: number,
+  positive = false
+): number | undefined {
+  const value = headers.get(`${CONTAINER_TIMING_HEADER_PREFIX}${suffix}`);
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed > maximum || (positive ? parsed <= 0 : parsed < 0)) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function containerLifecycleTiming(headers: Headers): ContainerLifecycleTiming | undefined {
+  const wasRunning = headers.get(`${CONTAINER_TIMING_HEADER_PREFIX}Was-Running`);
+  const containerReadinessMs = boundedTimingHeader(
+    headers,
+    "Readiness-Ms",
+    CONTAINER_TIMING_MS_MAX
+  );
+  const containerStartAttempts = boundedTimingHeader(headers, "Start-Attempts", 120);
+  const containerProbeAttempts = boundedTimingHeader(headers, "Probe-Attempts", 120, true);
+  if (
+    (wasRunning !== "0" && wasRunning !== "1") ||
+    containerReadinessMs === undefined ||
+    containerStartAttempts === undefined ||
+    containerProbeAttempts === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    containerReadinessMs,
+    containerStartAttempts,
+    containerProbeAttempts,
+    containerWasRunning: wasRunning === "1",
+  };
+}
+
 function parseHostResultPayload(bytes: Uint8Array): HostResult {
   let value: unknown;
   try {
@@ -194,6 +300,8 @@ export const __test = {
     return hostResultSchema.parse(value);
   },
   parseHostResultPayload,
+  containerLifecycleTiming,
+  measuredStockTiming,
   setWorkerExecutor(executor: StockWorkerExecutor): void {
     workerExecutorForTesting = executor;
   },
@@ -625,6 +733,9 @@ function mergeResult(args: {
   plan: StockReceivePlan;
   host: HostResult;
   elapsedMs: number;
+  processorStartedAt: number;
+  planningMs: number;
+  timing?: StockHostExecution["timing"];
 }): NativeReceiveProcessResult {
   return {
     operationId: args.host.operationId,
@@ -635,7 +746,13 @@ function mergeResult(args: {
     objectCount: args.host.objectCount,
     inputPackObjectCount: args.host.inputPackObjectCount,
     packSha1: args.host.packSha1 ?? "",
-    elapsedMs: args.host.elapsedMs + args.elapsedMs,
+    ...measuredStockTiming({
+      elapsedMs: args.elapsedMs,
+      processorStartedAt: args.processorStartedAt,
+      planningMs: args.planningMs,
+      containerProcessMs: args.host.elapsedMs,
+      timing: args.timing,
+    }),
     scratchBytes:
       args.operation.inputBytes +
       args.plan.prerequisitePackBytes +
@@ -721,8 +838,9 @@ async function executeStreamingContainer(args: {
   plan: StockReceivePlan;
   limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
-}): Promise<HostResult> {
+}): Promise<StockHostExecution> {
   const stock = args.operation.stockReceive!;
+  const bundleReadStartedAt = Date.now();
   let inputObject: Awaited<ReturnType<typeof readVerifiedR2Object>>;
   let prerequisiteObject: Awaited<ReturnType<typeof readVerifiedR2Object>>;
   let manifestObject: Awaited<ReturnType<typeof readVerifiedR2Object>>;
@@ -759,6 +877,7 @@ async function executeStreamingContainer(args: {
   const input = inputObject.bytes;
   const prerequisite = prerequisiteObject.bytes;
   const manifest = manifestObject.bytes;
+  const bundleReadMs = Date.now() - bundleReadStartedAt;
   const header = new TextEncoder().encode(
     JSON.stringify(stockHostRequest(args.operation, args.plan))
   );
@@ -786,6 +905,7 @@ async function executeStreamingContainer(args: {
   const stub = args.env.STOCK_RECEIVE_CONTAINER_HOST.getByName(args.operation.repositoryId);
   args.countSubrequest("do:stock-container-process");
   let response: Response;
+  const containerRpcStartedAt = Date.now();
   try {
     response = await args.limiter.run<Response>(
       "do:stock-container-process",
@@ -794,6 +914,8 @@ async function executeStreamingContainer(args: {
   } catch (error) {
     throw streamingContainerPhaseError("container-rpc", error);
   }
+  const containerRpcMs = Date.now() - containerRpcStartedAt;
+  const lifecycleTiming = containerLifecycleTiming(response.headers);
   try {
     await writing;
   } catch (error) {
@@ -833,6 +955,7 @@ async function executeStreamingContainer(args: {
   ) {
     throw new Error("stock-data-plane:response-binding-invalid");
   }
+  const outputUploadStartedAt = Date.now();
   try {
     if (host.resultKind === "artifacts") {
       await receiveArtifact({
@@ -867,7 +990,17 @@ async function executeStreamingContainer(args: {
   } catch (error) {
     throw streamingContainerPhaseError("output-upload", error);
   }
-  return host;
+  return {
+    host,
+    timing: lifecycleTiming
+      ? {
+          ...lifecycleTiming,
+          bundleReadMs,
+          containerRpcMs,
+          outputUploadMs: Date.now() - outputUploadStartedAt,
+        }
+      : undefined,
+  };
 }
 
 export async function executeStockReceiveWorkerDataPlane(args: {
@@ -880,10 +1013,12 @@ export async function executeStockReceiveWorkerDataPlane(args: {
 }): Promise<NativeReceivePrepared> {
   if (!args.operation.stockReceive) throw new Error("stock-data-plane:stock-input-absent");
   let result: NativeReceiveProcessResult;
+  let dataPlaneStartedAt: number | undefined;
   if (workerExecutorForTesting) {
     result = await workerExecutorForTesting(args);
   } else {
-    const startedAt = Date.now();
+    dataPlaneStartedAt = Date.now();
+    const planningStartedAt = Date.now();
     const stock = args.operation.stockReceive;
     const plan = await planStockReceive({
       env: args.env,
@@ -902,14 +1037,19 @@ export async function executeStockReceiveWorkerDataPlane(args: {
       countSubrequest: (n) => args.countSubrequest("stock-plan", n),
       log: args.logger,
     });
-    const host = await executeStreamingContainer({ ...args, plan });
+    const planningMs = Date.now() - planningStartedAt;
+    const execution = await executeStreamingContainer({ ...args, plan });
     result = mergeResult({
       operation: args.operation,
       plan,
-      host,
-      elapsedMs: Date.now() - startedAt,
+      host: execution.host,
+      elapsedMs: Date.now() - dataPlaneStartedAt,
+      processorStartedAt: dataPlaneStartedAt,
+      planningMs,
+      timing: execution.timing,
     });
   }
+  const outputVerificationStartedAt = Date.now();
   if (result.resultKind === "ref-only") {
     result = {
       ...result,
@@ -925,7 +1065,21 @@ export async function executeStockReceiveWorkerDataPlane(args: {
       throw streamingContainerPhaseError("output-verification", error);
     }
   }
+  if (dataPlaneStartedAt !== undefined) {
+    const outputVerificationMs = boundedPhaseMilliseconds(Date.now() - outputVerificationStartedAt);
+    result = {
+      ...result,
+      stockTiming:
+        result.stockTiming && outputVerificationMs !== undefined
+          ? {
+              ...result.stockTiming,
+              outputVerificationMs,
+            }
+          : undefined,
+    };
+  }
   let proofFailure: string | undefined;
+  const proofValidationStartedAt = Date.now();
   try {
     proofFailure = await stockReceivePreparedProofFailure(args.operation, result);
   } catch (error) {
@@ -933,6 +1087,20 @@ export async function executeStockReceiveWorkerDataPlane(args: {
   }
   if (proofFailure) {
     throw new Error(`stock-data-plane:proof-${proofFailure}`);
+  }
+  if (dataPlaneStartedAt !== undefined) {
+    const proofValidationMs = boundedPhaseMilliseconds(Date.now() - proofValidationStartedAt);
+    result = {
+      ...result,
+      elapsedMs: Date.now() - dataPlaneStartedAt,
+      stockTiming:
+        result.stockTiming && proofValidationMs !== undefined
+          ? {
+              ...result.stockTiming,
+              proofValidationMs,
+            }
+          : undefined,
+    };
   }
   args.logger.info("stock-data-plane:prepared", {
     operationId: args.operation.id,

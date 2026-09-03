@@ -93,6 +93,14 @@ The codebase is organized into focused modules with `index.ts` export files:
   5–900 seconds through `STOCK_RECEIVE_CONTAINER_IDLE_SECONDS`. The timeout
   applies only after inactivity; it does not stop an in-flight receive. Container
   disk remains disposable and no state on it becomes authoritative.
+  Stock-receive operation evidence records one non-overcounted Worker data-plane
+  duration plus bounded phase timings for selective planning/R2 reads, Container
+  readiness and process state, native execution, output upload/verification,
+  and proof validation. Actual route-start, processor-start, prepared, and
+  acknowledgement boundaries carry timestamps; replayed native trace and
+  publication events remain ordinal rather than receiving post-hoc timestamps.
+  These fields are diagnostic only and do not participate in validation or
+  publication authority.
 - Pack metadata lives in `pack_catalog` (SQLite). Exact pack membership lives in `.idx` files in R2.
 
 ### Ownership And Auth

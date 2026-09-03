@@ -11,6 +11,7 @@ const MIN_IDLE_RETENTION_SECONDS = 5;
 const MAX_IDLE_RETENTION_SECONDS = 15 * 60;
 const REQUEST_MAX_BYTES = 48 * 1024 * 1024 + 64 * 1024 + 12;
 const RESPONSE_MAX_BYTES = 96 * 1024 * 1024 + 1024 * 1024 + 12;
+const TIMING_HEADER_PREFIX = "X-Display-Stock-Container-";
 
 type TestContainerExecutor = (request: Request) => Promise<Response>;
 let testContainerExecutor: TestContainerExecutor | undefined;
@@ -22,6 +23,11 @@ type ContainerReadiness = {
   ready: boolean;
   startAttempts: number;
   probeAttempts: number;
+};
+
+type ContainerTiming = ContainerReadiness & {
+  wasRunning: boolean;
+  readinessMs: number;
 };
 
 export const __test = {
@@ -45,6 +51,12 @@ export const __test = {
     value: string | undefined
   ): Promise<void> {
     await configureIdleRetention(container, value);
+  },
+  timingHeaders(timing: ContainerTiming): Headers {
+    return timingHeaders(timing);
+  },
+  async forwardResponse(response: Response, timing: ContainerTiming): Promise<Response> {
+    return await boundedContainerResponse(response, timing);
   },
 };
 
@@ -124,7 +136,19 @@ async function containerReadiness(
   return { ready: false, startAttempts, probeAttempts };
 }
 
-async function boundedContainerResponse(response: Response): Promise<Response> {
+function timingHeaders(timing: ContainerTiming): Headers {
+  return new Headers({
+    [`${TIMING_HEADER_PREFIX}Was-Running`]: timing.wasRunning ? "1" : "0",
+    [`${TIMING_HEADER_PREFIX}Readiness-Ms`]: String(timing.readinessMs),
+    [`${TIMING_HEADER_PREFIX}Start-Attempts`]: String(timing.startAttempts),
+    [`${TIMING_HEADER_PREFIX}Probe-Attempts`]: String(timing.probeAttempts),
+  });
+}
+
+async function boundedContainerResponse(
+  response: Response,
+  timing?: ContainerTiming
+): Promise<Response> {
   const responseBytes = boundedContentLength(response.headers, RESPONSE_MAX_BYTES);
   if (!response.ok || responseBytes === null || !response.body) {
     await response.body?.cancel();
@@ -132,13 +156,17 @@ async function boundedContainerResponse(response: Response): Promise<Response> {
       status: response.status >= 500 ? 503 : 422,
     });
   }
+  const headers = new Headers({
+    "Content-Type": "application/x-display-stock-receive-output",
+    "Content-Length": String(responseBytes),
+    "Cache-Control": "no-store",
+  });
+  if (timing) {
+    for (const [name, value] of timingHeaders(timing)) headers.set(name, value);
+  }
   return new Response(response.body, {
     status: 200,
-    headers: {
-      "Content-Type": "application/x-display-stock-receive-output",
-      "Content-Length": String(responseBytes),
-      "Cache-Control": "no-store",
-    },
+    headers,
   });
 }
 
@@ -189,7 +217,14 @@ export class StockReceiveContainerHost extends DurableObject {
       }
       const container = this.ctx.container;
       if (!container) return new Response("Container unavailable\n", { status: 503 });
+      const wasRunning = container.running;
+      const readinessStartedAt = Date.now();
       const readiness = await containerReadiness(container);
+      const timing = {
+        ...readiness,
+        wasRunning,
+        readinessMs: Date.now() - readinessStartedAt,
+      };
       if (!readiness.ready) {
         logger.warn("stock-container-host:readiness-failed", {
           startAttempts: readiness.startAttempts,
@@ -216,7 +251,7 @@ export class StockReceiveContainerHost extends DurableObject {
         responseBytes,
         responseStatus: response.status,
       });
-      return await boundedContainerResponse(response);
+      return await boundedContainerResponse(response, timing);
     } catch {
       logger.warn("stock-container-host:transport-failed", { retryable: true });
       return new Response("Container unavailable\n", {
