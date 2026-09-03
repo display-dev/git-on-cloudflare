@@ -383,7 +383,9 @@ function gateD1FallbackGitAuth(
     log.info("git-acl:d1-fallback-grant-missing", { reason: auth.reason });
     return forbidden();
   }
-  log.info("git-acl:d1-fallback-unauthorized", { reason: auth.kind });
+  log.info("git-acl:d1-fallback-unauthorized", {
+    reason: auth.kind === "pat-rejected" ? auth.reason : auth.kind,
+  });
   return basicChallenge();
 }
 
