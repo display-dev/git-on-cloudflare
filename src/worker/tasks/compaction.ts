@@ -574,10 +574,12 @@ export async function handleCompactionDeleteMessage(
       keysToDelete.push(packKey, packIndexKey(packKey), packRefsKey(packKey));
     }
 
-    countCompactionSubrequest(cacheCtx, log, "r2:delete-superseded-packs");
-    await limiter.run("r2:delete-superseded-packs", async () => {
-      await env.REPO_BUCKET.delete(keysToDelete);
-    });
+    if (keysToDelete.length > 0) {
+      countCompactionSubrequest(cacheCtx, log, "r2:delete-superseded-packs");
+      await limiter.run("r2:delete-superseded-packs", async () => {
+        await env.REPO_BUCKET.delete(keysToDelete);
+      });
+    }
     if (body.removeCatalogRows) {
       countCompactionSubrequest(cacheCtx, log, "do:remove-superseded-packs");
       const removal = await limiter.run("do:remove-superseded-packs", async () => {

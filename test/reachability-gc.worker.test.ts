@@ -608,6 +608,15 @@ describe("candidate-native repository maintenance", () => {
     );
     expect(deletion).toEqual({ acked: true, retried: false });
     expect(await stub.listSupersededGcPacks()).toEqual([]);
+    const deleteSpy = vi.spyOn(env.REPO_BUCKET, "delete");
+    expect(
+      await deleteSupersededOnce(
+        seeded.doName,
+        sourceCatalog.map((row) => row.packKey),
+        true
+      )
+    ).toEqual({ acked: true, retried: false });
+    expect(deleteSpy).not.toHaveBeenCalled();
     for (const row of sourceCatalog) {
       expect(await env.REPO_BUCKET.head(row.packKey)).toBeNull();
     }
