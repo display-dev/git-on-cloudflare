@@ -7,6 +7,7 @@ import type {
 } from "./repoState";
 
 import { asTypedStorage } from "./repoState";
+import { hasStockReceiveCleanupOrActivity } from "./nativeReceiveActivity";
 
 const SNAPSHOT_MATERIALIZATION_LEASE_TTL_MS = 30 * 60_000;
 const REPOSITORY_READ_LEASE_TTL_MS = 2 * 60_000;
@@ -77,7 +78,16 @@ export async function pruneRepositoryActivityLeases(
   const nativeReaderActive = !!nativeReaderLease && nativeReaderLease.expiresAt > now;
   const recoveryActive = !!recoveryLease && recoveryLease.expiresAt > now;
   const receiveActive = writerMayStillBeDraining(await store.get("receiveLease"), now);
+  const stockPublicationActive = writerMayStillBeDraining(
+    await store.get("stockReceivePublicationLease"),
+    now
+  );
   const compactActive = writerMayStillBeDraining(await store.get("compactLease"), now);
+  const deletionStarted = await store.get("repositoryDeleting");
+  const nativeReceiveActive = await hasStockReceiveCleanupOrActivity(
+    store,
+    deletionStarted ? { now, drainMs: EXPIRED_WRITER_DRAIN_MS } : undefined
+  );
   // Execution revocation and Container termination do not cancel an R2 write
   // already accepted by the bridge. Keep its independent drain in deletion.
   const nativeExecutions = [
@@ -99,11 +109,14 @@ export async function pruneRepositoryActivityLeases(
   if (!nativeReaderActive) await store.delete("nativeCatalogReaderLease");
   if (!recoveryActive) await store.delete("stockReceiveRecoveryLease");
   if (!receiveActive) await store.delete("receiveLease");
+  if (!stockPublicationActive) await store.delete("stockReceivePublicationLease");
   if (!compactActive) await store.delete("compactLease");
 
   return (
     !receiveActive &&
+    !stockPublicationActive &&
     !compactActive &&
+    !nativeReceiveActive &&
     !executionActive &&
     !nativeReaderActive &&
     !recoveryActive &&

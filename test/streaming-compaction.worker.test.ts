@@ -26,7 +26,12 @@ import { setupRepoForTests } from "./util/repoSeed";
 import { seedPackFirstRepo } from "./util/pack-first";
 import { indexTestPack } from "./util/test-indexer";
 import { decodeReportStatus, promoteToStreaming } from "./util/streaming-helpers";
-import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
+import {
+  asTypedStorage,
+  nativeReceiveOperationKey,
+  type RepoStateSchema,
+} from "@/worker/do/repo/repoState";
+import type { NativeReceiveOperation } from "@/worker/git/nativeReceive/types";
 import { createQueueSendResponse } from "./util/queue";
 import {
   compactOnce,
@@ -530,7 +535,7 @@ describe("streaming compaction", () => {
     await expect(env.REPO_BUCKET.head(packRefsKey(supersededPackKey))).resolves.toBeNull();
   });
 
-  it("returns retry when a receive lease appears before compaction commit", async () => {
+  it("returns retry when stock preparation appears before compaction commit", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-receive-priority");
     const seededRepo = await setupRepoForTests(env, owner, repo);
@@ -554,14 +559,44 @@ describe("streaming compaction", () => {
       throw new Error("expected compaction to begin");
     }
 
+    await expect(stub.beginReceive({ stockPreparation: true })).resolves.toMatchObject({
+      ok: false,
+    });
+
     await runDOWithRetry(getStub, async (_instance, state) => {
       const store = asTypedStorage<RepoStateSchema>(state.storage);
       const now = Date.now();
-      await store.put("receiveLease", {
-        token: "receive-priority",
+      const operation: NativeReceiveOperation = {
+        id: "stock-preparation-priority",
+        fingerprint: "1".repeat(64),
+        leaseToken: "released-staging-lease",
+        repositoryId: repoId,
+        state: "processing",
+        inputPackKey: "stock-input",
+        inputBytes: 1,
+        inputEtag: "stock-input-etag",
+        stockReceive: {
+          inputRequestSha256: "2".repeat(64),
+          packOffset: 1,
+          packBytes: 1,
+          advertisedRefs: [],
+        },
+        outputPackKey: "stock-output.pack",
+        outputIdxKey: "stock-output.idx",
+        outputRefsKey: "stock-output.refs",
+        commands: [],
+        acceptedWrites: [],
+        activeCatalog: begin.sourcePacks,
+        catalogGeneration: begin.packsetVersion,
         createdAt: now,
-        expiresAt: now + 60_000,
-      });
+        updatedAt: now,
+        attempts: 1,
+        cleanupPending: false,
+        claimId: "stock-preparation-claim",
+        claimExpiresAt: now + 60_000,
+      };
+      await store.put(nativeReceiveOperationKey(operation.id), operation);
+      await store.put("nativeReceiveOperationIndex", [operation.id]);
     });
 
     const result = await stub.commitCompaction({

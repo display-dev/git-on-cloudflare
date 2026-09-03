@@ -15,6 +15,11 @@ reachability cleanup use the same modules as ordinary service traffic. The
 qualification routes add observation and exact reset operands; they do not add
 a benchmark Git implementation.
 
+Bounded stock receives use the same configurable preparation pool as ordinary
+traffic. Qualification may vary the hard-bounded 1–8 concurrency value to find
+the throughput/resource knee; RepoDO exact-old publication and every active-work
+maintenance/deletion fence remain unchanged.
+
 Every runtime edge remains one hop: Worker to Durable Object, Worker to R2,
 Worker to D1/KV, or Worker to Queue. The dedicated zero-authority Durable
 Object-owned Container binding is the candidate's native-receive boundary. No

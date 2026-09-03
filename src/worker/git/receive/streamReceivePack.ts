@@ -47,6 +47,8 @@ const RECEIVE_SUBREQUEST_BUDGET = 5_000;
 const NATIVE_RECEIVE_OPERATION_HEADER = "X-Display-Operation-ID";
 const STOCK_RECEIVE_SPIKE_HEADER = "X-Display-Spike1b-Stock";
 const STOCK_RECEIVE_REQUEST_MAX_BYTES = 16 * 1024 * 1024;
+const STOCK_PREPARATION_ADMISSION_ATTEMPTS = 16;
+const STOCK_PREPARATION_ADMISSION_INTERVAL_MS = 200;
 
 type RepoStub = DurableObjectStub<RepoDurableObject>;
 export type RepoStateChangeHandler = (change: {
@@ -149,6 +151,26 @@ function getErrorStatus(error: unknown): number {
     return 400;
   }
   return 500;
+}
+
+async function beginReceiveWithBoundedPreparationWait(args: {
+  stub: RepoStub;
+  cacheCtx: CacheContext;
+  log: Logger;
+  limiter: Limiter;
+  stockPreparation: boolean;
+}): Promise<BeginReceiveResult> {
+  const attempts = args.stockPreparation ? STOCK_PREPARATION_ADMISSION_ATTEMPTS : 1;
+  let begin: BeginReceiveResult = { ok: false, retryAfter: 10 };
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    countReceiveSubrequest(args.cacheCtx, args.log, "do:begin-receive");
+    begin = await args.limiter.run<BeginReceiveResult>("do:begin-receive", async () =>
+      args.stub.beginReceive({ stockPreparation: args.stockPreparation })
+    );
+    if (begin.ok || attempt + 1 === attempts) return begin;
+    await new Promise((resolve) => setTimeout(resolve, STOCK_PREPARATION_ADMISSION_INTERVAL_MS));
+  }
+  return begin;
 }
 
 function createSidebandReceiveResponse(args: {
@@ -318,6 +340,9 @@ export async function handleStreamingReceivePackPOST(
     !stockReceiveRequested &&
     requestBytes !== undefined &&
     requestBytes <= STOCK_RECEIVE_REQUEST_MAX_BYTES;
+  const parallelStockPreparation =
+    env.NATIVE_RECEIVE_CONTAINER === "1" &&
+    (stockReceiveRequested || ordinarySelectiveReceiveEligible);
 
   const cacheCtx = options?.cacheCtx ?? {
     req: request,
@@ -371,16 +396,22 @@ export async function handleStreamingReceivePackPOST(
     } else if (recovery.status === "recovery") {
       begin = recovery.begin;
     } else {
-      countReceiveSubrequest(cacheCtx, log, "do:begin-receive");
-      begin = await limiter.run<BeginReceiveResult>("do:begin-receive", async () =>
-        stub.beginReceive()
-      );
+      begin = await beginReceiveWithBoundedPreparationWait({
+        stub,
+        cacheCtx,
+        log,
+        limiter,
+        stockPreparation: parallelStockPreparation,
+      });
     }
   } else {
-    countReceiveSubrequest(cacheCtx, log, "do:begin-receive");
-    begin = await limiter.run<BeginReceiveResult>("do:begin-receive", async () =>
-      stub.beginReceive()
-    );
+    begin = await beginReceiveWithBoundedPreparationWait({
+      stub,
+      cacheCtx,
+      log,
+      limiter,
+      stockPreparation: parallelStockPreparation,
+    });
   }
   if (!begin.ok) {
     log.warn("receive:block-busy", { retryAfter: begin.retryAfter, mode: "streaming" });
@@ -412,6 +443,21 @@ export async function handleStreamingReceivePackPOST(
     const stockReceive =
       stockReceiveRequested ||
       (ordinarySelectiveReceiveEligible && useNativeReceive(env, parsedRequest.commands));
+
+    if (begin.concurrentStockPreparation && !stockReceive) {
+      countReceiveSubrequest(cacheCtx, log, "do:abort-nonstock-concurrent-receive");
+      await limiter
+        .run("do:abort-nonstock-concurrent-receive", () => stub.abortReceive(begin.lease.token))
+        .catch(() => {});
+      logReceiveEnd(log, 503, { reason: "stock-preparation-active" });
+      return new Response("Repository is busy receiving; please retry shortly.\n", {
+        status: 503,
+        headers: {
+          "Retry-After": "10",
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+      });
+    }
 
     if (requestedOperationId && !useNativeReceive(env, parsedRequest.commands)) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");

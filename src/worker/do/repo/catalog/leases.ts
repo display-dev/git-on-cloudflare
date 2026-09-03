@@ -15,6 +15,7 @@ import { scheduleAlarmIfSooner } from "../scheduler";
 import { getActivePackCatalogSnapshot } from "./state";
 import { activeLeaseOrUndefined } from "./activity";
 import type { BeginReceiveResult, BeginStockReceiveRecoveryResult } from "./shared";
+import { listActiveNativeReceiveOperations } from "../nativeReceiveActivity";
 import {
   DEFAULT_HEAD,
   LEASE_RETRY_AFTER_SECONDS,
@@ -88,6 +89,10 @@ export async function clearExpiredLeases(
   }
 
   const compactLease = await store.get("compactLease");
+  const stockPublicationLease = await store.get("stockReceivePublicationLease");
+  if (stockPublicationLease && stockPublicationLease.expiresAt <= now) {
+    await store.delete("stockReceivePublicationLease");
+  }
   const gc = await ctx.storage.get<GcOperation>(GC_OPERATION_KEY);
   if (
     compactLease &&
@@ -111,7 +116,8 @@ export const __admissionTest = {
 
 export async function beginReceiveLease(
   ctx: DurableObjectState,
-  logger?: Logger
+  logger?: Logger,
+  options?: { stockPreparationConcurrency?: number | undefined }
 ): Promise<BeginReceiveResult> {
   const now = Date.now();
   const lease: RepoLease = {
@@ -125,10 +131,26 @@ export async function beginReceiveLease(
     ctx.storage.transaction(async (transaction) => {
       const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
       if (await transactionStore.get("repositoryDeleting")) return false;
-      const nativeOperationIds = (await transactionStore.get("nativeReceiveOperationIndex")) ?? [];
-      for (const operationId of nativeOperationIds) {
-        const operation = await transactionStore.get(nativeReceiveOperationKey(operationId));
-        if (operation && !isNativeReceiveTerminal(operation.state)) return false;
+      const activeOperations = await listActiveNativeReceiveOperations(transactionStore);
+      if (activeOperations.length > 0) {
+        const concurrency = options?.stockPreparationConcurrency;
+        if (
+          concurrency === undefined ||
+          activeOperations.length >= concurrency ||
+          activeOperations.some(
+            (operation) => !operation.stockReceive || operation.state !== "processing"
+          )
+        ) {
+          return {
+            status: "busy" as const,
+            reason:
+              concurrency !== undefined && activeOperations.length >= concurrency
+                ? ("stock-preparation-capacity" as const)
+                : ("native-operation-active" as const),
+            activeCount: activeOperations.length,
+            limit: concurrency,
+          };
+        }
       }
       const existing = await transactionStore.get("receiveLease");
       if (existing && existing.expiresAt > now) return false;
@@ -141,6 +163,14 @@ export async function beginReceiveLease(
       }
       const compactLease = activeLeaseOrUndefined(await transactionStore.get("compactLease"), now);
       const gc = await transaction.get<GcOperation>(GC_OPERATION_KEY);
+      // Generic receives retain their existing priority and force compaction
+      // to retry at commit. A stock receive releases this staging lease, so it
+      // must not enter the parallel pool after compaction owns the fence.
+      if (
+        compactLease?.operation === "compaction" &&
+        options?.stockPreparationConcurrency !== undefined
+      )
+        return false;
       if (
         compactLease?.operation === "reachability-gc" &&
         !(gc?.coordination && gc.snapshot?.token === compactLease.token)
@@ -173,6 +203,14 @@ export async function beginReceiveLease(
     // transaction failure must not create indefinite foreground exclusion.
     acquired = await acquire();
   }
+  if (typeof acquired === "object") {
+    logger?.debug("receive:admission-busy", {
+      reason: acquired.reason,
+      activeCount: acquired.activeCount,
+      preparationLimit: acquired.limit,
+    });
+    return { ok: false, retryAfter: LEASE_RETRY_AFTER_SECONDS };
+  }
   if (!acquired) return { ok: false, retryAfter: LEASE_RETRY_AFTER_SECONDS };
 
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
@@ -190,6 +228,8 @@ export async function beginReceiveLease(
     packsetVersion: (await store.get("packsetVersion")) || 0,
     nextPackSeq: (await store.get("nextPackSeq")) || 1,
     activeCatalog,
+    concurrentStockPreparation:
+      (await listActiveNativeReceiveOperations(store)).length > 0 || undefined,
   };
 }
 

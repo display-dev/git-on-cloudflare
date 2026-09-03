@@ -28,6 +28,7 @@ import {
   LEASE_RETRY_AFTER_SECONDS,
 } from "../shared";
 import { activeLeaseOrUndefined } from "../activity";
+import { listActiveStockReceiveOperations } from "../../nativeReceiveActivity";
 import {
   selectCompactionPlan,
   catalogNeedsCompaction,
@@ -113,6 +114,9 @@ export async function beginCompactionState(args: {
     if (gcOwnsMaintenance(await transaction.get<GcOperation>(GC_OPERATION_KEY)))
       return "compact-active";
     if (activeLeaseOrUndefined(await transactionStore.get("receiveLease"), now)) {
+      return "receive-active";
+    }
+    if ((await listActiveStockReceiveOperations(transactionStore)).length > 0) {
       return "receive-active";
     }
     if (activeLeaseOrUndefined(await transactionStore.get("compactLease"), now)) {
@@ -216,6 +220,14 @@ export async function commitCompactionState(args: {
       status: "retry",
       reason: "receive-active",
       message: "A receive lease became active before compaction could commit.",
+    };
+  }
+  if ((await listActiveStockReceiveOperations(store)).length > 0) {
+    await store.delete("compactLease");
+    return {
+      status: "retry",
+      reason: "receive-active",
+      message: "Stock receive preparation became active before compaction could commit.",
     };
   }
 

@@ -121,7 +121,11 @@ Write changes against the current source tree, not the docs alone. Some document
 - The repo Durable Object is the source of truth for a single repository. Keep refs/HEAD authority there.
 - SQLite access for repo metadata must go through `src/worker/do/repo/db/dal.ts`. Do not add ad hoc raw Drizzle queries in unrelated files.
 - `RepoDurableObject.fetch()` intentionally exposes only a small HTTP surface. Keep typed RPC methods as the default internal interface.
-- Receive uses a lease model: one active receive lease at a time, acquired via `beginReceive()` and committed via `finalizeReceive()`. Concurrent pushes receive `503 Retry-After: 10`.
+- Receive uses a lease model. Generic receive/import work keeps one active
+  receive lease through finalization. Bounded stock receives use that lease as
+  a short staging lane, then enter the finite repository preparation pool;
+  RepoDO serializes exact-old ref/catalog publication. Saturation receives
+  `503 Retry-After: 10`.
 - Git fetch paths are streaming-sensitive. Avoid unnecessary buffering on upload-pack and pack assembly paths.
 - Git pushes require a D1-backed PAT with `level = "push"`; HTTP Basic username must match the route namespace slug.
 - UI rendering goes through `renderUiView()` and the view registry in `src/client/server/registry.tsx`. New pages should plug into that system rather than inventing a parallel renderer.

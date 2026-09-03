@@ -4,8 +4,13 @@ import { env, exports as workerExports } from "cloudflare:workers";
 
 import { asBufferSource, bytesToHex, createLogger, getRepoStub } from "@/worker/common";
 import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
+import { __test as stockAuthorityTest } from "@/worker/do/repo/stockReceiveAuthority";
 import { __test as stockContainerHostTest } from "@/worker/do/stockReceiveContainerHost";
-import { nativeReceiveOperationKey } from "@/worker/do/repo/repoState";
+import {
+  asTypedStorage,
+  nativeReceiveOperationKey,
+  type RepoStateSchema,
+} from "@/worker/do/repo/repoState";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
 import { encodeGitObject } from "@/worker/git/core/objects";
 import { SubrequestLimiter } from "@/worker/git/operations/limits";
@@ -16,8 +21,11 @@ import {
   cleanupStockReceiveWorkerDataPlane,
 } from "@/worker/git/nativeReceive/stockDataPlane";
 import type {
+  AdmitStockReceiveResult,
+  NativeReceiveAuthorityPublication,
   NativeReceiveOperation,
   NativeReceiveOperationMetrics,
+  NativeReceivePrepared,
   NativeReceiveProcessResult,
 } from "@/worker/git/nativeReceive/types";
 import {
@@ -39,7 +47,7 @@ import {
 import { buildPack } from "./util/git-pack";
 import { buildTreePayload, readRepoCatalogState, seedPackedRepoState } from "./util/packed-repo";
 import { setupRepoForTests } from "./util/repoSeed";
-import { runDOWithRetry, toRequestBody, uniqueRepoId } from "./util/test-helpers";
+import { runDOWithRetry, toRequestBody, uniqueRepoId, withEnvOverrides } from "./util/test-helpers";
 import { createQueueSendResponse, runQueueMessage } from "./util/queue";
 
 const stockTrace = [
@@ -90,14 +98,582 @@ function emptyPlannerFailureMetrics(activePackCount: number): NativeReceiveOpera
   };
 }
 
+function syntheticRefOnlyPrepared(operation: NativeReceiveOperation): NativeReceivePrepared {
+  const planSha256 = "e".repeat(64);
+  return {
+    operationId: operation.id,
+    fingerprint: operation.fingerprint,
+    processorResult: {
+      operationId: operation.id,
+      resultKind: "ref-only",
+      packBytes: 0,
+      idxBytes: 0,
+      refsBytes: 0,
+      objectCount: 0,
+      inputPackObjectCount: 0,
+      packSha1: "",
+      elapsedMs: 1,
+      scratchBytes: 2,
+      hydratedBytes: 0,
+      downloadedBytes: 2,
+      cacheHitBytes: 0,
+      inputRequestSha256: operation.stockReceive!.inputRequestSha256,
+      stockTrace: stockTrace.map((event, index) => ({ sequence: index + 1, event })),
+      metadataBytes: 1,
+      metadataRequests: 1,
+      inputBytesRead: 1,
+      inputRequests: 1,
+      rangeBytes: 0,
+      rangeRequests: 0,
+      packsTouched: 0,
+      quarantinePathInsideOwnedWorkRoot: true,
+      quarantineRemovedAfterReceive: true,
+      quarantinePathNonEmpty: true,
+      freshWorkDirectory: true,
+      repositoryPackBytesBeforeHydration: 0,
+      sharedObjectCacheDisabled: true,
+      skipConnectivityCheck: false,
+      planSha256,
+      closureProof: {
+        planSha256,
+        incomingOids: [],
+        semanticExternalOids: [],
+        visitedIncomingObjectCount: 0,
+        logicalEdgeCount: 0,
+        internalEdgeCount: 0,
+        externalEdgeCount: 0,
+        missingObjectCount: 0,
+        objectTypeCounts: { commit: 0, tree: 0, blob: 0, tag: 0 },
+      },
+      semanticExternalOids: [],
+      thinDeltaBaseOids: [],
+      requiredRootOids: [],
+      prerequisiteObjectOids: [],
+      physicalNodes: [],
+      physicalDependencies: [],
+      topologicalEntryIds: [],
+      selectedPackChecksums: [],
+      activePackBindings: [],
+      ranges: [],
+      activePackReads: [],
+      activePackTrailerBytes: 0,
+      activePackTrailerRequests: 0,
+      activePackRangeBytes: 0,
+      activePackRangeRequests: 0,
+      activePackWholeBytes: 0,
+      activePackWholeRequests: 0,
+      activePackUnattributedBytes: 0,
+      activePackUnattributedRequests: 0,
+      closureManifestKey: `${operation.id}-closure`,
+      closureManifestBytes: 1,
+      closureManifestSha256: planSha256,
+      closureManifestEtag: `${operation.id}-closure-etag`,
+      prerequisitePackKey: `${operation.id}-prerequisite`,
+      prerequisitePackBytes: 1,
+      prerequisitePackSha256: "f".repeat(64),
+      prerequisitePackEtag: `${operation.id}-prerequisite-etag`,
+      incomingObjectCount: 0,
+      visitedIncomingObjectCount: 0,
+      logicalEdgeCount: 0,
+      internalEdgeCount: 0,
+      externalEdgeCount: 0,
+      missingObjectCount: 0,
+      objectTypeCounts: { commit: 0, tree: 0, blob: 0, tag: 0 },
+      selectedPackBytes: 0,
+      activePackCount: 0,
+      outputValidationBytes: 0,
+      outputValidationRequests: 0,
+      outputBytesWritten: 0,
+      outputRequests: 0,
+    },
+  };
+}
+
 afterEach(() => {
   stockDataPlaneTest.reset();
   receiveCatalogTest.reset();
   stockPlannerTest.reset();
   nativePipelineTest.reset();
+  stockAuthorityTest.reset();
 });
 
 describe("stock Smart HTTP receive spike", () => {
+  it("bounds parallel stock preparation while maintenance and deletion remain fenced", async () => {
+    const repo = uniqueRepoId("stock-parallel-admission");
+    const seeded = await setupRepoForTests(env, "o", repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const active = await runDOWithRetry(
+      () => stub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+
+    await withEnvOverrides(env, { STOCK_RECEIVE_PREPARATION_CONCURRENCY: "2" }, async () => {
+      const admitted: Array<Extract<AdmitStockReceiveResult, { status: "admitted" }>> = [];
+      for (let index = 0; index < 2; index++) {
+        const begin = await stub.beginReceive({ stockPreparation: true });
+        if (!begin.ok) throw new Error("expected bounded stock staging lease");
+        expect(begin.concurrentStockPreparation).toBe(index === 0 ? undefined : true);
+        const operationId = `parallel-stock-${index}`;
+        const fingerprint = String(index + 1).repeat(64);
+        const outputPackKey = nativeReceiveOutputPackKey(
+          doPrefix(stub.id.toString()),
+          operationId,
+          fingerprint
+        );
+        const newOid = String(index + 2).repeat(40);
+        const admission = await stub.admitStockReceive({
+          id: operationId,
+          fingerprint,
+          leaseToken: begin.lease.token,
+          repositoryId: seeded.doName,
+          state: "staged",
+          inputPackKey: nativeReceiveInputRequestKey(
+            doPrefix(stub.id.toString()),
+            begin.lease.token
+          ),
+          inputBytes: 64,
+          inputEtag: `input-${index}`,
+          stockReceive: {
+            inputRequestSha256: String(index + 3).repeat(64),
+            packOffset: 16,
+            packBytes: 48,
+            advertisedRefs: [{ name: "refs/heads/main", oid: active.commitOid }],
+          },
+          outputPackKey,
+          outputIdxKey: packIndexKey(outputPackKey),
+          outputRefsKey: packRefsKey(outputPackKey),
+          commands: [
+            {
+              oldOid: "0".repeat(40),
+              newOid,
+              ref: `refs/heads/parallel-${index}`,
+            },
+          ],
+          acceptedWrites: [
+            {
+              repositoryId: seeded.doName,
+              ref: `refs/heads/parallel-${index}`,
+              beforeSha: "0".repeat(40),
+              afterSha: newOid,
+              actor: "stock-parallel-test",
+              sourceSurface: "git-push",
+              idempotencyKey: null,
+            },
+          ],
+          activeCatalog: begin.activeCatalog,
+          catalogGeneration: begin.packsetVersion,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          attempts: 0,
+          cleanupPending: false,
+        });
+        if (admission.status !== "admitted") {
+          throw new Error(`unexpected stock admission ${admission.status}`);
+        }
+        admitted.push(admission);
+      }
+
+      expect(await stub.getRepoActivity()).toMatchObject({ state: "receiving" });
+      expect(await stub.beginReceive({ stockPreparation: true })).toMatchObject({ ok: false });
+      expect(await stub.beginReceive()).toMatchObject({ ok: false });
+      expect(await stub.beginReachabilityGc()).toMatchObject({
+        ok: false,
+        reason: "receive-active",
+      });
+
+      let releasePublication: (() => void) | undefined;
+      let publicationLeaseHeld: (() => void) | undefined;
+      const publicationHeld = new Promise<void>((resolve) => {
+        publicationLeaseHeld = resolve;
+      });
+      const publicationRelease = new Promise<void>((resolve) => {
+        releasePublication = resolve;
+      });
+      stockAuthorityTest.afterPublicationLeaseOnce(async () => {
+        publicationLeaseHeld?.();
+        await publicationRelease;
+      });
+      await runDOWithRetry(
+        () => stub,
+        async (instance) => {
+          const firstFinalize = instance.finalizeStockReceive(admitted[0]!.executionToken);
+          await publicationHeld;
+          expect(await instance.finalizeStockReceive(admitted[1]!.executionToken)).toEqual({
+            status: "busy",
+            retryAfter: 10,
+          });
+          releasePublication?.();
+          expect(await firstFinalize).toMatchObject({
+            status: "rejected",
+            code: "prepared-output-invalid",
+          });
+        }
+      );
+
+      for (const admission of admitted) {
+        expect(
+          await stub.rejectStockReceiveExecution(admission.executionToken, "finalize-rejected")
+        ).toMatchObject({ status: "failed" });
+      }
+      expect(await stub.getRepoActivity()).toBeNull();
+      expect(await stub.beginRepositoryDeletion()).toMatchObject({ ready: false });
+      for (const [index, admission] of admitted.entries()) {
+        expect(
+          await stub.completeStockReceiveCleanup(
+            `parallel-stock-${index}`,
+            admission.operation.fingerprint
+          )
+        ).toMatchObject({ status: "complete" });
+      }
+      expect(await stub.beginRepositoryDeletion()).toMatchObject({ ready: true });
+    });
+  });
+
+  it("recovers ready publication before processing expiry and eventually drains orphaned deletion", async () => {
+    const repo = uniqueRepoId("stock-parallel-recovery-order");
+    const seeded = await setupRepoForTests(env, "o", repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const now = Date.now();
+    const operation = (id: string, state: "processing" | "ready"): NativeReceiveOperation => ({
+      id,
+      fingerprint: (state === "ready" ? "a" : "b").repeat(64),
+      leaseToken: `${id}-lease`,
+      repositoryId: seeded.doName,
+      state,
+      inputPackKey: `${id}-input`,
+      inputBytes: 1,
+      inputEtag: `${id}-input-etag`,
+      stockReceive: {
+        inputRequestSha256: (state === "ready" ? "c" : "d").repeat(64),
+        packOffset: 1,
+        packBytes: 1,
+        advertisedRefs: [],
+      },
+      outputPackKey: `${id}-output.pack`,
+      outputIdxKey: `${id}-output.idx`,
+      outputRefsKey: `${id}-output.refs`,
+      commands: [
+        {
+          oldOid: "0".repeat(40),
+          newOid: (state === "ready" ? "1" : "2").repeat(40),
+          ref: `refs/heads/${id}`,
+        },
+      ],
+      acceptedWrites: [],
+      activeCatalog: [],
+      catalogGeneration: 0,
+      createdAt: now,
+      updatedAt: now,
+      attempts: 1,
+      cleanupPending: false,
+      claimId: `${id}-claim`,
+      claimExpiresAt: now + 15 * 60_000,
+    });
+    const processing = operation("processing", "processing");
+    const ready = operation("ready", "ready");
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const store = asTypedStorage<RepoStateSchema>(state.storage);
+        await store.put(nativeReceiveOperationKey(processing.id), processing);
+        await store.put(nativeReceiveOperationKey(ready.id), ready);
+        // Put processing first to prove alarm recovery does not depend on the
+        // operation-index order when a ready WAL needs immediate attention.
+        await store.put("nativeReceiveOperationIndex", [processing.id, ready.id]);
+        await state.storage.setAlarm(now);
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const store = asTypedStorage<RepoStateSchema>(state.storage);
+        expect((await store.get(nativeReceiveOperationKey(ready.id)))?.state).toBe("aborted");
+        expect((await store.get(nativeReceiveOperationKey(processing.id)))?.state).toBe(
+          "processing"
+        );
+        const expiredAt = Date.now() - 21 * 60_000;
+        for (const id of [processing.id, ready.id]) {
+          const current = await store.get(nativeReceiveOperationKey(id));
+          if (!current) throw new Error("expected synthetic stock operation");
+          await store.put(nativeReceiveOperationKey(id), {
+            ...current,
+            updatedAt: expiredAt,
+            claimExpiresAt: expiredAt,
+          });
+        }
+      }
+    );
+
+    expect(await stub.beginRepositoryDeletion()).toMatchObject({ ready: false });
+    expect(await stub.beginRepositoryDeletion()).toMatchObject({ ready: true });
+  });
+
+  it("enters two independent immutable stock preparations before either completes", async () => {
+    const repo = uniqueRepoId("stock-parallel-worker");
+    const seeded = await setupRepoForTests(env, "o", repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const active = await runDOWithRetry(
+      () => stub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    const author = "Display <display@example.invalid> 0 +0000";
+    const commitPayload = new TextEncoder().encode(
+      `tree ${active.treeOid}\nparent ${active.commitOid}\nauthor ${author}\ncommitter ${author}\n\nparallel\n`
+    );
+    const commit = await encodeGitObject("commit", commitPayload);
+    const pack = await buildPack([{ type: "commit", payload: commitPayload }]);
+    let activePreparations = 0;
+    let maximumPreparations = 0;
+    let releaseBoth: (() => void) | undefined;
+    const bothEntered = new Promise<void>((resolve) => {
+      releaseBoth = resolve;
+    });
+    stockDataPlaneTest.setWorkerExecutor(async () => {
+      activePreparations++;
+      maximumPreparations = Math.max(maximumPreparations, activePreparations);
+      if (activePreparations === 2) releaseBoth?.();
+      await Promise.race([
+        bothEntered,
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("parallel preparation did not overlap")), 2_000)
+        ),
+      ]);
+      activePreparations--;
+      throw new Error("stock-data-plane:container-transient");
+    });
+
+    const push = async (index: number) => {
+      const prefix = concatChunks([
+        pktLine(
+          `${"0".repeat(40)} ${commit.oid} refs/heads/parallel-${index}\0 report-status agent=git/2.50.1\n`
+        ),
+        flushPkt(),
+      ]);
+      const body = concatChunks([prefix, pack]);
+      return await handleStreamingReceivePackPOST(
+        { ...env, NATIVE_RECEIVE_CONTAINER: "1", STOCK_RECEIVE_PREPARATION_CONCURRENCY: "2" },
+        seeded.doName,
+        new Request(`https://example.invalid/o/${repo}/git-receive-pack`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-git-receive-pack-request",
+            "Content-Length": String(body.byteLength),
+            "X-Display-Operation-ID": `parallel-worker-${index}`,
+          },
+          body: toRequestBody(body),
+        }),
+        createExecutionContext(),
+        { limiter: new SubrequestLimiter(900) }
+      );
+    };
+
+    const responses = await Promise.all([push(0), push(1)]);
+    expect(maximumPreparations).toBe(2);
+    expect(responses.map((response) => response.status)).toEqual([503, 503]);
+    expect(await stub.getRepoActivity()).toBeNull();
+    expect(await stub.beginReceive({ stockPreparation: true })).toMatchObject({ ok: true });
+  });
+
+  it("serializes concurrent publication into stale same-base and durable independent outcomes", async () => {
+    const runScenario = async (sameRef: boolean) => {
+      const repo = uniqueRepoId(sameRef ? "stock-same-base" : "stock-independent-refs");
+      const seeded = await setupRepoForTests(env, "o", repo);
+      const stub = getRepoStub(env, seeded.doName);
+      const targetOid = "7".repeat(40);
+      await stub.setRefs([{ name: "refs/heads/main", oid: targetOid }]);
+
+      const admissions: Array<Extract<AdmitStockReceiveResult, { status: "admitted" }>> = [];
+      for (let index = 0; index < 2; index++) {
+        const begin = await stub.beginReceive({ stockPreparation: true });
+        if (!begin.ok) throw new Error("expected stock publication admission");
+        const id = `${sameRef ? "same" : "independent"}-${index}`;
+        const fingerprint = String(index + 8).repeat(64);
+        const ref = sameRef ? "refs/heads/contended" : `refs/heads/independent-${index}`;
+        const outputPackKey = nativeReceiveOutputPackKey(
+          doPrefix(stub.id.toString()),
+          id,
+          fingerprint
+        );
+        const admitted = await stub.admitStockReceive({
+          id,
+          fingerprint,
+          leaseToken: begin.lease.token,
+          repositoryId: seeded.doName,
+          state: "staged",
+          inputPackKey: `${id}-input`,
+          inputBytes: 1,
+          inputEtag: `${id}-input-etag`,
+          stockReceive: {
+            inputRequestSha256: String(index + 10).repeat(64),
+            packOffset: 1,
+            packBytes: 1,
+            advertisedRefs: begin.refs,
+          },
+          outputPackKey,
+          outputIdxKey: packIndexKey(outputPackKey),
+          outputRefsKey: packRefsKey(outputPackKey),
+          commands: [{ oldOid: "0".repeat(40), newOid: targetOid, ref }],
+          acceptedWrites: [
+            {
+              repositoryId: seeded.doName,
+              ref,
+              beforeSha: "0".repeat(40),
+              afterSha: targetOid,
+              actor: "stock-publication-test",
+              sourceSurface: "git-push",
+              idempotencyKey: null,
+            },
+          ],
+          activeCatalog: begin.activeCatalog,
+          catalogGeneration: begin.packsetVersion,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          attempts: 0,
+          cleanupPending: false,
+        });
+        if (admitted.status !== "admitted") {
+          throw new Error(`unexpected stock publication admission ${admitted.status}`);
+        }
+        expect(
+          await validateStockReceivePreparedProof(
+            admitted.operation,
+            syntheticRefOnlyPrepared(admitted.operation).processorResult
+          )
+        ).toBe(true);
+        admissions.push(admitted);
+      }
+
+      const finalize = async (admission: (typeof admissions)[number]) => {
+        for (let attempt = 0; attempt < 20; attempt++) {
+          const result = await stub.finalizeStockReceive(
+            admission.executionToken,
+            syntheticRefOnlyPrepared(admission.operation)
+          );
+          if (result.status !== "busy") return result;
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        throw new Error("publication lease did not drain");
+      };
+      if (sameRef) {
+        await runDOWithRetry(
+          () => stub,
+          async (_instance, state) => {
+            const store = asTypedStorage<RepoStateSchema>(state.storage);
+            const leaseNow = Date.now();
+            await store.put("stockReceivePublicationLease", {
+              token: "lost-publication-owner",
+              operation: "receive",
+              createdAt: leaseNow,
+              expiresAt: leaseNow + 30_000,
+            });
+          }
+        );
+        expect(
+          await stub.finalizeStockReceive(
+            admissions[0]!.executionToken,
+            syntheticRefOnlyPrepared(admissions[0]!.operation)
+          )
+        ).toEqual({ status: "busy", retryAfter: 10 });
+        expect(await stub.getNativeReceiveOperation(admissions[0]!.operation.id)).toMatchObject({
+          state: "ready",
+          metrics: expect.any(Object),
+        });
+        const recovery = await stub.beginStockReceiveRecovery(admissions[0]!.operation.id);
+        expect(recovery.status).toBe("recovery");
+        if (recovery.status !== "recovery") throw new Error("expected retained-proof recovery");
+        expect(
+          await stub.admitStockReceive({
+            ...admissions[0]!.operation,
+            leaseToken: recovery.begin.lease.token,
+          })
+        ).toEqual({
+          status: "finalize_pending",
+          executionToken: admissions[0]!.executionToken,
+        });
+        expect(
+          await stub.completeStockReceiveRecovery(
+            admissions[0]!.operation.id,
+            recovery.begin.lease.token
+          )
+        ).toBe(true);
+        expect(
+          await stub.finalizeStockReceive(
+            admissions[1]!.executionToken,
+            syntheticRefOnlyPrepared(admissions[1]!.operation)
+          )
+        ).toEqual({ status: "busy", retryAfter: 10 });
+        await runDOWithRetry(
+          () => stub,
+          async (_instance, state) => {
+            const store = asTypedStorage<RepoStateSchema>(state.storage);
+            const leaseNow = Date.now();
+            await store.put("receiveLease", {
+              token: admissions[1]!.operation.leaseToken,
+              operation: "receive",
+              createdAt: leaseNow,
+              expiresAt: leaseNow + 30 * 60_000,
+            });
+            await store.put("stockReceivePublicationLease", {
+              token: admissions[1]!.executionToken,
+              operation: "receive",
+              createdAt: leaseNow - 30_001,
+              expiresAt: leaseNow - 1,
+            });
+            await state.storage.setAlarm(leaseNow);
+          }
+        );
+        await runDurableObjectAlarm(stub);
+        expect(await stub.getNativeReceiveOperation(admissions[0]!.operation.id)).toMatchObject({
+          state: "ready",
+        });
+        expect(await stub.getNativeReceiveOperation(admissions[1]!.operation.id)).toMatchObject({
+          state: "finalizing",
+        });
+      }
+      const results = await Promise.all(admissions.map(finalize));
+      const pending = results.filter(
+        (result): result is Extract<typeof result, { status: "publication_pending" }> =>
+          result.status === "publication_pending"
+      );
+      for (const result of pending) {
+        const proof: NativeReceiveAuthorityPublication = {
+          refs: result.publication.refs.map((ref) => ({ ...ref, etag: "test-ref-etag" })),
+          receipt: { ...result.publication.receipt, etag: "test-receipt-etag" },
+        };
+        expect(
+          await stub.confirmStockReceivePublication(result.publicationToken, proof)
+        ).toMatchObject({ status: "committed" });
+      }
+
+      const refs = await stub.listRefs();
+      if (sameRef) {
+        expect(results.map((result) => result.status).sort()).toEqual([
+          "publication_pending",
+          "ref_conflict",
+        ]);
+        expect(refs.filter((ref) => ref.name === "refs/heads/contended")).toEqual([
+          { name: "refs/heads/contended", oid: targetOid },
+        ]);
+      } else {
+        expect(results.map((result) => result.status)).toEqual([
+          "publication_pending",
+          "publication_pending",
+        ]);
+        expect(refs).toEqual(
+          expect.arrayContaining([
+            { name: "refs/heads/independent-0", oid: targetOid },
+            { name: "refs/heads/independent-1", oid: targetOid },
+          ])
+        );
+      }
+    };
+
+    await runScenario(true);
+    await runScenario(false);
+  });
+
   it("preserves explicit selective receive length rejection semantics", async () => {
     const seeded = await setupRepoForTests(env, "o", uniqueRepoId("stock-length"));
     const request = async (contentLength: string) =>

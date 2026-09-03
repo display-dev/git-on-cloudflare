@@ -10,6 +10,9 @@ LOG_LEVEL=debug
 # Enable Repository Durable Object-owned native Git receive processing.
 NATIVE_RECEIVE_CONTAINER=0
 
+# Maximum simultaneous immutable stock-receive preparations per repository.
+STOCK_RECEIVE_PREPARATION_CONCURRENCY=4
+
 # Local goc browser session cookie sealing secret. Generate a real value with
 # `openssl rand -hex 32`, then set production with
 # `wrangler secret put SESSION_SECRET`; never commit a real production value.

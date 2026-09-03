@@ -5,7 +5,7 @@ This document describes the primary data flows of the server: pushing (receive-p
 ## Push (git-receive-pack)
 
 1. Client sends `POST /:owner/:repo/git-receive-pack`
-2. Worker acquires a receive lease via `beginReceive()` RPC. If a lease is already active, returns `503 Retry-After: 10`.
+2. Worker acquires a staging lease via `beginReceive()` RPC. Generic receive is immediately exclusive. A bounded stock candidate waits finitely for the staging lane, then may join the configured per-repository preparation pool; saturation returns `503 Retry-After: 10`.
 3. Worker parses pkt-line commands and the packfile payload from the request body.
 4. The bounded stock path selectively hydrates the authenticated prerequisite
    closure and native Git completes `receive-pack` and hook validation.

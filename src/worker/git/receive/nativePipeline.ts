@@ -14,6 +14,7 @@ import type {
   NativeReceiveCleanupDescriptor,
   NativeReceiveOperation,
   NativeReceiveOperationView,
+  NativeReceivePrepared,
   RejectStockReceiveExecutionResult,
 } from "@/worker/git/nativeReceive/types";
 import type { Limiter } from "@/worker/git/operations/limits";
@@ -242,6 +243,25 @@ async function acknowledgeStockOperation(args: {
   return resultFromOperation(args.operation, args.pipeline.commands);
 }
 
+async function finalizeStockReceiveWithBoundedWait(args: {
+  pipeline: ExecuteNativeReceivePipelineArgs;
+  executionToken: string;
+  prepared?: NativeReceivePrepared | undefined;
+}): Promise<Exclude<FinalizeStockReceiveResult, { status: "busy" }>> {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    args.pipeline.countSubrequest("do:finalize-stock-receive");
+    const finalized = await args.pipeline.limiter.run<FinalizeStockReceiveResult>(
+      "do:finalize-stock-receive",
+      async () => await args.pipeline.stub.finalizeStockReceive(args.executionToken, args.prepared)
+    );
+    if (finalized.status !== "busy") return finalized;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new NativeReceiveIndeterminateError(
+    "Stock receive preparation remains durable while publication capacity is busy."
+  );
+}
+
 async function executeConcreteStockReceiveSingleHop(args: {
   pipeline: ExecuteNativeReceivePipelineArgs;
   operation: NativeReceiveOperation;
@@ -306,13 +326,12 @@ async function executeConcreteStockReceiveSingleHop(args: {
     authorityCleanup = admission.cleanup;
   } else {
     const executionToken = admission.executionToken;
-    let finalized: FinalizeStockReceiveResult;
+    let finalized: Exclude<FinalizeStockReceiveResult, { status: "busy" }>;
     if (admission.status === "finalize_pending") {
-      args.pipeline.countSubrequest("do:resume-stock-receive-finalize");
-      finalized = await args.pipeline.limiter.run<FinalizeStockReceiveResult>(
-        "do:resume-stock-receive-finalize",
-        async () => await args.pipeline.stub.finalizeStockReceive(admission.executionToken)
-      );
+      finalized = await finalizeStockReceiveWithBoundedWait({
+        pipeline: args.pipeline,
+        executionToken: admission.executionToken,
+      });
     } else {
       let prepared;
       try {
@@ -366,12 +385,11 @@ async function executeConcreteStockReceiveSingleHop(args: {
       ) {
         throw new Error("stock-receive:prepared-proof-limit");
       }
-      args.pipeline.countSubrequest("do:finalize-stock-receive");
-      finalized = await args.pipeline.limiter.run<FinalizeStockReceiveResult>(
-        "do:finalize-stock-receive",
-        async () =>
-          await args.pipeline.stub.finalizeStockReceive(admission.executionToken, prepared)
-      );
+      finalized = await finalizeStockReceiveWithBoundedWait({
+        pipeline: args.pipeline,
+        executionToken: admission.executionToken,
+        prepared,
+      });
     }
     if (finalized.status === "ref_conflict") {
       await cleanupCurrentStockRetry({

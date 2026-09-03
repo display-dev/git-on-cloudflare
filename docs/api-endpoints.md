@@ -71,8 +71,10 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
   RepoDO remains the sole authority in both cases. It performs exact-old-ref
   validation, records the accepted-write fact and conclusive receipt, and
   changes the pack catalog only for artifact-producing receives before the
-  Worker acknowledges the client. One active receive lease is allowed per
-  repository; concurrent pushes receive `503 Retry-After: 10`.
+  Worker acknowledges the client. Bounded stock receives use the repository's
+  finite parallel preparation pool; RepoDO still serializes exact-old
+  publication. A saturated preparation or staging lane receives
+  `503 Retry-After: 10`.
   Requires HTTP Basic credentials where the username matches `:owner` and the
   password is a PAT with `level: "push"`.
 

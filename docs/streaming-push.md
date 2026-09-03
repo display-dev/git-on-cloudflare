@@ -15,7 +15,7 @@ The design is intentionally conservative about complexity:
 - No exact `pack_objects(pack_key, oid)` correctness dependency.
 - No correctness dependency on DO `obj:*` or R2 loose mirrors.
 - No new distributed transaction.
-- No new tunable env vars beyond a single Queue binding.
+- Only bounded operational tuning: the Queue binding and the finite stock-receive preparation limit.
 - No object-level garbage collection in the current design.
 
 ## Why This Exists
@@ -48,7 +48,10 @@ These are intentional, not omissions:
 
 1. The design does not implement full Git garbage collection of unreachable objects. Compaction preserves the union of source-pack objects. This matches current retention behavior more closely and avoids a repo-wide mark phase.
 2. The fetch/read path loads whole `.idx` files into memory when needed. This is acceptable because the representative `.idx` is about 3 MB while the representative `.pack` is about 42 MB. The constraint is “do not buffer the pack”, not “never buffer an idx”.
-3. Push concurrency is simplified to one active receive lease per repo. The current one-active plus one-queued unpack model is removed because unpacking is removed. Returning `503 Retry-After: 10` to concurrent pushes is Git-compatible and materially simpler.
+3. Generic streaming receive remains one active lease per repo. Bounded stock
+   receives use the lease only for staging/admission, then prepare immutable
+   outputs in a finite repository pool before serialized RepoDO publication.
+   Saturation returns `503 Retry-After: 10`.
 4. UI raw/blob reads may buffer an individual packed object when it is delta-resolved and not already present in the optional loose cache. This is acceptable because the streaming-first requirement is about pack ingress/egress paths, not ad hoc UI reads; the UI already enforces size caps.
 5. Bloom filters are not introduced initially. Active pack count is bounded by compaction, and the `.idx` fanout table already gives an exact, compact lookup structure.
 
@@ -255,13 +258,15 @@ Unchanged:
 
 Changed internally:
 
-- concurrent push handling becomes “one active receive lease per repo”; additional pushes get `503 Retry-After: 10`.
+- generic push handling remains one active receive lease per repo; bounded
+  stock pushes enter a finite preparation pool and receive
+  `503 Retry-After: 10` only when staging or pool capacity is unavailable.
 - `X-Repo-Changed` and `X-Repo-Empty` are computed in the Worker after DO finalization, not forwarded from a DO HTTP endpoint.
 
 ### Step-by-step algorithm
 
-1. Worker calls `stub.beginReceive()` before reading the body.
-2. If a valid receive lease already exists, the Worker immediately returns `503 Retry-After: 10`.
+1. Worker calls `stub.beginReceive()` before reading the body, identifying a bounded stock candidate when request metadata permits that path.
+2. Generic receive remains immediately exclusive. A bounded stock candidate retries the short staging lane for a finite interval and may join the configured preparation pool; saturation returns `503 Retry-After: 10`.
 3. If the lease is granted, the Worker incrementally parses the pkt-line command section from `request.body` until the flush packet.
 4. The remaining bytes are treated as the raw pack stream.
 5. The Worker writes the raw pack stream directly to a staged R2 key such as `do/<id>/objects/pack/pack-rx-<leaseToken>.pack`.
@@ -272,7 +277,7 @@ Changed internally:
    - byte count matches the actual received length
 7. After the R2 upload resolves, the Worker runs the new indexer against the staged pack in R2 and writes `pack-rx-<leaseToken>.idx`.
 8. The Worker runs thin-pack base validation and ref-target connectivity validation using the new pack-first object store and the active pack catalog snapshot.
-9. The Worker calls `stub.finalizeReceive(...)`.
+9. Generic receive calls `stub.finalizeReceive(...)` while retaining its lease. A stock receive durably admits immutable preparation, releases the staging lease, retains validated prepared proof, and enters the short serialized RepoDO publication lane.
 10. The DO atomically:
     - rechecks the lease token;
     - rechecks `old-oid` expectations against current refs;
@@ -579,7 +584,7 @@ Recommended Queue config:
 - `max_batch_timeout = 1`
 - default retries are acceptable
 
-No new env vars are required.
+No additional compaction env vars are required; the stock preparation limit is configured separately.
 
 The DO alarm remains in use, but only for lightweight metadata work:
 
@@ -600,8 +605,8 @@ Policy:
 2. if more than four active packs exist in a tier, compact the oldest four in that tier;
 3. output one pack in the next tier;
 4. source packs become `superseded` only after DO commit.
-5. no compaction lease may be granted while a receive lease is active for the same repo.
-6. receive has priority over compaction; if a receive lease becomes active after compaction starts, `commitCompaction()` must fail and the queue worker must retry later.
+5. no compaction lease may be granted while a receive lease or nonterminal stock preparation is active for the same repo.
+6. generic receive retains priority over compaction; if it becomes active after compaction starts, `commitCompaction()` must fail and the queue worker must retry later. Bounded stock admission is refused while compaction owns its lease, and commit also retries if already-admitted stock work is observed.
 
 ### Compaction algorithm
 
@@ -881,7 +886,9 @@ Automated tests must not assume `uncommitted-fixture/` is committed.
 ### New or rewritten worker tests
 
 1. Receive path streams without `request.arrayBuffer()`.
-2. Single active receive lease returns `503` to concurrent pushes.
+2. Generic receive remains single-lease; bounded stock receive proves finite
+   parallel preparation, serialized exact-old publication, and `503`
+   backpressure at pool saturation.
 3. Thin-pack base resolution uses existing packed objects, not loose objects.
 4. Fetch works after deleting all DO `obj:*`.
 5. Fetch works after deleting all R2 loose mirrors.

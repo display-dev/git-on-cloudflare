@@ -1,5 +1,6 @@
 import { asTypedStorage } from "../repoState";
 import type { RepoLease, RepoStateSchema } from "../repoState";
+import { listActiveStockReceiveOperations } from "../nativeReceiveActivity";
 
 export type RepoActivitySnapshot =
   | { state: "idle"; compactionWantedAt?: number }
@@ -23,6 +24,20 @@ export async function getRepoActivitySnapshot(
   const receiveLease = activeLeaseOrUndefined(await store.get("receiveLease"), now);
   if (receiveLease) {
     return { state: "receiving", lease: receiveLease };
+  }
+
+  const activeNative = await listActiveStockReceiveOperations(store);
+  const oldestNative = activeNative.sort((a, b) => a.createdAt - b.createdAt)[0];
+  if (oldestNative) {
+    return {
+      state: "receiving",
+      lease: {
+        token: oldestNative.leaseToken,
+        operation: "receive",
+        createdAt: oldestNative.createdAt,
+        expiresAt: oldestNative.claimExpiresAt ?? oldestNative.updatedAt,
+      },
+    };
   }
 
   const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), now);

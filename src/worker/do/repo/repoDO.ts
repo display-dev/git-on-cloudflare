@@ -367,8 +367,14 @@ export class RepoDurableObject extends DurableObject {
     return await beginQualificationStorageRecovery(this.ctx, expectedRefStateDigest);
   }
 
-  public async beginReceive() {
-    return await beginReceiveLease(this.ctx, this.logger);
+  public async beginReceive(options?: { stockPreparation?: boolean | undefined }) {
+    const configured = Number(this.env.STOCK_RECEIVE_PREPARATION_CONCURRENCY ?? "4");
+    const stockPreparationConcurrency = options?.stockPreparation
+      ? Number.isSafeInteger(configured)
+        ? Math.min(8, Math.max(1, configured))
+        : 4
+      : undefined;
+    return await beginReceiveLease(this.ctx, this.logger, { stockPreparationConcurrency });
   }
 
   public async beginStockReceiveRecovery(operationId: string) {

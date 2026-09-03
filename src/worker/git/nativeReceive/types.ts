@@ -239,6 +239,7 @@ export type AdmitStockReceiveResult =
     };
 
 export type FinalizeStockReceiveResult =
+  | { status: "busy"; retryAfter: number }
   | {
       status: "publication_pending";
       publicationToken: string;

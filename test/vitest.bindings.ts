@@ -6,6 +6,7 @@ export const BASE_TEST_BINDINGS = {
   // Repo DO idle cleanup threshold (minutes)
   REPO_DO_IDLE_MINUTES: "30",
   STOCK_RECEIVE_CONTAINER_IDLE_SECONDS: "120",
+  STOCK_RECEIVE_PREPARATION_CONCURRENCY: "4",
 
   // Logging level lowered for tests to reduce noise
   LOG_LEVEL: "warn",

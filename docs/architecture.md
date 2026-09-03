@@ -81,8 +81,13 @@ The codebase is organized into focused modules with `index.ts` export files:
   also return an explicit ref-only result after hook and closure validation when
   every target object is already authoritative. RepoDO then commits the exact-old
   ref transaction, accepted-write fact and receipt without inserting a catalog
-  row or fabricating an empty artifact triple. One active receive lease at a
-  time; concurrent pushes receive `503 Retry-After: 10`.
+  row or fabricating an empty artifact triple. A short exclusive staging lease
+  hands each bounded stock receive to a configurable 1–8 preparation pool
+  (default four). Immutable preparation may overlap, while RepoDO serializes
+  exact-old ref and catalog publication. Same-base contenders therefore have
+  one CAS winner and an explicit stale result; independent refs may both
+  publish. Pool or staging saturation returns bounded
+  `503 Retry-After: 10` backpressure.
 - `StockReceiveContainerHost` rechecks the low-level Container process state
   during port readiness, not only before it. A process that exits before any
   receive bytes are forwarded is restarted within the existing bounded

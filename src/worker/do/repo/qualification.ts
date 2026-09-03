@@ -26,6 +26,7 @@ const TRANSIENT_KEYS = [
   "nativeReceiveOperationIndex",
   "receiveOutcomeIndex",
   "stockReceiveRecoveryLease",
+  "stockReceivePublicationLease",
   "reachabilityGcPending",
   "compactionWantedAt",
   "nativeInputHold:foreground",

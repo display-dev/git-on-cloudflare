@@ -19,6 +19,7 @@ import {
   LEASE_RETRY_AFTER_SECONDS,
 } from "./shared";
 import { activeLeaseOrUndefined } from "./activity";
+import { listActiveStockReceiveOperations } from "../nativeReceiveActivity";
 import { gcOwnsSource } from "./gcCoordination";
 import { rowsMatchForCommit } from "./compaction/plan";
 import { EXPIRED_WRITER_DRAIN_MS } from "../repositoryLifecycle";
@@ -147,6 +148,7 @@ export async function beginReachabilityGcState(args: {
     if (gcOwnsSource(await transaction.get<GcOperation>(GC_OPERATION_KEY))) return "compact-active";
     if (await store.get("reachabilityGcPending")) return "compact-active";
     if (activeLeaseOrUndefined(await store.get("receiveLease"), now)) return "receive-active";
+    if ((await listActiveStockReceiveOperations(store)).length > 0) return "receive-active";
     if (activeLeaseOrUndefined(await store.get("compactLease"), now)) return "compact-active";
     await store.put("compactLease", lease);
     return "acquired";

@@ -1,5 +1,6 @@
 import type { Logger } from "@/worker/common/logger";
-import { advanceGcReceiveVersions } from "./catalog/gcCoordination";
+import { advanceGcReceiveVersions, gcOwnsSource } from "./catalog/gcCoordination";
+import { GC_OPERATION_KEY, type GcOperation } from "@/worker/git/maintenance/gcOperation";
 import type {
   AdmitStockReceiveResult,
   CompleteStockReceiveCleanupResult,
@@ -43,12 +44,14 @@ import {
 } from "@/worker/git/nativeReceive/types";
 import { validateStockReceivePreparedProof } from "@/worker/git/nativeReceive/stockProof";
 import { nativeReceiveClaimOutputPackKey, packIndexKey, packRefsKey } from "@/worker/keys";
+import { LEASE_RETRY_AFTER_SECONDS, RECEIVE_LEASE_TTL_MS } from "./catalog/shared";
+import { STOCK_RECEIVE_EXECUTION_CLAIM_MS } from "./nativeReceiveActivity";
 
 const MAX_RETAINED_OPERATIONS = 128;
 const MAX_EVIDENCE_EVENTS = 128;
 const COMPACTION_FAN_IN = 4;
 const ZERO_OID = "0".repeat(40);
-const STOCK_EXECUTION_CLAIM_MS = 15 * 60_000;
+const STOCK_PUBLICATION_LEASE_MS = 30_000;
 const STOCK_TRACE_PHASES = new Map<string, string>([
   ["receive_pack_invoked", "receive-pack-start"],
   ["pre_receive_started", "pre-receive-start"],
@@ -58,6 +61,8 @@ const STOCK_TRACE_PHASES = new Map<string, string>([
   ["pre_receive_succeeded", "pre-receive-complete"],
   ["disposable_ref_update_observed", "disposable-ref-updated"],
 ]);
+
+let afterPublicationLeaseForTesting: (() => Promise<void>) | undefined;
 
 function cleanupDescriptor(operation: NativeReceiveOperation): NativeReceiveCleanupDescriptor {
   const inputRequestSha256 = operation.stockReceive?.inputRequestSha256;
@@ -285,7 +290,7 @@ export async function admitStockReceiveState(args: {
           cleanup: cleanupDescriptor(existing),
         };
       }
-      if (existing.publicationPlan && existing.processorResult && existing.state === "ready") {
+      if (existing.processorResult && existing.state === "ready") {
         const recovery = await store.get("stockReceiveRecoveryLease");
         if (
           recovery?.operationId !== existing.id ||
@@ -334,12 +339,19 @@ export async function admitStockReceiveState(args: {
         errorCode: undefined,
         cleanupPending: false,
         claimId,
-        claimExpiresAt: Date.now() + STOCK_EXECUTION_CLAIM_MS,
+        claimExpiresAt: Date.now() + STOCK_RECEIVE_EXECUTION_CLAIM_MS,
       },
       [{ phase: "repo-do-operation-staged", durable: true }]
     );
     if (!(await retainOperation(store, admitted))) {
       return { status: "rejected", code: "operation-ledger-full" };
+    }
+    // The exclusive receive lease owns staging until the operation record is
+    // durable. Ordinary stock work can then prepare concurrently; RepoDO still
+    // serializes its exact-old publication. GC-coordinated receives retain the
+    // lease because their source-protection proof is bound to that token.
+    if (!gcOwnsSource(await transaction.get<GcOperation>(GC_OPERATION_KEY))) {
+      await store.delete("receiveLease");
     }
     const currentAlarm = await transaction.getAlarm();
     if (currentAlarm === null || currentAlarm > admitted.claimExpiresAt!) {
@@ -464,7 +476,7 @@ function stagedPackFor(
  * verified immutable R2 artifacts or an explicitly artifact-free ref-only
  * result whose complete target closure is already authoritative.
  */
-export async function finalizeStockReceiveState(args: {
+async function finalizeStockReceiveWithPublicationLease(args: {
   ctx: DurableObjectState;
   executionToken: string;
   prepared?: NativeReceivePrepared | undefined;
@@ -499,8 +511,7 @@ export async function finalizeStockReceiveState(args: {
   let currentRefs = (await store.get("refs")) ?? [];
   let statuses = validateReceiveCommands(currentRefs, operation.commands);
   if (operation.state === "ready") {
-    const retainedIntent = await store.get(receiveFinalizeIntentKey(operation.leaseToken));
-    if (!operation.processorResult || !operation.publicationPlan || !retainedIntent) {
+    if (!operation.processorResult) {
       return { status: "rejected", code: "finalize-state-invalid" };
     }
     prepared = {
@@ -571,7 +582,8 @@ export async function finalizeStockReceiveState(args: {
   const refOnly = prepared.processorResult.resultKind === "ref-only";
   let intent = await store.get(receiveFinalizeIntentKey(operation.leaseToken));
   let publicationPlan = operation.publicationPlan;
-  if (operation.state === "processing") {
+  if (operation.state === "processing" || !intent || !publicationPlan) {
+    const expectedState = operation.state;
     intent = {
       token: operation.leaseToken,
       commands: operation.commands,
@@ -627,7 +639,7 @@ export async function finalizeStockReceiveState(args: {
       const tx = asTypedStorage<RepoStateSchema>(transaction);
       const durable = await tx.get(nativeReceiveOperationKey(operation!.id));
       if (
-        durable?.state !== "processing" ||
+        durable?.state !== expectedState ||
         durable.fingerprint !== operation!.fingerprint ||
         durable.claimId !== operation!.claimId ||
         ((await tx.get("refsVersion")) ?? 0) !== refsVersion
@@ -857,6 +869,128 @@ export async function finalizeStockReceiveState(args: {
   };
 }
 
+/**
+ * Retain a validated Container result before waiting for the short publication
+ * lane. If that lane's owner disappears, alarm or identical-request recovery
+ * can resume this operation without re-running disposable preparation.
+ */
+async function retainPreparedStockReceiveState(args: {
+  ctx: DurableObjectState;
+  executionToken: string;
+  prepared?: NativeReceivePrepared | undefined;
+  logger: Logger;
+}): Promise<void> {
+  if (!args.prepared) return;
+  const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
+  const operation = await operationByExecutionToken(store, args.executionToken);
+  if (operation?.state !== "processing" || !(await preparedProofValid(operation, args.prepared))) {
+    return;
+  }
+  const retained = await args.ctx.storage.transaction(async (transaction) => {
+    const tx = asTypedStorage<RepoStateSchema>(transaction);
+    const durable = await tx.get(nativeReceiveOperationKey(operation.id));
+    if (
+      durable?.state !== "processing" ||
+      durable.fingerprint !== operation.fingerprint ||
+      durable.claimId !== operation.claimId
+    ) {
+      return false;
+    }
+    await tx.put(nativeReceiveOperationKey(operation.id), {
+      ...durable,
+      state: "ready",
+      processorResult: args.prepared!.processorResult,
+      cleanupPending: true,
+      updatedAt: Date.now(),
+    });
+    const now = Date.now();
+    const currentAlarm = await transaction.getAlarm();
+    if (currentAlarm === null || currentAlarm > now + 1) await transaction.setAlarm(now + 1);
+    return true;
+  });
+  if (retained) {
+    args.logger.info("stock-receive:prepared-retained", { operationId: operation.id });
+  }
+}
+
+/**
+ * Serialize only RepoDO's proof/WAL/ref/catalog publication section. Immutable
+ * Worker and Container preparation remains parallel; a second finalizer waits
+ * outside RepoDO and re-reads current refs after the first CAS completes.
+ */
+export async function finalizeStockReceiveState(args: {
+  ctx: DurableObjectState;
+  executionToken: string;
+  prepared?: NativeReceivePrepared | undefined;
+  logger: Logger;
+}): Promise<FinalizeStockReceiveResult> {
+  await retainPreparedStockReceiveState(args);
+  const now = Date.now();
+  const acquisition = await args.ctx.storage.transaction(async (transaction) => {
+    const store = asTypedStorage<RepoStateSchema>(transaction);
+    const operation = await operationByExecutionToken(store, args.executionToken);
+    if (!operation) return "not-required" as const;
+    if (operation.state === "committed" || operation.state === "finalizing") {
+      return "not-required" as const;
+    }
+    const publicationLease = await store.get("stockReceivePublicationLease");
+    if (publicationLease && publicationLease.expiresAt > now) {
+      return { status: "busy" as const, reason: "publication-lease-active" as const };
+    }
+    const existing = await store.get("receiveLease");
+    if (
+      existing &&
+      existing.token !== operation.leaseToken &&
+      (existing.expiresAt > now ||
+        (await store.get(receiveFinalizeIntentKey(existing.token))) !== undefined)
+    ) {
+      return { status: "busy" as const, reason: "receive-lease-active" as const };
+    }
+    await store.put("receiveLease", {
+      token: operation.leaseToken,
+      operation: "receive",
+      createdAt: now,
+      expiresAt: now + RECEIVE_LEASE_TTL_MS,
+    });
+    await store.put("stockReceivePublicationLease", {
+      token: args.executionToken,
+      operation: "receive",
+      createdAt: now,
+      expiresAt: now + STOCK_PUBLICATION_LEASE_MS,
+    });
+    return {
+      status: "acquired" as const,
+      receiveToken: operation.leaseToken,
+      publicationToken: args.executionToken,
+    };
+  });
+  if (typeof acquisition === "object" && acquisition.status === "busy") {
+    args.logger.debug("stock-receive:publication-busy", {
+      reason: acquisition.reason,
+    });
+    return { status: "busy", retryAfter: LEASE_RETRY_AFTER_SECONDS };
+  }
+  if (acquisition === "not-required") {
+    return await finalizeStockReceiveWithPublicationLease(args);
+  }
+  try {
+    const afterPublicationLease = afterPublicationLeaseForTesting;
+    afterPublicationLeaseForTesting = undefined;
+    await afterPublicationLease?.();
+    return await finalizeStockReceiveWithPublicationLease(args);
+  } finally {
+    await args.ctx.storage.transaction(async (transaction) => {
+      const store = asTypedStorage<RepoStateSchema>(transaction);
+      const publication = await store.get("stockReceivePublicationLease");
+      if (publication?.token === acquisition.publicationToken) {
+        await store.delete("stockReceivePublicationLease");
+      }
+      const current = await store.get("receiveLease");
+      if (current?.token === acquisition.receiveToken) await store.delete("receiveLease");
+    });
+  }
+}
+
 /** Resume only the state/CAS phase; this path can never invoke Git or R2. */
 export async function resumeStockReceiveAuthorityFromAlarm(args: {
   ctx: DurableObjectState;
@@ -864,11 +998,47 @@ export async function resumeStockReceiveAuthorityFromAlarm(args: {
 }): Promise<boolean> {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
   const operations = await indexedOperations(store);
+  const readyOperations = operations.filter(
+    (operation) => operation.state === "ready" && operation.stockReceive !== undefined
+  );
+  const receiveLease = await store.get("receiveLease");
+  // A disappeared publisher leaves its receive lease as the durable owner.
+  // Resume that operation before unrelated ready contenders, which must wait
+  // for the serialized owner to finish or its short publication lease to age.
+  const ready =
+    readyOperations.find((operation) => operation.leaseToken === receiveLease?.token) ??
+    readyOperations[0];
+  if (ready) {
+    const resumed = await finalizeStockReceiveState({
+      ...args,
+      executionToken: ready.claimId ?? "",
+    });
+    if (resumed.status === "busy") {
+      await args.ctx.storage.setAlarm(Date.now() + 1_000);
+      return true;
+    }
+    if (resumed.status === "rejected") {
+      const current = await store.get(nativeReceiveOperationKey(ready.id));
+      if (current?.state === "ready") {
+        await rejectReadyStockAuthority({
+          ctx: args.ctx,
+          operation: current,
+          code: "authority-recovery-invalid",
+          phase: "authority-recovery-rejected",
+          expectedState: "ready",
+          expectedClaimId: current.claimId,
+        });
+      }
+    }
+    await args.ctx.storage.setAlarm(Date.now() + 1);
+    return true;
+  }
   const processing = operations.find(
     (operation) => operation.state === "processing" && operation.stockReceive !== undefined
   );
   if (processing) {
-    const expiresAt = processing.claimExpiresAt ?? processing.updatedAt + STOCK_EXECUTION_CLAIM_MS;
+    const expiresAt =
+      processing.claimExpiresAt ?? processing.updatedAt + STOCK_RECEIVE_EXECUTION_CLAIM_MS;
     if (expiresAt > Date.now()) {
       const currentAlarm = await args.ctx.storage.getAlarm();
       if (currentAlarm === null || currentAlarm > expiresAt) {
@@ -887,28 +1057,7 @@ export async function resumeStockReceiveAuthorityFromAlarm(args: {
     await args.ctx.storage.setAlarm(Date.now() + 1);
     return true;
   }
-  const ready = operations.find(
-    (operation) => operation.state === "ready" && operation.stockReceive !== undefined
-  );
-  if (!ready) return false;
-  const resumed = await finalizeStockReceiveState({
-    ...args,
-    executionToken: ready.claimId ?? "",
-  });
-  if (resumed.status === "rejected") {
-    const current = await store.get(nativeReceiveOperationKey(ready.id));
-    if (current?.state === "ready") {
-      await rejectReadyStockAuthority({
-        ctx: args.ctx,
-        operation: current,
-        code: "authority-recovery-invalid",
-        phase: "authority-recovery-rejected",
-        expectedState: "ready",
-        expectedClaimId: current.claimId,
-      });
-    }
-  }
-  return true;
+  return false;
 }
 
 export async function stockReceiveWorkerRecoveryOperationId(
@@ -1273,4 +1422,12 @@ export async function completeStockReceiveCleanupState(args: {
   });
 }
 
-export const __test = { ZERO_OID };
+export const __test = {
+  ZERO_OID,
+  afterPublicationLeaseOnce(callback: () => Promise<void>): void {
+    afterPublicationLeaseForTesting = callback;
+  },
+  reset(): void {
+    afterPublicationLeaseForTesting = undefined;
+  },
+};
