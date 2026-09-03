@@ -1106,6 +1106,26 @@ describe("stock Smart HTTP receive spike", () => {
       ...authority!.refs.map((ref) => ref.key),
       authority!.receipt.key,
     ]);
+    await env.REPO_BUCKET.put(
+      authority!.refs[0]!.key,
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "authoritative-ref",
+        name: "refs/heads/main",
+        oid: commit.oid,
+      })
+    );
+    await env.REPO_BUCKET.put(
+      authority!.receipt.key,
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "operation-receipt",
+        disposition: "committed",
+        refName: "refs/heads/main",
+        newOid: commit.oid,
+        digest: authority!.receipt.digest,
+      })
+    );
     await runDOWithRetry(
       () => stub,
       async (_instance, state) => {

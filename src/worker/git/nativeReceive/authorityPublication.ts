@@ -35,11 +35,7 @@ async function putImmutablePublicationObject(args: {
   const existing = await args.limiter.run("r2:get-native-authority", () =>
     args.env.REPO_BUCKET.get(args.plan.key)
   );
-  if (
-    !existing ||
-    existing.size !== args.plan.bytes ||
-    existing.customMetadata?.sha256 !== args.plan.sha256
-  ) {
+  if (!existing || existing.size !== args.plan.bytes) {
     throw new Error("immutable authority publication conflicts with existing R2 state");
   }
   const actual = new Uint8Array(await existing.arrayBuffer());
