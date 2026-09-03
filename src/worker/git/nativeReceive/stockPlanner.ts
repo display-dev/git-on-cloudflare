@@ -1584,15 +1584,22 @@ async function planStockReceiveImpl(
 
   const thinDeltaBaseOids = new Set<string>();
   const activeByChecksum = new Map(active.map((pack) => [pack.packChecksum, pack]));
-  const readFromBoundedWholePack = createBoundedWholePackReader({
-    env: args.env,
-    operationId: args.operationId,
-    active,
-    limiter: args.limiter,
-    countSubrequest: args.countSubrequest,
-    log,
-    signal: args.signal,
-  });
+  const directPackRequested =
+    (args.env as Env & { STOCK_RECEIVE_DIRECT_PACK?: string }).STOCK_RECEIVE_DIRECT_PACK === "1";
+  // Direct publication only needs byte-level proof for true thin-delta bases.
+  // Loading a multi-megabyte pack to recover a few kilobytes of those entries
+  // recreates the latency this path is designed to remove, so use exact ranges.
+  const readFromBoundedWholePack = directPackRequested
+    ? async (): Promise<Uint8Array | undefined> => undefined
+    : createBoundedWholePackReader({
+        env: args.env,
+        operationId: args.operationId,
+        active,
+        limiter: args.limiter,
+        countSubrequest: args.countSubrequest,
+        log,
+        signal: args.signal,
+      });
   const physicalPlanner = createStockPhysicalDependencyPlanner({
     sources: active.map((pack) => ({
       source: pack.source,
@@ -1764,7 +1771,7 @@ async function planStockReceiveImpl(
   // authority. Inputs outside the direct admission predicate below continue
   // through the existing stock-Container path.
   if (
-    (args.env as Env & { STOCK_RECEIVE_DIRECT_PACK?: string }).STOCK_RECEIVE_DIRECT_PACK === "1" &&
+    directPackRequested &&
     args.commands.length === 1 &&
     incomingObjectCount > 0 &&
     incomingObjectCount === boundary.visitedIncomingObjectCount &&

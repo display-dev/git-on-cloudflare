@@ -70,7 +70,9 @@ git push https://owner:goc_abcd1234_secret@your-domain.com/owner/repo main
   proof, immutable output verification, and RepoDO exact-old publication, but
   publishes a fully reachable non-empty incoming pack directly instead of
   rebuilding semantic prerequisites for stock `receive-pack`. Inputs outside
-  that narrow admission predicate retain the stock Container path.
+  that narrow admission predicate retain the stock Container path. The
+  qualification variation uses exact authenticated entry ranges for thin-delta
+  bases even when the selected source pack is below the normal preload bound.
 
   The native processor receives the incoming request plus the validated
   prerequisite pack and completes stock `receive-pack` plus hook validation.

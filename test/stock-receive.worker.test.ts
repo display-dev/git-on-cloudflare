@@ -1945,7 +1945,8 @@ describe("stock Smart HTTP receive spike", () => {
       state: "committed",
       metrics: {
         executionMode: "direct-pack",
-        activePackWholeRequests: 1,
+        activePackWholeRequests: 0,
+        activePackRangeRequests: 1,
         outputValidationRequests: 3,
       },
     });

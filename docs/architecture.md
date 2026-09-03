@@ -86,8 +86,9 @@ The codebase is organized into focused modules with `index.ts` export files:
   receive the physical active-pack proof; semantic external objects do not get
   redundantly materialized. RepoDO retains the same exact-old CAS, catalog, and
   receipt authority. Empty/ref-only, multi-command, or partially reachable packs
-  continue through the stock Container path. This flag is a bounded spike seam,
-  not a production default.
+  continue through the stock Container path. While the variation is enabled,
+  thin-delta bases use exact authenticated entry ranges rather than bounded
+  whole-pack preload. This flag is a bounded spike seam, not a production default.
   Larger or length-unknown requests retain the generic native/streaming path.
   Artifact-producing receives write immutable output to R2, then RepoDO commits
   refs and pack-catalog metadata atomically through typed RPCs. Native Git may

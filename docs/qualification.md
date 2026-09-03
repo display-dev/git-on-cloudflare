@@ -321,7 +321,9 @@ object/ref equality, and show zero Container phases. Planning time excludes the
 separately reported direct immutable-output upload time. The variation admits
 only a single non-empty command whose incoming pack contains exactly the objects
 reachable from its proposed tip; other shapes fall through to the existing stock
-Container path. The comparison must retain the same Git client, protocol,
+Container path. While the flag is enabled, both direct work and fallthrough use
+exact authenticated entry ranges for thin-delta bases rather than whole-pack
+preload. The comparison must retain the same Git client, protocol,
 credentials, fixture OIDs, alternating provider order, and predeclared latency
 thresholds. Enabling the flag without a commit-pinned Worker version is not
 evidence.
