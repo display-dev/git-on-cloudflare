@@ -3,6 +3,7 @@ import { createExecutionContext, runDurableObjectAlarm } from "cloudflare:test";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { asBufferSource, bytesToHex, createLogger, getRepoStub } from "@/worker/common";
+import { __admissionTest as receiveLeaseTest } from "@/worker/do/repo/catalog/leases";
 import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
 import { __test as stockAuthorityTest } from "@/worker/do/repo/stockReceiveAuthority";
 import { __test as stockContainerHostTest } from "@/worker/do/stockReceiveContainerHost";
@@ -11,6 +12,7 @@ import {
   nativeReceiveOperationKey,
   type RepoStateSchema,
 } from "@/worker/do/repo/repoState";
+import { EXPIRED_WRITER_DRAIN_MS } from "@/worker/do/repo/repositoryLifecycle";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git/core";
 import { encodeGitObject } from "@/worker/git/core/objects";
 import { SubrequestLimiter } from "@/worker/git/operations/limits";
@@ -195,6 +197,7 @@ afterEach(() => {
   stockPlannerTest.reset();
   nativePipelineTest.reset();
   stockAuthorityTest.reset();
+  receiveLeaseTest.reset();
 });
 
 describe("stock Smart HTTP receive spike", () => {
@@ -208,11 +211,23 @@ describe("stock Smart HTTP receive spike", () => {
     );
 
     await withEnvOverrides(env, { STOCK_RECEIVE_PREPARATION_CONCURRENCY: "2" }, async () => {
-      const admitted: Array<Extract<AdmitStockReceiveResult, { status: "admitted" }>> = [];
+      const preparations = [];
       for (let index = 0; index < 2; index++) {
         const begin = await stub.beginReceive({ stockPreparation: true });
-        if (!begin.ok) throw new Error("expected bounded stock staging lease");
+        if (!begin.ok) throw new Error("expected bounded stock staging reservation");
         expect(begin.concurrentStockPreparation).toBe(index === 0 ? undefined : true);
+        preparations.push(begin);
+      }
+      expect(await stub.getRepoActivity()).toMatchObject({ state: "receiving" });
+      expect(await stub.beginReceive({ stockPreparation: true })).toMatchObject({ ok: false });
+      expect(await stub.beginReceive()).toMatchObject({ ok: false });
+      expect(await stub.beginReachabilityGc()).toMatchObject({
+        ok: false,
+        reason: "receive-active",
+      });
+
+      const admitted: Array<Extract<AdmitStockReceiveResult, { status: "admitted" }>> = [];
+      for (const [index, begin] of preparations.entries()) {
         const operationId = `parallel-stock-${index}`;
         const fingerprint = String(index + 1).repeat(64);
         const outputPackKey = nativeReceiveOutputPackKey(
@@ -274,12 +289,6 @@ describe("stock Smart HTTP receive spike", () => {
       }
 
       expect(await stub.getRepoActivity()).toMatchObject({ state: "receiving" });
-      expect(await stub.beginReceive({ stockPreparation: true })).toMatchObject({ ok: false });
-      expect(await stub.beginReceive()).toMatchObject({ ok: false });
-      expect(await stub.beginReachabilityGc()).toMatchObject({
-        ok: false,
-        reason: "receive-active",
-      });
 
       let releasePublication: (() => void) | undefined;
       let publicationLeaseHeld: (() => void) | undefined;
@@ -327,6 +336,138 @@ describe("stock Smart HTTP receive spike", () => {
       }
       expect(await stub.beginRepositoryDeletion()).toMatchObject({ ready: true });
     });
+  });
+
+  it("keeps repository deletion fenced by an active stock preparation", async () => {
+    const repo = uniqueRepoId("stock-preparation-deletion-fence");
+    const seeded = await setupRepoForTests(env, "o", repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const begin = await stub.beginReceive({ stockPreparation: true });
+    if (!begin.ok) throw new Error("expected stock preparation reservation");
+
+    expect(await stub.beginRepositoryDeletion()).toMatchObject({ ready: false });
+  });
+
+  it("promotes a sole misclassified stock preparation back to an exclusive receive", async () => {
+    const repo = uniqueRepoId("stock-preparation-promotion");
+    const seeded = await setupRepoForTests(env, "o", repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const begin = await stub.beginReceive({ stockPreparation: true });
+    if (!begin.ok) throw new Error("expected stock preparation reservation");
+
+    expect(await stub.promoteStockPreparation(begin.lease.token)).toBe(true);
+    expect(await stub.beginReceive({ stockPreparation: true })).toMatchObject({ ok: false });
+    expect(await stub.abortReceive(begin.lease.token)).toBe(true);
+    const generic = await stub.beginReceive();
+    expect(generic).toMatchObject({ ok: true });
+    if (generic.ok) expect(await stub.abortReceive(generic.lease.token)).toBe(true);
+  });
+
+  it("returns one authority generation when publication follows preparation handoff", async () => {
+    const repo = uniqueRepoId("stock-preparation-snapshot-generation");
+    const seeded = await setupRepoForTests(env, "o", repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const before = await runDOWithRetry(
+      () => stub,
+      async (instance, state) => {
+        await instance.seedMinimalRepo();
+        const store = asTypedStorage<RepoStateSchema>(state.storage);
+        return {
+          refs: (await store.get("refs")) ?? [],
+          refsVersion: (await store.get("refsVersion")) ?? 0,
+          packsetVersion: (await store.get("packsetVersion")) ?? 0,
+          nextPackSeq: (await store.get("nextPackSeq")) ?? 1,
+        };
+      }
+    );
+    receiveLeaseTest.afterStockPreparationHandoffOnce(async (state) => {
+      const store = asTypedStorage<RepoStateSchema>(state.storage);
+      await store.put("refs", [{ name: "refs/heads/concurrent", oid: "f".repeat(40) }]);
+      await store.put("refsVersion", before.refsVersion + 1);
+      await store.put("packsetVersion", before.packsetVersion + 1);
+      await store.put("nextPackSeq", before.nextPackSeq + 1);
+    });
+
+    const begin = await stub.beginReceive({ stockPreparation: true });
+    expect(begin).toMatchObject({
+      ok: true,
+      refs: before.refs,
+      refsVersion: before.refsVersion,
+      packsetVersion: before.packsetVersion,
+      nextPackSeq: before.nextPackSeq,
+    });
+    if (begin.ok) expect(await stub.abortReceive(begin.lease.token)).toBe(true);
+  });
+
+  it("keeps deletion fenced when an alarm observes an expired preparation", async () => {
+    const repo = uniqueRepoId("stock-preparation-expiry");
+    const seeded = await setupRepoForTests(env, "o", repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const begin = await stub.beginReceive({ stockPreparation: true });
+    if (!begin.ok) throw new Error("expected stock preparation reservation");
+    const inputKey = nativeReceiveInputRequestKey(doPrefix(stub.id.toString()), begin.lease.token);
+    await env.REPO_BUCKET.put(inputKey, new Uint8Array([1, 2, 3]));
+    expect(await env.REPO_BUCKET.head(inputKey)).not.toBeNull();
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const store = asTypedStorage<RepoStateSchema>(state.storage);
+        await store.put("stockReceivePreparationLeases", [
+          { ...begin.lease, expiresAt: Date.now() - 1 },
+        ]);
+        await store.put("lastAccessMs", Date.now() - 30 * 60_000 - 1);
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    expect(await env.REPO_BUCKET.head(inputKey)).not.toBeNull();
+    expect(await stub.getRepoActivity()).toBeNull();
+    expect(await stub.beginRepositoryDeletion()).toMatchObject({ ready: false });
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        expect(await state.storage.get("stockReceivePreparationLeases")).toBeDefined();
+        expect(await state.storage.getAlarm()).toBeGreaterThan(Date.now());
+      }
+    );
+    await env.REPO_BUCKET.delete(inputKey);
+  });
+
+  it("deletes an abandoned stock preparation after its writer drain", async () => {
+    const repo = uniqueRepoId("stock-preparation-drained-cleanup");
+    const seeded = await setupRepoForTests(env, "o", repo);
+    const stub = getRepoStub(env, seeded.doName);
+    await runDOWithRetry(
+      () => stub,
+      async (instance) => await instance.seedMinimalRepo()
+    );
+    const begin = await stub.beginReceive({ stockPreparation: true });
+    if (!begin.ok) throw new Error("expected stock preparation reservation");
+    const inputKey = nativeReceiveInputRequestKey(doPrefix(stub.id.toString()), begin.lease.token);
+    await env.REPO_BUCKET.put(inputKey, new Uint8Array([1, 2, 3]));
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const store = asTypedStorage<RepoStateSchema>(state.storage);
+        await store.put("stockReceivePreparationLeases", [
+          {
+            ...begin.lease,
+            expiresAt: Date.now() - EXPIRED_WRITER_DRAIN_MS - 1,
+          },
+        ]);
+      }
+    );
+
+    await runDurableObjectAlarm(stub);
+
+    expect(await env.REPO_BUCKET.head(inputKey)).toBeNull();
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        expect(await state.storage.get("stockReceivePreparationLeases")).toBeUndefined();
+      }
+    );
   });
 
   it("recovers ready publication before processing expiry and eventually drains orphaned deletion", async () => {

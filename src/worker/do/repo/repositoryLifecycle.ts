@@ -78,6 +78,8 @@ export async function pruneRepositoryActivityLeases(
   const nativeReaderActive = !!nativeReaderLease && nativeReaderLease.expiresAt > now;
   const recoveryActive = !!recoveryLease && recoveryLease.expiresAt > now;
   const receiveActive = writerMayStillBeDraining(await store.get("receiveLease"), now);
+  const preparationLeases = (await store.get("stockReceivePreparationLeases")) ?? [];
+  const preparationActive = preparationLeases.some((lease) => writerMayStillBeDraining(lease, now));
   const stockPublicationActive = writerMayStillBeDraining(
     await store.get("stockReceivePublicationLease"),
     now
@@ -109,11 +111,19 @@ export async function pruneRepositoryActivityLeases(
   if (!nativeReaderActive) await store.delete("nativeCatalogReaderLease");
   if (!recoveryActive) await store.delete("stockReceiveRecoveryLease");
   if (!receiveActive) await store.delete("receiveLease");
+  if (!preparationActive) await store.delete("stockReceivePreparationLeases");
+  else {
+    await store.put(
+      "stockReceivePreparationLeases",
+      preparationLeases.filter((lease) => writerMayStillBeDraining(lease, now))
+    );
+  }
   if (!stockPublicationActive) await store.delete("stockReceivePublicationLease");
   if (!compactActive) await store.delete("compactLease");
 
   return (
     !receiveActive &&
+    !preparationActive &&
     !stockPublicationActive &&
     !compactActive &&
     !nativeReceiveActive &&

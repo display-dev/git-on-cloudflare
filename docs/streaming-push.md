@@ -259,14 +259,16 @@ Unchanged:
 Changed internally:
 
 - generic push handling remains one active receive lease per repo; bounded
-  stock pushes enter a finite preparation pool and receive
-  `503 Retry-After: 10` only when staging or pool capacity is unavailable.
+  stock pushes exchange the snapshot lease for a durable reservation in a
+  finite preparation pool before request-body staging, and receive
+  `503 Retry-After: 10` only when staging or pool capacity is unavailable. At
+  a coordinated-GC checkpoint they retain the exclusive lease instead.
 - `X-Repo-Changed` and `X-Repo-Empty` are computed in the Worker after DO finalization, not forwarded from a DO HTTP endpoint.
 
 ### Step-by-step algorithm
 
 1. Worker calls `stub.beginReceive()` before reading the body, identifying a bounded stock candidate when request metadata permits that path.
-2. Generic receive remains immediately exclusive. A bounded stock candidate retries the short staging lane for a finite interval and may join the configured preparation pool; saturation returns `503 Retry-After: 10`.
+2. Generic receive remains immediately exclusive. A bounded stock candidate retries the short snapshot lane for a finite interval. RepoDO then atomically exchanges the snapshot lease for a durable preparation reservation before body staging, except at a coordinated-GC checkpoint where the candidate retains the exclusive lease; saturation returns `503 Retry-After: 10`.
 3. If the lease is granted, the Worker incrementally parses the pkt-line command section from `request.body` until the flush packet.
 4. The remaining bytes are treated as the raw pack stream.
 5. The Worker writes the raw pack stream directly to a staged R2 key such as `do/<id>/objects/pack/pack-rx-<leaseToken>.pack`.
@@ -277,7 +279,7 @@ Changed internally:
    - byte count matches the actual received length
 7. After the R2 upload resolves, the Worker runs the new indexer against the staged pack in R2 and writes `pack-rx-<leaseToken>.idx`.
 8. The Worker runs thin-pack base validation and ref-target connectivity validation using the new pack-first object store and the active pack catalog snapshot.
-9. Generic receive calls `stub.finalizeReceive(...)` while retaining its lease. A stock receive durably admits immutable preparation, releases the staging lease, retains validated prepared proof, and enters the short serialized RepoDO publication lane.
+9. Generic receive calls `stub.finalizeReceive(...)` while retaining its lease. A stock receive consumes its exact durable preparation reservation when the operation is admitted (or retains the coordinated-GC lease), retains validated prepared proof, and enters the short serialized RepoDO publication lane.
 10. The DO atomically:
     - rechecks the lease token;
     - rechecks `old-oid` expectations against current refs;

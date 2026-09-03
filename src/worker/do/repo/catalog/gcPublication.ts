@@ -17,6 +17,7 @@ import type { CommitReachabilityGcResult } from "./reachabilityGc";
 import { rowsMatchForCommit } from "./compaction/plan";
 import { EXPIRED_WRITER_DRAIN_MS } from "../repositoryLifecycle";
 import { createLogger } from "@/worker/common";
+import { activeStockReceivePreparationLeases } from "../nativeReceiveActivity";
 
 let failAfterPublicationWritesForTesting = false;
 let publicationWriteFailuresForTesting = 0;
@@ -86,6 +87,11 @@ export async function commitCoordinatedGc(
         receive &&
         (receive.expiresAt + EXPIRED_WRITER_DRAIN_MS > now ||
           (await store.get(receiveFinalizeIntentKey(receive.token))))
+      )
+        return { status: "retry", reason: "receive-active" };
+      if (
+        activeStockReceivePreparationLeases(await store.get("stockReceivePreparationLeases"), now)
+          .length > 0
       )
         return { status: "retry", reason: "receive-active" };
       for (const id of (await store.get("nativeReceiveOperationIndex")) ?? []) {

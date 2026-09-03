@@ -12,6 +12,7 @@ import { gcOwnsSource } from "./catalog/gcCoordination";
 import { asTypedStorage, nativeReceiveOperationKey, receiveFinalizeIntentKey } from "./repoState";
 import { activeLeaseOrUndefined } from "./catalog/activity";
 import { isNativeReceiveTerminal } from "@/worker/git/nativeReceive/types";
+import { listActiveStockReceivePreparationLeases } from "./nativeReceiveActivity";
 
 async function hasActiveReceiveMutation(store: TypedStorage<RepoStateSchema>): Promise<boolean> {
   const receiveLease = await store.get("receiveLease");
@@ -22,6 +23,7 @@ async function hasActiveReceiveMutation(store: TypedStorage<RepoStateSchema>): P
   ) {
     return true;
   }
+  if ((await listActiveStockReceivePreparationLeases(store)).length > 0) return true;
   const operationIds = (await store.get("nativeReceiveOperationIndex")) ?? [];
   for (const operationId of operationIds) {
     const operation = await store.get(nativeReceiveOperationKey(operationId));

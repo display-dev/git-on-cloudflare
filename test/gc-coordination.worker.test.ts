@@ -115,6 +115,17 @@ async function receive(
 }
 
 describe("GC source protection and foreground publication", () => {
+  it("keeps a bounded candidate exclusive at a coordinated GC checkpoint", async () => {
+    const f = await fixture();
+
+    const begin = await f.stub.beginReceive({ stockPreparation: true });
+
+    expect(begin.ok).toBe(true);
+    if (!begin.ok) throw new Error("foreground receive rejected");
+    expect(begin.stockPreparationReserved).toBeUndefined();
+    expect(await f.stub.abortReceive(begin.lease.token)).toBe(true);
+  });
+
   it("settles only pending setup compaction without releasing writers or readers", async () => {
     const stub = getRepoStub(env, uniqueRepoId("settle-setup"));
     await runInDurableObject(stub, async (_instance, ctx) => {

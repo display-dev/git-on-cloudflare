@@ -4,6 +4,7 @@ import { getConfig } from "./repoConfig";
 import { createLogger } from "@/worker/common";
 import { activeLeaseOrUndefined } from "./catalog/activity";
 import { COMPACTION_REARM_DELAY_MS } from "./catalog/shared";
+import { activeStockReceivePreparationLeases } from "./nativeReceiveActivity";
 
 export const RECOVERY_ESCALATION_ATTEMPTS = 5;
 
@@ -30,15 +31,23 @@ export async function planNextAlarm(
 
   // 1) Re-arm compaction via alarms when a compaction request or lease is active.
   try {
-    const [compactionWantedAt, receiveLease, compactLease] = await Promise.all([
+    const [compactionWantedAt, receiveLease, preparationLeases, compactLease] = await Promise.all([
       store.get("compactionWantedAt"),
       store.get("receiveLease"),
+      store.get("stockReceivePreparationLeases"),
       store.get("compactLease"),
     ]);
 
     const activeReceiveLease = activeLeaseOrUndefined(receiveLease, now);
     if (activeReceiveLease) {
       return { when: activeReceiveLease.expiresAt, reason: "compaction" };
+    }
+
+    const activePreparation = activeStockReceivePreparationLeases(preparationLeases, now).sort(
+      (a, b) => a.expiresAt - b.expiresAt
+    )[0];
+    if (activePreparation) {
+      return { when: activePreparation.expiresAt, reason: "compaction" };
     }
 
     const activeCompactLease = activeLeaseOrUndefined(compactLease, now);

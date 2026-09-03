@@ -440,9 +440,9 @@ export async function handleStreamingReceivePackPOST(
         })
       : [];
     const responseMode = selectReceiveResponseMode(parsedRequest.capabilities);
+    const nativeReceive = useNativeReceive(env, parsedRequest.commands);
     const stockReceive =
-      stockReceiveRequested ||
-      (ordinarySelectiveReceiveEligible && useNativeReceive(env, parsedRequest.commands));
+      nativeReceive && (stockReceiveRequested || ordinarySelectiveReceiveEligible);
 
     if (begin.concurrentStockPreparation && !stockReceive) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-nonstock-concurrent-receive");
@@ -459,7 +459,7 @@ export async function handleStreamingReceivePackPOST(
       });
     }
 
-    if (requestedOperationId && !useNativeReceive(env, parsedRequest.commands)) {
+    if (requestedOperationId && !nativeReceive) {
       countReceiveSubrequest(cacheCtx, log, "do:abort-receive");
       await limiter
         .run("do:abort-receive", () => stub.abortReceive(begin.lease.token))
@@ -516,6 +516,27 @@ export async function handleStreamingReceivePackPOST(
       return response;
     }
 
+    if (!stockReceive && begin.stockPreparationReserved) {
+      countReceiveSubrequest(cacheCtx, log, "do:promote-stock-preparation");
+      const promoted = await limiter.run("do:promote-stock-preparation", () =>
+        stub.promoteStockPreparation(begin.lease.token)
+      );
+      if (!promoted) {
+        countReceiveSubrequest(cacheCtx, log, "do:abort-unpromoted-stock-preparation");
+        await limiter
+          .run("do:abort-unpromoted-stock-preparation", () => stub.abortReceive(begin.lease.token))
+          .catch(() => {});
+        logReceiveEnd(log, 503, { reason: "stock-preparation-active" });
+        return new Response("Repository is busy receiving; please retry shortly.\n", {
+          status: 503,
+          headers: {
+            "Retry-After": "10",
+            "Content-Type": "text/plain; charset=utf-8",
+          },
+        });
+      }
+    }
+
     if (responseMode === "side-band-64k" && !stockReceive) {
       return createSidebandReceiveResponse({
         env,
@@ -541,9 +562,7 @@ export async function handleStreamingReceivePackPOST(
     }
 
     pipelineStarted = true;
-    const executePipeline = useNativeReceive(env, parsedRequest.commands)
-      ? executeNativeReceivePipeline
-      : executeReceivePipeline;
+    const executePipeline = nativeReceive ? executeNativeReceivePipeline : executeReceivePipeline;
     const result = await executePipeline({
       env,
       repoId,

@@ -3,9 +3,40 @@ import {
   type NativeReceiveOperation,
 } from "@/worker/git/nativeReceive/types";
 
-import { nativeReceiveOperationKey, type RepoStateSchema, type TypedStorage } from "./repoState";
+import {
+  nativeReceiveOperationKey,
+  type RepoLease,
+  type RepoStateSchema,
+  type TypedStorage,
+} from "./repoState";
 
 export const STOCK_RECEIVE_EXECUTION_CLAIM_MS = 15 * 60_000;
+
+export function activeStockReceivePreparationLeases(
+  leases: RepoLease[] | undefined,
+  now: number = Date.now()
+): RepoLease[] {
+  return (leases ?? []).filter((lease) => lease.expiresAt > now);
+}
+
+export async function listActiveStockReceivePreparationLeases(
+  store: TypedStorage<RepoStateSchema>,
+  now: number = Date.now()
+): Promise<RepoLease[]> {
+  return activeStockReceivePreparationLeases(await store.get("stockReceivePreparationLeases"), now);
+}
+
+export async function removeStockReceivePreparationLease(
+  store: TypedStorage<RepoStateSchema>,
+  token: string
+): Promise<boolean> {
+  const leases = await store.get("stockReceivePreparationLeases");
+  if (!leases?.some((lease) => lease.token === token)) return false;
+  const retained = leases.filter((lease) => lease.token !== token);
+  if (retained.length > 0) await store.put("stockReceivePreparationLeases", retained);
+  else await store.delete("stockReceivePreparationLeases");
+  return true;
+}
 
 export async function listActiveNativeReceiveOperations(
   store: TypedStorage<RepoStateSchema>

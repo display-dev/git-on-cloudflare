@@ -19,7 +19,10 @@ import {
   LEASE_RETRY_AFTER_SECONDS,
 } from "./shared";
 import { activeLeaseOrUndefined } from "./activity";
-import { listActiveStockReceiveOperations } from "../nativeReceiveActivity";
+import {
+  listActiveStockReceiveOperations,
+  listActiveStockReceivePreparationLeases,
+} from "../nativeReceiveActivity";
 import { gcOwnsSource } from "./gcCoordination";
 import { rowsMatchForCommit } from "./compaction/plan";
 import { EXPIRED_WRITER_DRAIN_MS } from "../repositoryLifecycle";
@@ -148,6 +151,8 @@ export async function beginReachabilityGcState(args: {
     if (gcOwnsSource(await transaction.get<GcOperation>(GC_OPERATION_KEY))) return "compact-active";
     if (await store.get("reachabilityGcPending")) return "compact-active";
     if (activeLeaseOrUndefined(await store.get("receiveLease"), now)) return "receive-active";
+    if ((await listActiveStockReceivePreparationLeases(store, now)).length > 0)
+      return "receive-active";
     if ((await listActiveStockReceiveOperations(store)).length > 0) return "receive-active";
     if (activeLeaseOrUndefined(await store.get("compactLease"), now)) return "compact-active";
     await store.put("compactLease", lease);
@@ -424,6 +429,10 @@ export async function commitReachabilityGcState(args: {
   }
 
   if (activeLeaseOrUndefined(await store.get("receiveLease"), Date.now())) {
+    await clearGcAttemptState(args.ctx, args.token);
+    return { status: "retry", reason: "receive-active" };
+  }
+  if ((await listActiveStockReceivePreparationLeases(store)).length > 0) {
     await clearGcAttemptState(args.ctx, args.token);
     return { status: "retry", reason: "receive-active" };
   }

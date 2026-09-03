@@ -5,7 +5,7 @@ This document describes the primary data flows of the server: pushing (receive-p
 ## Push (git-receive-pack)
 
 1. Client sends `POST /:owner/:repo/git-receive-pack`
-2. Worker acquires a staging lease via `beginReceive()` RPC. Generic receive is immediately exclusive. A bounded stock candidate waits finitely for the staging lane, then may join the configured per-repository preparation pool; saturation returns `503 Retry-After: 10`.
+2. Worker calls `beginReceive()`. Generic receive remains exclusive. For a bounded stock candidate, RepoDO snapshots authority under the exclusive lease and atomically exchanges it for a durable reservation in the configured per-repository preparation pool before the Worker reads and stages the request body. At a coordinated-GC checkpoint the candidate keeps the exclusive lease to preserve source protection. Saturation returns `503 Retry-After: 10`.
 3. Worker parses pkt-line commands and the packfile payload from the request body.
 4. The bounded stock path selectively hydrates the authenticated prerequisite
    closure and native Git completes `receive-pack` and hook validation.

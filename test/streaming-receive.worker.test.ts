@@ -366,12 +366,32 @@ describe("streaming receive-pack", () => {
     );
     expect(createResponse.status).toBe(200);
 
-    const deleteResponse = await pushBody(
-      `https://example.com/${owner}/${repo}/git-receive-pack`,
-      concatChunks([
-        pktLine(`${commit.oid} ${zero40()} refs/heads/feature\0 report-status\n`),
-        flushPkt(),
-      ])
+    const deleteBody = concatChunks([
+      pktLine(`${commit.oid} ${zero40()} refs/heads/feature\0 report-status\n`),
+      flushPkt(),
+    ]);
+    const deleteResponse = await handleStreamingReceivePackPOST(
+      { ...env, NATIVE_RECEIVE_CONTAINER: "1" },
+      repoId,
+      new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-request",
+          "Content-Length": String(deleteBody.byteLength),
+          "X-Display-Spike1b-Stock": "1",
+        },
+        body: toRequestBody(deleteBody),
+      }),
+      createExecutionContext(),
+      {
+        acceptedWriteContext: {
+          repositoryId: repoId,
+          actor: "synthetic-test-actor",
+          sourceSurface: "git-push",
+          idempotencyKey: null,
+        },
+        limiter: new SubrequestLimiter(900),
+      }
     );
     expect(deleteResponse.status).toBe(200);
     expect(decodeReportStatus(new Uint8Array(await deleteResponse.arrayBuffer()))).toContain(

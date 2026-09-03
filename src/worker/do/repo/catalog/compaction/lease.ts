@@ -28,7 +28,10 @@ import {
   LEASE_RETRY_AFTER_SECONDS,
 } from "../shared";
 import { activeLeaseOrUndefined } from "../activity";
-import { listActiveStockReceiveOperations } from "../../nativeReceiveActivity";
+import {
+  listActiveStockReceiveOperations,
+  listActiveStockReceivePreparationLeases,
+} from "../../nativeReceiveActivity";
 import {
   selectCompactionPlan,
   catalogNeedsCompaction,
@@ -114,6 +117,9 @@ export async function beginCompactionState(args: {
     if (gcOwnsMaintenance(await transaction.get<GcOperation>(GC_OPERATION_KEY)))
       return "compact-active";
     if (activeLeaseOrUndefined(await transactionStore.get("receiveLease"), now)) {
+      return "receive-active";
+    }
+    if ((await listActiveStockReceivePreparationLeases(transactionStore, now)).length > 0) {
       return "receive-active";
     }
     if ((await listActiveStockReceiveOperations(transactionStore)).length > 0) {
@@ -220,6 +226,14 @@ export async function commitCompactionState(args: {
       status: "retry",
       reason: "receive-active",
       message: "A receive lease became active before compaction could commit.",
+    };
+  }
+  if ((await listActiveStockReceivePreparationLeases(store)).length > 0) {
+    await store.delete("compactLease");
+    return {
+      status: "retry",
+      reason: "receive-active",
+      message: "Stock receive input staging became active before compaction could commit.",
     };
   }
   if ((await listActiveStockReceiveOperations(store)).length > 0) {
@@ -332,6 +346,7 @@ export async function rearmCompactionQueueFromAlarm(args: {
   const now = Date.now();
   if (gcOwnsMaintenance(await args.ctx.storage.get<GcOperation>(GC_OPERATION_KEY))) return false;
   if (activeLeaseOrUndefined(await store.get("receiveLease"), now)) return false;
+  if ((await listActiveStockReceivePreparationLeases(store, now)).length > 0) return false;
   if (activeLeaseOrUndefined(await store.get("compactLease"), now)) return false;
 
   const doId = args.ctx.id.toString();

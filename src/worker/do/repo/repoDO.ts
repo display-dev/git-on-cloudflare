@@ -66,6 +66,7 @@ import {
   type BeginCompactionResult,
   beginCompactionState,
   beginReceiveLease,
+  promoteStockPreparationLease,
   type BeginReachabilityGcResult,
   beginReachabilityGcState,
   type ClearCompactionRequestResult,
@@ -271,7 +272,7 @@ export class RepoDurableObject extends DurableObject {
 
     if (await resumeGcFromAlarm({ ctx: this.ctx, env: this.env, logger: this.logger })) return;
 
-    await clearExpiredLeases(this.ctx, this.env, this.logger);
+    if (await clearExpiredLeases(this.ctx, this.env, this.logger)) return;
 
     if (
       await rearmCompactionQueueFromAlarm({ ctx: this.ctx, env: this.env, logger: this.logger })
@@ -387,6 +388,10 @@ export class RepoDurableObject extends DurableObject {
 
   public async abortReceive(token: string): Promise<boolean> {
     return await abortReceiveLease(this.ctx, token);
+  }
+
+  public async promoteStockPreparation(token: string): Promise<boolean> {
+    return await promoteStockPreparationLease(this.ctx, token);
   }
 
   public async enqueueNativeReceive(

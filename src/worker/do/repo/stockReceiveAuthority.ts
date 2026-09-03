@@ -45,7 +45,10 @@ import {
 import { validateStockReceivePreparedProof } from "@/worker/git/nativeReceive/stockProof";
 import { nativeReceiveClaimOutputPackKey, packIndexKey, packRefsKey } from "@/worker/keys";
 import { LEASE_RETRY_AFTER_SECONDS, RECEIVE_LEASE_TTL_MS } from "./catalog/shared";
-import { STOCK_RECEIVE_EXECUTION_CLAIM_MS } from "./nativeReceiveActivity";
+import {
+  STOCK_RECEIVE_EXECUTION_CLAIM_MS,
+  removeStockReceivePreparationLease,
+} from "./nativeReceiveActivity";
 
 const MAX_RETAINED_OPERATIONS = 128;
 const MAX_EVIDENCE_EVENTS = 128;
@@ -268,6 +271,7 @@ export async function admitStockReceiveState(args: {
       if (existing.state === "committed") {
         const currentLease = await store.get("receiveLease");
         if (currentLease?.token === args.operation.leaseToken) await store.delete("receiveLease");
+        await removeStockReceivePreparationLease(store, args.operation.leaseToken);
         return {
           status: "replayed",
           operation: nativeReceiveOperationView(existing),
@@ -323,7 +327,15 @@ export async function admitStockReceiveState(args: {
       }
     }
     const lease = await store.get("receiveLease");
-    if (!lease || lease.token !== args.operation.leaseToken || lease.expiresAt <= Date.now()) {
+    const preparationLeases = await store.get("stockReceivePreparationLeases");
+    const preparationLease = preparationLeases?.find(
+      (candidate) =>
+        candidate.token === args.operation.leaseToken && candidate.expiresAt > Date.now()
+    );
+    if (
+      (!lease || lease.token !== args.operation.leaseToken || lease.expiresAt <= Date.now()) &&
+      !preparationLease
+    ) {
       return { status: "rejected", code: "lease-mismatch" };
     }
     const claimId = crypto.randomUUID();
@@ -346,10 +358,11 @@ export async function admitStockReceiveState(args: {
     if (!(await retainOperation(store, admitted))) {
       return { status: "rejected", code: "operation-ledger-full" };
     }
-    // The exclusive receive lease owns staging until the operation record is
-    // durable. Ordinary stock work can then prepare concurrently; RepoDO still
-    // serializes its exact-old publication. GC-coordinated receives retain the
-    // lease because their source-protection proof is bound to that token.
+    await removeStockReceivePreparationLease(store, admitted.leaseToken);
+    // The bounded preparation reservation owns staging until the operation
+    // record is durable. Ordinary stock work can prepare concurrently; RepoDO
+    // still serializes exact-old publication. GC-coordinated receives retain
+    // the exclusive lease because their source-protection proof is bound to it.
     if (!gcOwnsSource(await transaction.get<GcOperation>(GC_OPERATION_KEY))) {
       await store.delete("receiveLease");
     }

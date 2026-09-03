@@ -166,6 +166,7 @@ export type RepoStateSchema = {
   nativeCatalogReaderGenerationFloor: number | undefined;
   nextPackSeq: number;
   receiveLease: RepoLease | undefined;
+  stockReceivePreparationLeases: RepoLease[] | undefined;
   stockReceivePublicationLease: RepoLease | undefined;
   stockReceiveRecoveryLease: StockReceiveRecoveryLease | undefined;
   receiveOutcomeIndex: string[] | undefined;

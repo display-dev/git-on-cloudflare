@@ -5,6 +5,7 @@ import {
 } from "@/worker/git/maintenance/gcOperation";
 import type { RepositoryReadLease, Ref, RepoLease } from "./repoState";
 import { getDb, listActivePackCatalog } from "./db";
+import { activeStockReceivePreparationLeases } from "./nativeReceiveActivity";
 
 const READER_HOLD_MS = 15 * 60_000;
 
@@ -21,6 +22,12 @@ export async function getQualificationGcSource(ctx: DurableObjectState, env: Env
       // normal recovery clear it before exposing a qualification snapshot.
       if (lease) return null;
     }
+    if (
+      activeStockReceivePreparationLeases(
+        await transaction.get<RepoLease[]>("stockReceivePreparationLeases")
+      ).length > 0
+    )
+      return null;
     return {
       generation: (await transaction.get<number>("packsetVersion")) ?? 0,
       refs: (await transaction.get<Ref[]>("refs")) ?? [],

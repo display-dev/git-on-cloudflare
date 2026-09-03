@@ -27,6 +27,7 @@ const TRANSIENT_KEYS = [
   "receiveOutcomeIndex",
   "stockReceiveRecoveryLease",
   "stockReceivePublicationLease",
+  "stockReceivePreparationLeases",
   "reachabilityGcPending",
   "compactionWantedAt",
   "nativeInputHold:foreground",
@@ -72,7 +73,9 @@ export async function settleQualificationCompaction(
       status: "request-cleared" as const,
       cleared,
       writerActive: Boolean(
-        (await transaction.get("receiveLease")) || (await transaction.get("compactLease"))
+        (await transaction.get("receiveLease")) ||
+        (await transaction.get("stockReceivePreparationLeases")) ||
+        (await transaction.get("compactLease"))
       ),
     };
   });

@@ -22,6 +22,7 @@ export type BeginReceiveResult =
       nextPackSeq: number;
       activeCatalog: PackCatalogRow[];
       concurrentStockPreparation?: boolean | undefined;
+      stockPreparationReserved?: true | undefined;
       stockRecovery?: { operationId: string; token: string } | undefined;
     };
 
