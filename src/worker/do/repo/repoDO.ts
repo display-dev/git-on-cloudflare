@@ -456,6 +456,7 @@ export class RepoDurableObject extends DurableObject {
       ctx: this.ctx,
       operationId,
       fingerprint,
+      logger: this.logger,
     });
   }
 

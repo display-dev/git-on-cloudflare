@@ -1405,21 +1405,35 @@ export async function completeStockReceiveCleanupState(args: {
   ctx: DurableObjectState;
   operationId: string;
   fingerprint: string;
+  logger: Logger;
 }): Promise<CompleteStockReceiveCleanupResult> {
-  return await args.ctx.storage.transaction(async (transaction) => {
-    const store = asTypedStorage<RepoStateSchema>(transaction);
-    const operation = await store.get(nativeReceiveOperationKey(args.operationId));
-    if (!operation) return { status: "rejected", code: "cleanup-operation-not-found" };
-    if (operation.fingerprint !== args.fingerprint) {
-      return { status: "rejected", code: "cleanup-fingerprint-mismatch" };
+  const result = await args.ctx.storage.transaction<CompleteStockReceiveCleanupResult>(
+    async (transaction) => {
+      const store = asTypedStorage<RepoStateSchema>(transaction);
+      const operation = await store.get(nativeReceiveOperationKey(args.operationId));
+      if (!operation) return { status: "rejected", code: "cleanup-operation-not-found" };
+      if (operation.fingerprint !== args.fingerprint) {
+        return { status: "rejected", code: "cleanup-fingerprint-mismatch" };
+      }
+      if (!isNativeReceiveTerminal(operation.state)) {
+        return { status: "rejected", code: `cleanup-state-${operation.state}` };
+      }
+      const cleaned = { ...operation, cleanupPending: false, updatedAt: Date.now() };
+      await store.put(nativeReceiveOperationKey(operation.id), cleaned);
+      // Give the just-completed Queue delivery time to acknowledge, then let the
+      // shared alarm pipeline resume stock recovery, GC, compaction, or idle work.
+      const wakeAt = Date.now() + 1_000;
+      const currentAlarm = await transaction.getAlarm();
+      if (currentAlarm === null || currentAlarm > wakeAt) await transaction.setAlarm(wakeAt);
+      return { status: "complete", operation: nativeReceiveOperationView(cleaned) };
     }
-    if (!isNativeReceiveTerminal(operation.state)) {
-      return { status: "rejected", code: `cleanup-state-${operation.state}` };
-    }
-    const cleaned = { ...operation, cleanupPending: false, updatedAt: Date.now() };
-    await store.put(nativeReceiveOperationKey(operation.id), cleaned);
-    return { status: "complete", operation: nativeReceiveOperationView(cleaned) };
-  });
+  );
+  if (result.status === "complete") {
+    args.logger.info("stock-receive:cleanup-followup-scheduled", {
+      operationId: args.operationId,
+    });
+  }
+  return result;
 }
 
 export const __test = {

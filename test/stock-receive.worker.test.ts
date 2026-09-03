@@ -410,6 +410,157 @@ describe("stock Smart HTTP receive spike", () => {
     expect(await stub.beginRepositoryDeletion()).toMatchObject({ ready: true });
   });
 
+  it("wakes the next expired stock operation after queue cleanup completes", async () => {
+    const repo = uniqueRepoId("stock-cleanup-recovery-wakeup");
+    const seeded = await setupRepoForTests(env, "o", repo);
+    const stub = getRepoStub(env, seeded.doName);
+    const now = Date.now();
+    const operation = (id: string, state: "failed" | "processing"): NativeReceiveOperation => ({
+      id,
+      fingerprint: (state === "failed" ? "a" : "b").repeat(64),
+      leaseToken: `${id}-lease`,
+      repositoryId: seeded.doName,
+      state,
+      inputPackKey: `${id}-input`,
+      inputBytes: 1,
+      inputEtag: `${id}-input-etag`,
+      stockReceive: {
+        inputRequestSha256: (state === "failed" ? "c" : "d").repeat(64),
+        packOffset: 1,
+        packBytes: 1,
+        advertisedRefs: [],
+      },
+      outputPackKey: `${id}-output.pack`,
+      outputIdxKey: `${id}-output.idx`,
+      outputRefsKey: `${id}-output.refs`,
+      commands: [
+        {
+          oldOid: "0".repeat(40),
+          newOid: (state === "failed" ? "1" : "2").repeat(40),
+          ref: `refs/heads/${id}`,
+        },
+      ],
+      acceptedWrites: [],
+      activeCatalog: [],
+      catalogGeneration: 0,
+      createdAt: now - 15 * 60_000,
+      updatedAt: now - 15 * 60_000,
+      attempts: 1,
+      cleanupPending: state === "failed",
+      claimId: `${id}-claim`,
+      claimExpiresAt: now - 1,
+      ...(state === "failed" ? { errorCode: "execution-claim-expired" } : {}),
+    });
+    const cleaned = operation("cleaned", "failed");
+    const waiting = operation("waiting", "processing");
+    const active = {
+      ...operation("active", "processing"),
+      claimExpiresAt: now + 5 * 60_000,
+    };
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const store = asTypedStorage<RepoStateSchema>(state.storage);
+        await store.put(nativeReceiveOperationKey(cleaned.id), cleaned);
+        await store.put(nativeReceiveOperationKey(waiting.id), waiting);
+        await store.put(nativeReceiveOperationKey(active.id), active);
+        await store.put("nativeReceiveOperationIndex", [waiting.id, active.id, cleaned.id]);
+        await store.put("receiveLease", {
+          token: waiting.leaseToken,
+          operation: "receive",
+          createdAt: now,
+          expiresAt: now + 30 * 60_000,
+        });
+        await state.storage.deleteAlarm();
+      }
+    );
+
+    const cleanupStartedAt = Date.now();
+    expect(await stub.completeStockReceiveCleanup(cleaned.id, cleaned.fingerprint)).toMatchObject({
+      status: "complete",
+    });
+    const cleanupCompletedAt = Date.now();
+    const scheduled = await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const store = asTypedStorage<RepoStateSchema>(state.storage);
+        return {
+          alarm: await state.storage.getAlarm(),
+          waiting: await store.get(nativeReceiveOperationKey(waiting.id)),
+        };
+      }
+    );
+    expect(scheduled).toMatchObject({
+      alarm: expect.any(Number),
+      waiting: { state: "processing" },
+    });
+    expect(scheduled.alarm).toBeGreaterThanOrEqual(cleanupStartedAt + 900);
+    expect(scheduled.alarm).toBeLessThanOrEqual(cleanupCompletedAt + 1_100);
+    await runDurableObjectAlarm(stub);
+
+    expect(await stub.getNativeReceiveOperation(waiting.id)).toMatchObject({
+      state: "aborted",
+      errorCode: "execution-claim-expired",
+    });
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const store = asTypedStorage<RepoStateSchema>(state.storage);
+        expect(await state.storage.get("receiveLease")).toBeUndefined();
+        expect(await store.get(nativeReceiveOperationKey(active.id))).toMatchObject({
+          state: "processing",
+          claimExpiresAt: active.claimExpiresAt,
+        });
+      }
+    );
+
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const store = asTypedStorage<RepoStateSchema>(state.storage);
+        await store.delete(nativeReceiveOperationKey(active.id));
+        await store.put("nativeReceiveOperationIndex", [waiting.id, cleaned.id]);
+      }
+    );
+    expect(await stub.registerGcOperation(seeded.doName, "cleanup-shared-alarm")).toMatchObject({
+      status: "ready",
+    });
+    const queueSend = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    try {
+      await runDurableObjectAlarm(stub);
+      expect(queueSend).toHaveBeenCalledWith({
+        kind: "native-receive",
+        doId: expect.any(String),
+        operationId: waiting.id,
+      });
+      queueSend.mockClear();
+
+      const lastCleanupStartedAt = Date.now();
+      expect(await stub.completeStockReceiveCleanup(waiting.id, waiting.fingerprint)).toMatchObject(
+        { status: "complete" }
+      );
+      const lastCleanupCompletedAt = Date.now();
+      const sharedAlarm = await runDOWithRetry(
+        () => stub,
+        async (_instance, state) => await state.storage.getAlarm()
+      );
+      expect(sharedAlarm).toBeGreaterThanOrEqual(lastCleanupStartedAt + 900);
+      expect(sharedAlarm).toBeLessThanOrEqual(lastCleanupCompletedAt + 1_100);
+
+      await runDurableObjectAlarm(stub);
+      expect(queueSend).toHaveBeenCalledWith({
+        kind: "reachability-gc",
+        doId: expect.any(String),
+        repoId: seeded.doName,
+        operationId: "cleanup-shared-alarm",
+      });
+    } finally {
+      queueSend.mockRestore();
+    }
+  });
+
   it("enters two independent immutable stock preparations before either completes", async () => {
     const repo = uniqueRepoId("stock-parallel-worker");
     const seeded = await setupRepoForTests(env, "o", repo);
