@@ -18,7 +18,7 @@ import { runQueueMessage } from "./util/queue";
 import { createTestCacheContext, seedPackFirstRepo } from "./util/pack-first";
 import { makeTracingLimiter } from "./util/pack-indexer.helpers";
 import { buildAppendOnlyDelta, buildCopyPrefixDelta, buildPack } from "./util/git-pack";
-import { seedPackedRepoState } from "./util/packed-repo";
+import { buildTreePayload, seedPackedRepoState } from "./util/packed-repo";
 import { computeOid, encodeGitObject } from "@/worker/git/core/objects";
 import { readExactPackRangeWithRetry, readPackRange } from "@/worker/git/pack/packMeta";
 import { closeSidebandWithFatal } from "@/worker/git/operations/fetch/sideband";
@@ -101,14 +101,14 @@ async function expectRetryThenBackfillRepair(args: {
   repoId: string;
   doId: DurableObjectId;
   packKey: string;
-  firstCommit: string;
   secondCommit: string;
+  haves: string[];
 }): Promise<void> {
   const retryRes = await postFinalFetch({
     owner: args.owner,
     repo: args.repo,
     wants: [args.secondCommit],
-    haves: [args.firstCommit],
+    haves: args.haves,
   });
   expect(retryRes.status).toBe(503);
   expect(retryRes.headers.get("Retry-After")).toBe("10");
@@ -127,7 +127,7 @@ async function expectRetryThenBackfillRepair(args: {
     owner: args.owner,
     repo: args.repo,
     wants: [args.secondCommit],
-    haves: [args.firstCommit],
+    haves: args.haves,
   });
   expect(okRes.status).toBe(200);
   const okBytes = new Uint8Array(await okRes.arrayBuffer());
@@ -954,8 +954,8 @@ describe("git fetch streaming (default)", () => {
       repoId,
       doId,
       packKey: targetPack.packKey,
-      firstCommit,
       secondCommit,
+      haves: [firstCommit],
     });
   });
 
@@ -983,8 +983,29 @@ describe("git fetch streaming (default)", () => {
       repoId,
       doId,
       packKey: targetPack.packKey,
-      firstCommit,
       secondCommit,
+      haves: [firstCommit],
+    });
+  });
+
+  it("retries an initial clone before streaming when an active ref sidecar is missing", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("clone-missing-ref-sidecar");
+    await setupRepoForTests(env, owner, repo);
+    const { repoId, doId, getStub, secondCommit } = await seedTwoCommitRepo(owner, repo);
+    const activeCatalog = await getStub().getActivePackCatalog();
+    expect(activeCatalog.length).toBeGreaterThan(0);
+    const targetPack = activeCatalog[0]!;
+    await env.REPO_BUCKET.delete(packRefsKey(targetPack.packKey));
+
+    await expectRetryThenBackfillRepair({
+      owner,
+      repo,
+      repoId,
+      doId,
+      packKey: targetPack.packKey,
+      secondCommit,
+      haves: [],
     });
   });
 
@@ -1074,6 +1095,75 @@ describe("git fetch streaming (default)", () => {
     const dv = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
     const objCount = dv.getUint32(8);
     expect(objCount).toBeGreaterThanOrEqual(2); // At least tree + commit
+  });
+
+  it("limits an initial clone to the requested ref closure", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("clone-requested-closure");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const id = env.REPO_DO.idFromName(repoId);
+    const getStub = () => env.REPO_DO.get(id);
+    const author = "You <you@example.com> 0 +0000";
+
+    const createIndependentClosure = async (label: string) => {
+      const blobPayload = new TextEncoder().encode(`${label} content\n`);
+      const blob = await encodeGitObject("blob", blobPayload);
+      const treePayload = buildTreePayload([
+        { mode: "100644", name: `${label}.txt`, oid: blob.oid },
+      ]);
+      const tree = await encodeGitObject("tree", treePayload);
+      const commitPayload = new TextEncoder().encode(
+        `tree ${tree.oid}\n` + `author ${author}\n` + `committer ${author}\n\n` + `${label}\n`
+      );
+      const commit = await encodeGitObject("commit", commitPayload);
+      return {
+        blob,
+        tree,
+        commit,
+        pack: await buildPack([
+          { type: "blob", payload: blobPayload },
+          { type: "tree", payload: treePayload },
+          { type: "commit", payload: commitPayload },
+        ]),
+      };
+    };
+
+    const requested = await createIndependentClosure("requested");
+    const unrelated = await createIndependentClosure("unrelated");
+    await seedPackedRepoState({
+      env,
+      repoId,
+      getStub,
+      packs: [
+        { name: "pack-unrelated.pack", packBytes: unrelated.pack },
+        { name: "pack-requested.pack", packBytes: requested.pack },
+      ],
+      refs: [
+        { name: "refs/heads/main", oid: requested.commit.oid },
+        { name: "refs/heads/unrelated", oid: unrelated.commit.oid },
+      ],
+      head: { target: "refs/heads/main", oid: requested.commit.oid },
+    });
+
+    const snapshotLoad = await loadUploadPackSnapshot(env, repoId);
+    expect(snapshotLoad.type).toBe("Ready");
+    if (snapshotLoad.type !== "Ready") return;
+    const plan = await buildServeUploadPackPlan(
+      env,
+      repoId,
+      snapshotLoad.snapshot,
+      [requested.commit.oid],
+      []
+    );
+
+    expect(plan.type).toBe("Serve");
+    expect(new Set(plan.neededOids)).toEqual(
+      new Set([requested.commit.oid, requested.tree.oid, requested.blob.oid])
+    );
+    expect(plan.neededOids).not.toContain(unrelated.commit.oid);
+    expect(plan.neededOids).not.toContain(unrelated.tree.oid);
+    expect(plan.neededOids).not.toContain(unrelated.blob.oid);
   });
 
   it("handles repositories with packs created by default", async () => {

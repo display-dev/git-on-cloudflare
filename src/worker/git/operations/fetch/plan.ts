@@ -5,7 +5,7 @@ import type { OrderedPackSnapshot, ServeUploadPackPlan, UploadPackPlan } from ".
 import type { PackRefSnapshotEntry, PackRefSnapshotLoadResult } from "@/worker/git/pack/refIndex";
 
 import { createLogger } from "@/worker/common";
-import { buildInitialCloneNeeded, loadOrderedPackSnapshot } from "@/worker/git/pack/snapshot";
+import { loadOrderedPackSnapshot } from "@/worker/git/pack/snapshot";
 import { getDoIdFromPath } from "@/worker/keys";
 import { findCommonHaves } from "../closure";
 import { computeNeededFromPackRefs } from "./refClosure";
@@ -160,24 +160,6 @@ export async function buildServeUploadPackPlan(
 ): Promise<ServeUploadPackPlan> {
   const log = createLogger(env.LOG_LEVEL, { service: "StreamPlan", repoId });
 
-  if (haves.length === 0) {
-    onProgress?.("Selecting objects to send...\n");
-    const neededOids = buildInitialCloneNeeded(snapshot);
-    log.info("stream:plan:init-clone", {
-      packs: snapshot.packs.length,
-      needed: neededOids.length,
-    });
-    return {
-      type: "Serve",
-      repoId,
-      snapshot,
-      neededOids,
-      ackOids: [],
-      signal,
-      cacheCtx,
-    };
-  }
-
   const refSnapshot = await loadPackRefSnapshot(env, repoId, snapshot, cacheCtx);
   if (refSnapshot.type === "Missing") {
     throw new FetchPlanRetryError("missing-ref-index");
@@ -209,6 +191,7 @@ export async function buildServeUploadPackPlan(
     packs: snapshot.packs.length,
     needed: neededOids.length,
     ackOids: 0,
+    initialClone: haves.length === 0,
   });
 
   return {

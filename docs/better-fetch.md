@@ -97,17 +97,14 @@ that extra cache part of the first correctness rewrite.
    - missing-ref fallback in `src/git/operations/fetch/neededFast.ts`
    - `findCommonHaves()` fallback in `src/git/operations/closure.ts`
 
-4. Initial clone and closure-timeout fallback paths can inflate fetch scope from
-   the actual closure result to a full pack union.
-
-5. `src/git/object-store/store.ts:readObjectRefsBatch()` still walks objects
+4. `src/git/object-store/store.ts:readObjectRefsBatch()` still walks objects
    serially even though the new object-store path is otherwise pack-first.
 
-6. Hydration still depends on the old parsed-idx shape in:
+5. Hydration still depends on the old parsed-idx shape in:
    - `src/do/repo/hydration/status.ts`
    - `src/do/repo/hydration/stages/scanDeltas.ts`
 
-7. The current assembler shape is fetch-specific and not a good Phase 4
+6. The current assembler shape is fetch-specific and not a good Phase 4
    compaction surface.
 
 ## Files To Delete
@@ -219,11 +216,11 @@ hint and pay avoidable `head()` reads.
 
 Initial clone path:
 
-- if `haves.length === 0`, enumerate the union directly from eager `IdxView`s
-- iterate `idx.count` and materialize OIDs with `getOidHexAt()`
-- deduplicate with `Set<string>`
-- delete `buildUnionNeededForKeys()`
-- delete `countMissingRootTreesFromWants()`
+- load the validated per-pack reference sidecars before streaming
+- walk the requested wants with an empty stop set
+- omit objects reachable only from unrelated refs
+- return the same retryable readiness response as incremental fetch when a
+  sidecar is missing, corrupt, stale, or exceeds the closure budget
 
 Incremental path:
 

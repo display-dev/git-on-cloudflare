@@ -10,8 +10,12 @@ The pressure test changed the plan in four important ways: sidecar readiness is 
 
 - Add an R2 sidecar beside every pack: `packKey.replace(/\.pack$/, ".refs")`, exposed through `packRefsKey(packKey)` in `src/keys.ts`.
 - Keep sidecars as derived R2 artifacts. Do not add SQLite tables and do not add DO methods unless an existing RPC cannot provide the current active catalog.
-- Sidecars are required for final fetches with haves. Initial clone with no haves stays idx-only via `buildInitialCloneNeeded()`.
-- Missing/corrupt/stale sidecar on final fetch returns `503 Retry-After: 10` before `packfile\n` is emitted, and queues idempotent backfill.
+- Sidecars are required for every final object-transfer request, including an
+  initial clone with no haves. Initial clone walks only the requested wants'
+  logical closure so unrelated refs do not inflate the transferred pack.
+- Missing/corrupt/stale sidecar on a final object-transfer request returns
+  `503 Retry-After: 10` before `packfile\n` is emitted, and queues idempotent
+  backfill.
 - The production fetch planner must not fall back to `readObjectRefsBatch()` for active packs. That path is the scalability problem.
 
 ## Sidecar Format and Types
@@ -100,32 +104,32 @@ The pressure test changed the plan in four important ways: sidecar readiness is 
 
 ## State Matrix
 
-| State                                       | Behavior                                                    |
-| ------------------------------------------- | ----------------------------------------------------------- |
-| Initial clone, no haves                     | Existing idx-only path; sidecar not required                |
-| Negotiation request, no common base         | ACK-only `NAK`; sidecar not required                        |
-| Negotiation request, common base found      | Sidecar closure, `ready`, then stream pack                  |
-| Final fetch, all sidecars valid             | Sidecar closure, then stream pack                           |
-| Final fetch with duplicate wants            | Queue and send each canonical active object once            |
-| Final fetch reaches duplicate OID in packs  | Newest snapshot-order pack is canonical                     |
-| Force-push leaves overlapping active packs  | Traverse newest pack first; old overlap does not grow queue |
-| Final fetch has no common haves             | Sidecar closure runs with an empty stop set                 |
-| Final fetch, sidecar missing/corrupt/stale  | Queue backfill, return `503 Retry-After: 10` before stream  |
-| Final fetch exceeds closure timeout         | Return `503 Retry-After: 10` before stream                  |
-| Final fetch exceeds missing-ref cap         | Return `503 Retry-After: 10` before stream                  |
-| Active pack has idx missing/corrupt         | Existing repository-not-ready behavior                      |
-| Newly received pack `.refs` write fails     | Abort receive, cleanup staged artifacts, no catalog commit  |
-| Receive connectivity rejects                | Cleanup staged `.pack/.idx/.refs`, no catalog commit        |
-| Finalize receive conflict/lease mismatch    | Cleanup staged `.pack/.idx/.refs`                           |
-| Compaction target `.refs` write fails       | Abort/retry compaction, cleanup staged artifacts            |
-| Superseded pack delete sees missing `.refs` | Log debug/info and continue                                 |
-| Superseded pack delete                      | Delete `.pack`, `.idx`, and `.refs` together                |
-| Admin remove superseded pack                | Delete `.pack`, `.idx`, `.refs`; report artifact outcomes   |
-| Backfill enqueue fails                      | Log warning; still return retry readiness response          |
-| Backfill target no longer active            | Ack as stale                                                |
-| Backfill sees valid sidecar already present | Ack as duplicate/no-op                                      |
-| Backfill transient R2/DO failure            | Retry with delay                                            |
-| Backfill deterministic invalid pack/idx     | Log invalid-pack and ack                                    |
+| State                                       | Behavior                                                     |
+| ------------------------------------------- | ------------------------------------------------------------ |
+| Initial clone, no haves                     | Sidecar closure from requested wants; unrelated refs omitted |
+| Negotiation request, no common base         | ACK-only `NAK`; sidecar not required                         |
+| Negotiation request, common base found      | Sidecar closure, `ready`, then stream pack                   |
+| Final fetch, all sidecars valid             | Sidecar closure, then stream pack                            |
+| Final fetch with duplicate wants            | Queue and send each canonical active object once             |
+| Final fetch reaches duplicate OID in packs  | Newest snapshot-order pack is canonical                      |
+| Force-push leaves overlapping active packs  | Traverse newest pack first; old overlap does not grow queue  |
+| Final fetch has no common haves             | Sidecar closure runs with an empty stop set                  |
+| Final fetch, sidecar missing/corrupt/stale  | Queue backfill, return `503 Retry-After: 10` before stream   |
+| Final fetch exceeds closure timeout         | Return `503 Retry-After: 10` before stream                   |
+| Final fetch exceeds missing-ref cap         | Return `503 Retry-After: 10` before stream                   |
+| Active pack has idx missing/corrupt         | Existing repository-not-ready behavior                       |
+| Newly received pack `.refs` write fails     | Abort receive, cleanup staged artifacts, no catalog commit   |
+| Receive connectivity rejects                | Cleanup staged `.pack/.idx/.refs`, no catalog commit         |
+| Finalize receive conflict/lease mismatch    | Cleanup staged `.pack/.idx/.refs`                            |
+| Compaction target `.refs` write fails       | Abort/retry compaction, cleanup staged artifacts             |
+| Superseded pack delete sees missing `.refs` | Log debug/info and continue                                  |
+| Superseded pack delete                      | Delete `.pack`, `.idx`, and `.refs` together                 |
+| Admin remove superseded pack                | Delete `.pack`, `.idx`, `.refs`; report artifact outcomes    |
+| Backfill enqueue fails                      | Log warning; still return retry readiness response           |
+| Backfill target no longer active            | Ack as stale                                                 |
+| Backfill sees valid sidecar already present | Ack as duplicate/no-op                                       |
+| Backfill transient R2/DO failure            | Retry with delay                                             |
+| Backfill deterministic invalid pack/idx     | Log invalid-pack and ack                                     |
 
 ## Logging and Limits
 

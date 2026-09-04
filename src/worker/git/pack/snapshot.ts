@@ -5,7 +5,7 @@ import type {
   OrderedPackSnapshotEntry,
 } from "@/worker/git/operations/fetch/types";
 
-import { getOidHexAt, loadActivePackCatalog, loadIdxView } from "@/worker/git/object-store";
+import { loadActivePackCatalog, loadIdxView } from "@/worker/git/object-store";
 
 export type SnapshotLoadResult =
   | {
@@ -70,16 +70,4 @@ export async function loadOrderedPackSnapshot(
     type: "Ready",
     snapshot: { packs },
   };
-}
-
-export function buildInitialCloneNeeded(snapshot: OrderedPackSnapshot): string[] {
-  const needed = new Set<string>();
-
-  for (const pack of snapshot.packs) {
-    for (let index = 0; index < pack.idx.count; index++) {
-      needed.add(getOidHexAt(pack.idx, index));
-    }
-  }
-
-  return Array.from(needed);
 }
