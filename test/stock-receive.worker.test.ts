@@ -35,6 +35,7 @@ import type {
 import {
   __test as stockPlannerTest,
   planStockReceive,
+  stockReceivePlanKeys,
   StockReceivePlannerError,
 } from "@/worker/git/nativeReceive/stockPlanner";
 import { validateStockReceivePreparedProof } from "@/worker/git/nativeReceive/stockProof";
@@ -1863,6 +1864,67 @@ describe("stock Smart HTTP receive spike", () => {
     ).not.toEqual(pack);
     expect(await env.REPO_BUCKET.head(packIndexKey(outputPackKey))).not.toBeNull();
     expect(await env.REPO_BUCKET.head(packRefsKey(outputPackKey))).not.toBeNull();
+
+    for (const failedRole of ["manifest", "pack"] as const) {
+      stockPlannerTest.reset();
+      const failedId = `direct-pack-partial-${failedRole}`;
+      const failedInputPackKey = `${prefix}/native-receive/${failedId}.request`;
+      const failedInput = await env.REPO_BUCKET.put(failedInputPackKey, pack, {
+        customMetadata: { sha256: inputRequestSha256 },
+      });
+      const failedOutputPackKey = nativeReceiveOutputPackKey(
+        prefix,
+        failedId,
+        (failedRole === "manifest" ? "c" : "d").repeat(64)
+      );
+      const failedOperation = {
+        ...operation,
+        id: failedId,
+        fingerprint: (failedRole === "manifest" ? "c" : "d").repeat(64),
+        inputPackKey: failedInputPackKey,
+        inputEtag: failedInput.etag,
+        outputPackKey: failedOutputPackKey,
+        outputIdxKey: packIndexKey(failedOutputPackKey),
+        outputRefsKey: packRefsKey(failedOutputPackKey),
+      } satisfies NativeReceiveOperation;
+      const failedPlanKeys = stockReceivePlanKeys(failedInputPackKey, inputRequestSha256);
+      stockPlannerTest.failImmutablePut(
+        failedId,
+        failedRole === "manifest" ? failedPlanKeys.closureManifestKey : failedOutputPackKey
+      );
+      let partialFailureSubrequests = 0;
+
+      await expect(
+        executeStockReceiveWorkerDataPlane({
+          env: { ...env, STOCK_RECEIVE_DIRECT_PACK: "1" } as Env,
+          operation: failedOperation,
+          inputPackBytes: pack,
+          cacheCtx: {
+            req: new Request(`https://example.invalid/${failedId}`),
+            ctx: createExecutionContext(),
+            memo: {},
+          },
+          limiter: new SubrequestLimiter(40),
+          countSubrequest(_operation, n = 1) {
+            partialFailureSubrequests += n;
+          },
+          logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackPartialFailureTest" }),
+        })
+      ).rejects.toThrow("stock-plan:direct-publication-failed");
+      // Three active-pack metadata reads, all four concurrent publication
+      // attempts, and deletion of the three successfully created siblings.
+      expect(partialFailureSubrequests).toBe(10);
+
+      for (const key of [
+        failedPlanKeys.closureManifestKey,
+        failedOutputPackKey,
+        packIndexKey(failedOutputPackKey),
+        packRefsKey(failedOutputPackKey),
+      ]) {
+        expect(await env.REPO_BUCKET.head(key)).toBeNull();
+      }
+      await env.REPO_BUCKET.delete(failedInputPackKey);
+    }
 
     const failedOutputPackKey = nativeReceiveOutputPackKey(
       prefix,

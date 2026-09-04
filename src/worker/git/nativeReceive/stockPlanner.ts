@@ -107,8 +107,15 @@ type TransientR2ReadFault = {
   elapsedMs?: number | undefined;
 };
 
+type ImmutablePutFault = {
+  operationId: string;
+  key: string;
+  triggered: boolean;
+};
+
 let wrongPrerequisiteRangeFaultForTesting: WrongPrerequisiteRangeFault | undefined;
 let transientR2ReadFaultForTesting: TransientR2ReadFault | undefined;
+let immutablePutFaultForTesting: ImmutablePutFault | undefined;
 let unexpectedWholePackReadOperationForTesting: string | undefined;
 let transientWholePackReadForTesting: { operationId: string; attempts: number } | undefined;
 let shortWholePackReadForTesting: { operationId: string; attempts: number } | undefined;
@@ -156,6 +163,9 @@ export const __test = {
       ? { ...transientR2ReadFaultForTesting }
       : undefined;
   },
+  failImmutablePut(operationId: string, key: string): void {
+    immutablePutFaultForTesting = { operationId, key, triggered: false };
+  },
   readWholeActivePack(operationId: string): void {
     unexpectedWholePackReadOperationForTesting = operationId;
   },
@@ -193,6 +203,7 @@ export const __test = {
   reset(): void {
     wrongPrerequisiteRangeFaultForTesting = undefined;
     transientR2ReadFaultForTesting = undefined;
+    immutablePutFaultForTesting = undefined;
     unexpectedWholePackReadOperationForTesting = undefined;
     transientWholePackReadForTesting = undefined;
     shortWholePackReadForTesting = undefined;
@@ -1201,6 +1212,7 @@ async function readExactRange(args: {
 
 async function putImmutableBytes(args: {
   env: Env;
+  operationId: string;
   key: string;
   bytes: Uint8Array;
   sha256: string;
@@ -1208,6 +1220,11 @@ async function putImmutableBytes(args: {
   countSubrequest: (n?: number) => void;
 }): Promise<{ etag: string; created: boolean }> {
   args.countSubrequest();
+  const fault = immutablePutFaultForTesting;
+  if (fault?.operationId === args.operationId && fault.key === args.key && !fault.triggered) {
+    fault.triggered = true;
+    throw new Error("stock-plan:test-immutable-put-failed");
+  }
   const created = await args.limiter.run("r2:stock-plan-put-immutable", () =>
     args.env.REPO_BUCKET.put(args.key, args.bytes, {
       onlyIf: { etagDoesNotMatch: "*" },
@@ -1590,6 +1607,7 @@ async function planStockReceiveImpl(
   if (!directPackRequested) {
     const temporaryPut = await putImmutableBytes({
       env: args.env,
+      operationId: args.operationId,
       key: keys.temporaryPackKey,
       bytes: inputPack,
       sha256: tempSha256,
@@ -1971,46 +1989,97 @@ async function planStockReceiveImpl(
     const manifest = new TextEncoder().encode(JSON.stringify(planDocument));
     if (manifest.byteLength > MAX_MANIFEST_BYTES) throw new Error("stock-plan:manifest-limit");
     const closureManifestSha256 = await digestHex("SHA-256", manifest);
-    const closureManifestPut = await putImmutableBytes({
-      env: args.env,
-      key: keys.closureManifestKey,
-      bytes: manifest,
-      sha256: closureManifestSha256,
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-    });
-    if (closureManifestPut.created) ownedImmutableKeys.push(keys.closureManifestKey);
-    const manifestPublishCompleteAt = Date.now();
-
+    // The closure proof and canonical output artifacts are independent,
+    // immutable writes. Publish them together, then preserve the existing
+    // read-back verification before RepoDO can authorize the ref update.
     const directOutputUploadStartedAt = Date.now();
     const directArtifacts = [
       { key: args.outputPackKey, bytes: canonicalPack, sha256: canonicalPackSha256 },
       { key: args.outputIdxKey, bytes: canonicalIdxBytes, sha256: canonicalIdxSha256 },
       { key: args.outputRefsKey, bytes: canonicalRefsBytes, sha256: canonicalRefsSha256 },
     ];
-    const directPuts = await Promise.allSettled(
+    const directPutsPromise = Promise.allSettled(
       directArtifacts.map(async (artifact) => ({
         artifact,
         put: await putImmutableBytes({
           env: args.env,
+          operationId: args.operationId,
           ...artifact,
           limiter: args.limiter,
           countSubrequest: args.countSubrequest,
         }),
       }))
-    );
+    ).then((results) => ({
+      results,
+      elapsedMs: Date.now() - directOutputUploadStartedAt,
+    }));
+    const [closureManifestResults, directPutsOutcome] = await Promise.all([
+      Promise.allSettled([
+        putImmutableBytes({
+          env: args.env,
+          operationId: args.operationId,
+          key: keys.closureManifestKey,
+          bytes: manifest,
+          sha256: closureManifestSha256,
+          limiter: args.limiter,
+          countSubrequest: args.countSubrequest,
+        }),
+      ]),
+      directPutsPromise,
+    ]);
+    const directPuts = directPutsOutcome.results;
+    const directOutputUploadMs = directPutsOutcome.elapsedMs;
+    const closureManifestResult = closureManifestResults[0]!;
+    if (closureManifestResult.status === "fulfilled" && closureManifestResult.value.created) {
+      ownedImmutableKeys.push(keys.closureManifestKey);
+    }
     for (const result of directPuts) {
       if (result.status !== "fulfilled") continue;
       const { artifact, put } = result.value;
       if (put.created) ownedImmutableKeys.push(artifact.key);
     }
-    const directPutFailures = directPuts
-      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-      .map((result) => result.reason);
-    if (directPutFailures.length > 0) {
-      throw new AggregateError(directPutFailures, "stock-plan:direct-output-put-failed");
+    const failedOutputs: Array<{ key: string; reason: unknown }> = [];
+    for (let index = 0; index < directPuts.length; index++) {
+      const result = directPuts[index]!;
+      if (result.status === "rejected") {
+        failedOutputs.push({ key: directArtifacts[index]!.key, reason: result.reason });
+      }
     }
-    const directOutputUploadMs = Date.now() - directOutputUploadStartedAt;
+    if (closureManifestResult.status === "rejected") {
+      log.warn("stock-plan:direct-publication-failed", {
+        operationId: args.operationId,
+        failures: [
+          ...failedOutputs.map((entry) => ({ key: entry.key, reason: String(entry.reason) })),
+          {
+            key: keys.closureManifestKey,
+            reason: String(closureManifestResult.reason),
+          },
+        ],
+      });
+      throw new AggregateError(
+        [...failedOutputs.map((entry) => entry.reason), closureManifestResult.reason],
+        "stock-plan:direct-publication-failed"
+      );
+    }
+    if (failedOutputs.length > 0) {
+      log.warn("stock-plan:direct-publication-failed", {
+        operationId: args.operationId,
+        failures: failedOutputs.map((entry) => ({ key: entry.key, reason: String(entry.reason) })),
+      });
+      throw new AggregateError(
+        failedOutputs.map((entry) => entry.reason),
+        "stock-plan:direct-publication-failed"
+      );
+    }
+    const closureManifestPut = closureManifestResult.value;
+    // Phase fields remain additive: outputUploadMs owns the shared interval;
+    // manifestPublishMs records only a manifest tail beyond output completion.
+    // Manifest serialization and hashing occur before the shared interval and
+    // are therefore attributed to postManifestCleanupAndOverheadMs.
+    const manifestPublishMs = Math.max(
+      0,
+      Date.now() - directOutputUploadStartedAt - directOutputUploadMs
+    );
 
     return {
       executionMode: "direct-pack",
@@ -2033,7 +2102,7 @@ async function planStockReceiveImpl(
         boundaryValidationMs: boundaryValidationCompleteAt - incomingAnalysisCompleteAt,
         physicalPlanMs: physicalPlanCompleteAt - boundaryValidationCompleteAt,
         canonicalizationMs: canonicalizationCompleteAt - physicalPlanCompleteAt,
-        manifestPublishMs: manifestPublishCompleteAt - canonicalizationCompleteAt,
+        manifestPublishMs,
       },
       incomingOids: boundary.visitedIncomingOids,
       prerequisitePackKey: "",
@@ -2162,6 +2231,7 @@ async function planStockReceiveImpl(
   const prerequisitePackSha256 = await digestHex("SHA-256", prerequisitePack);
   const prerequisitePut = await putImmutableBytes({
     env: args.env,
+    operationId: args.operationId,
     key: keys.prerequisitePackKey,
     bytes: prerequisitePack,
     sha256: prerequisitePackSha256,
@@ -2251,6 +2321,7 @@ async function planStockReceiveImpl(
   const closureManifestSha256 = await digestHex("SHA-256", manifest);
   const closureManifestPut = await putImmutableBytes({
     env: args.env,
+    operationId: args.operationId,
     key: keys.closureManifestKey,
     bytes: manifest,
     sha256: closureManifestSha256,
