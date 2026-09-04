@@ -343,8 +343,6 @@ class VerifiedR2ObjectError extends Error {
   }
 }
 
-class DirectOutputHeadMismatch extends Error {}
-
 export class StockReceiveDataPlaneError extends Error {
   constructor(
     readonly rejection: NativeReceiveExecutionRejection,
@@ -767,25 +765,14 @@ async function verifyDirectOutputArtifacts(args: {
           sha256: artifact.sha256!,
           role: `output-${artifact.role}`,
         });
-        args.countSubrequest(`r2:head-stock-output-${artifact.role}`);
-        const head = await args.limiter.run(`r2:head-stock-output-${artifact.role}`, () =>
-          args.env.REPO_BUCKET.head(artifact.key)
-        );
-        if (
-          !head ||
-          head.etag !== object.etag ||
-          head.size !== artifact.bytes ||
-          head.customMetadata?.sha256 !== artifact.sha256
-        ) {
-          throw new DirectOutputHeadMismatch("head-mismatch");
-        }
-        return { ...artifact, etag: head.etag };
+        // The direct planner already bound the immutable object's SHA-256
+        // metadata. This verified GET binds its body digest, size, and etag, so
+        // a second sequential HEAD adds no proof and costs one provider round
+        // trip per output artifact.
+        return { ...artifact, etag: object.etag };
       } catch (error) {
         const bodyFailure = error instanceof VerifiedR2ObjectError;
-        if (
-          !(error instanceof DirectOutputHeadMismatch) &&
-          (!bodyFailure || error.bytesRead <= 0)
-        ) {
+        if (!bodyFailure || error.bytesRead <= 0) {
           throw error;
         }
         throw new StockReceiveDataPlaneError(
@@ -793,10 +780,10 @@ async function verifyDirectOutputArtifacts(args: {
             code: "output-integrity-invalid",
             processorResult: {
               ...args.result,
-              outputValidationBytes: bodyFailure ? error.bytesRead : artifact.bytes,
+              outputValidationBytes: error.bytesRead,
               outputValidationRequests: 1,
               outputIntegrityRejectedRole: artifact.role,
-              outputIntegrityRejectedAt: bodyFailure ? "body" : "head",
+              outputIntegrityRejectedAt: "body",
             },
           },
           "stock-data-plane:output-integrity-rejected"

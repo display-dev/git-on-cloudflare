@@ -1859,11 +1859,11 @@ describe("stock Smart HTTP receive spike", () => {
       outputValidationRequests: 3,
     });
     // This exact request count includes the bounded metadata reads plus
-    // publication and body/head verification of the three authoritative outputs.
+    // publication and full-body verification of the three authoritative outputs.
     // The ingress invocation retains the authenticated input bytes, so it does
     // not reread the durable recovery copy. A temporary planning-pack PUT, an
     // input reread, or its three cleanup deletes increases this count.
-    expect(directSubrequests).toBe(13);
+    expect(directSubrequests).toBe(10);
     expect(await validateStockReceivePreparedProof(operation, result.processorResult)).toBe(true);
     let recoverySubrequests = 0;
     const recovered = await executeStockReceiveWorkerDataPlane({
@@ -1882,7 +1882,7 @@ describe("stock Smart HTTP receive spike", () => {
     });
     // Recovery rereads durable input and verifies the already-published exact
     // immutable artifacts instead of trusting invocation-local memory.
-    expect(recoverySubrequests).toBe(18);
+    expect(recoverySubrequests).toBe(15);
     expect(recovered.processorResult).toMatchObject({
       packSha256: result.processorResult.packSha256,
       idxSha256: result.processorResult.idxSha256,
