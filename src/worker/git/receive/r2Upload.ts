@@ -24,8 +24,10 @@ export type StagedStockReceiveUpload = {
   requestKey: string;
   requestBytes: number;
   requestSha256: string;
+  requestEtag: string;
   packOffset: number;
   packBytes: number;
+  packData: Uint8Array;
 };
 
 const MAX_STOCK_RECEIVE_REQUEST_BYTES = 16 * 1024 * 1024;
@@ -519,6 +521,7 @@ export async function stageStockReceiveRequestToR2(args: {
   const reader = args.packStream.getReader();
   let totalBytes = args.rawPrefix.byteLength;
   let packBytes = 0;
+  const packChunks: Uint8Array[] = [];
   let packHeader: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
   let packTail: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
 
@@ -536,6 +539,7 @@ export async function stageStockReceiveRequestToR2(args: {
         throw new Error("Stock receive body exceeded Content-Length.");
       }
       const chunk = cloneBytes(next.value);
+      packChunks.push(chunk);
       totalBytes += chunk.byteLength;
       packBytes += chunk.byteLength;
       if (packHeader.byteLength < PACK_HEADER_BYTES) {
@@ -558,13 +562,24 @@ export async function stageStockReceiveRequestToR2(args: {
     await requestDigestWriter.close();
     const requestSha256 = bytesToHex(new Uint8Array(await requestDigest.digest));
     await writer.close();
-    await putPromise;
+    const put = await putPromise;
+    if (!put || put.size !== totalBytes) {
+      throw new Error("Staged stock receive input could not be verified.");
+    }
+    const packData = new Uint8Array(packBytes);
+    let packCursor = 0;
+    for (const chunk of packChunks) {
+      packData.set(chunk, packCursor);
+      packCursor += chunk.byteLength;
+    }
     return {
       requestKey: args.requestKey,
       requestBytes: totalBytes,
       requestSha256,
+      requestEtag: put.etag,
       packOffset: args.rawPrefix.byteLength,
       packBytes,
+      packData,
     };
   } catch (error) {
     await writer.abort(error).catch(() => {});

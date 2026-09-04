@@ -266,6 +266,7 @@ async function finalizeStockReceiveWithBoundedWait(args: {
 async function executeConcreteStockReceiveSingleHop(args: {
   pipeline: ExecuteNativeReceivePipelineArgs;
   operation: NativeReceiveOperation;
+  inputPackBytes?: Uint8Array | undefined;
 }): Promise<ReceivePipelineResult> {
   const currentCleanup = stockCleanupDescriptor(args.operation);
   args.pipeline.countSubrequest("do:admit-stock-receive");
@@ -320,11 +321,9 @@ async function executeConcreteStockReceiveSingleHop(args: {
 
   let publicationToken: string;
   let publication: NativeReceiveAuthorityPublicationPlan;
-  let authorityCleanup: NativeReceiveCleanupDescriptor;
   if (admission.status === "publication_pending") {
     publicationToken = admission.publicationToken;
     publication = admission.publication;
-    authorityCleanup = admission.cleanup;
   } else {
     const executionToken = admission.executionToken;
     let finalized: Exclude<FinalizeStockReceiveResult, { status: "busy" }>;
@@ -339,6 +338,7 @@ async function executeConcreteStockReceiveSingleHop(args: {
         prepared = await executeStockReceiveWorkerDataPlane({
           env: args.pipeline.env,
           operation: admission.operation,
+          inputPackBytes: args.inputPackBytes,
           cacheCtx: args.pipeline.cacheCtx,
           limiter: args.pipeline.limiter,
           countSubrequest: args.pipeline.countSubrequest,
@@ -471,7 +471,6 @@ async function executeConcreteStockReceiveSingleHop(args: {
     }
     publicationToken = finalized.publicationToken;
     publication = finalized.publication;
-    authorityCleanup = finalized.cleanup;
   }
 
   let proof;
@@ -498,17 +497,18 @@ async function executeConcreteStockReceiveSingleHop(args: {
       `Stock receive publication confirmation was rejected (${confirmed.code}).`
     );
   }
-  await cleanupCurrentStockRetry({
-    ...args,
-    operation: currentCleanup,
-    includeOutputs: false,
-  });
-  await cleanupStockOperation({
-    ...args,
-    operation: authorityCleanup,
-    includeOutputs: false,
-    complete: true,
-  });
+  // Finalize already scheduled durable Queue recovery before authority
+  // publication. Once publication is confirmed, cleanup is no longer on the
+  // client response's correctness path: the Queue owns the cleanup descriptor,
+  // and a following receive can also complete it during admission. A route-led
+  // recovery still closes its separate recovery lease before returning.
+  if (args.pipeline.stockRecovery) {
+    await cleanupCurrentStockRetry({
+      ...args,
+      operation: currentCleanup,
+      includeOutputs: false,
+    });
+  }
   return await acknowledgeStockOperation({
     ...args,
     operationId: args.operation.id,
@@ -567,12 +567,18 @@ export async function executeNativeReceivePipeline(
           onProgress: args.onProgress,
         });
     const stagedBytes = "requestBytes" in staged ? staged.requestBytes : staged.packBytes;
-    args.countSubrequest("r2:head-native-receive-input");
-    const stagedHead = await args.limiter.run("r2:head-native-receive-input", () =>
-      args.env.REPO_BUCKET.head(inputPackKey)
-    );
-    if (!stagedHead || stagedHead.size !== stagedBytes) {
-      throw new Error("Staged native receive input could not be verified.");
+    let inputEtag: string;
+    if ("requestBytes" in staged) {
+      inputEtag = staged.requestEtag;
+    } else {
+      args.countSubrequest("r2:head-native-receive-input");
+      const stagedHead = await args.limiter.run("r2:head-native-receive-input", () =>
+        args.env.REPO_BUCKET.head(inputPackKey)
+      );
+      if (!stagedHead || stagedHead.size !== stagedBytes) {
+        throw new Error("Staged native receive input could not be verified.");
+      }
+      inputEtag = stagedHead.etag;
     }
     const now = Date.now();
     operationFingerprint = await fingerprintNativeReceive({
@@ -581,7 +587,7 @@ export async function executeNativeReceivePipeline(
       acceptedWrites: args.acceptedWrites,
       inputPackKey,
       inputBytes: stagedBytes,
-      inputEtag: stagedHead.etag,
+      inputEtag,
       stockReceive:
         "requestBytes" in staged
           ? {
@@ -601,7 +607,7 @@ export async function executeNativeReceivePipeline(
       state: "staged",
       inputPackKey,
       inputBytes: stagedBytes,
-      inputEtag: stagedHead.etag,
+      inputEtag,
       stockReceive:
         "requestBytes" in staged
           ? {
@@ -629,7 +635,11 @@ export async function executeNativeReceivePipeline(
     };
 
     if (operation.stockReceive) {
-      return await executeConcreteStockReceiveSingleHop({ pipeline: args, operation });
+      return await executeConcreteStockReceiveSingleHop({
+        pipeline: args,
+        operation,
+        inputPackBytes: "requestBytes" in staged ? staged.packData : undefined,
+      });
     }
 
     args.countSubrequest("do:enqueue-native-receive");

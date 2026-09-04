@@ -1274,6 +1274,7 @@ async function executeStreamingContainer(args: {
 export async function executeStockReceiveWorkerDataPlane(args: {
   env: Env;
   operation: NativeReceiveOperation;
+  inputPackBytes?: Uint8Array | undefined;
   cacheCtx: CacheContext;
   limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
@@ -1295,6 +1296,7 @@ export async function executeStockReceiveWorkerDataPlane(args: {
       inputRequestKey: args.operation.inputPackKey,
       inputRequestBytes: args.operation.inputBytes,
       inputRequestSha256: stock.inputRequestSha256,
+      inputPackBytes: args.inputPackBytes,
       outputPackKey: args.operation.outputPackKey,
       outputIdxKey: args.operation.outputIdxKey,
       outputRefsKey: args.operation.outputRefsKey,

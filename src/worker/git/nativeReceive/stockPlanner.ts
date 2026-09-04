@@ -480,6 +480,9 @@ export type PlanStockReceiveArgs = {
   inputRequestKey: string;
   inputRequestBytes: number;
   inputRequestSha256: string;
+  /** Authenticated bytes retained by the ingress invocation. Recovery omits
+   * these and reads the same durable request range from R2. */
+  inputPackBytes?: Uint8Array | undefined;
   outputPackKey?: string | undefined;
   outputIdxKey?: string | undefined;
   outputRefsKey?: string | undefined;
@@ -1564,16 +1567,19 @@ async function planStockReceiveImpl(
   const advertisedReachableOids = deriveAdvertisedClosure(active, args.advertisedRefs);
   const advertisedReachable = new Set(advertisedReachableOids);
   const advertisedClosureCompleteAt = Date.now();
-  const inputPack = await readExactRange({
-    env: args.env,
-    key: args.inputRequestKey,
-    offset: args.packOffset,
-    length: args.packBytes,
-    limiter: args.limiter,
-    countSubrequest: args.countSubrequest,
-    kind: "input",
-    counters,
-  });
+  const inputPack =
+    args.inputPackBytes ??
+    (await readExactRange({
+      env: args.env,
+      key: args.inputRequestKey,
+      offset: args.packOffset,
+      length: args.packBytes,
+      limiter: args.limiter,
+      countSubrequest: args.countSubrequest,
+      kind: "input",
+      counters,
+    }));
+  if (inputPack.byteLength !== args.packBytes) throw new Error("stock-plan:input-pack-span");
   if (inputPack.byteLength < 32) throw new Error("stock-plan:input-pack-truncated");
   const computedPackSha1 = await digestHex("SHA-1", inputPack.subarray(0, -20));
   if (computedPackSha1 !== bytesToHex(inputPack.subarray(-20))) {

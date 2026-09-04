@@ -1774,6 +1774,7 @@ describe("stock Smart HTTP receive spike", () => {
     const result = await executeStockReceiveWorkerDataPlane({
       env: { ...env, STOCK_RECEIVE_DIRECT_PACK: "1" } as Env,
       operation,
+      inputPackBytes: pack,
       cacheCtx: {
         req: new Request("https://example.invalid/stock-direct-pack"),
         ctx: createExecutionContext(),
@@ -1798,11 +1799,37 @@ describe("stock Smart HTTP receive spike", () => {
       outputRequests: 3,
       outputValidationRequests: 3,
     });
-    // This exact request count includes the bounded input/metadata reads plus
+    // This exact request count includes the bounded metadata reads plus
     // publication and body/head verification of the three authoritative outputs.
-    // A temporary planning-pack PUT or its three cleanup deletes increases it.
-    expect(directSubrequests).toBe(14);
+    // The ingress invocation retains the authenticated input bytes, so it does
+    // not reread the durable recovery copy. A temporary planning-pack PUT, an
+    // input reread, or its three cleanup deletes increases this count.
+    expect(directSubrequests).toBe(13);
     expect(await validateStockReceivePreparedProof(operation, result.processorResult)).toBe(true);
+    let recoverySubrequests = 0;
+    const recovered = await executeStockReceiveWorkerDataPlane({
+      env: { ...env, STOCK_RECEIVE_DIRECT_PACK: "1" } as Env,
+      operation,
+      cacheCtx: {
+        req: new Request("https://example.invalid/stock-direct-pack-recovery"),
+        ctx: createExecutionContext(),
+        memo: {},
+      },
+      limiter: new SubrequestLimiter(40),
+      countSubrequest(_operation, n = 1) {
+        recoverySubrequests += n;
+      },
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackRecoveryTest" }),
+    });
+    // Recovery rereads durable input and verifies the already-published exact
+    // immutable artifacts instead of trusting invocation-local memory.
+    expect(recoverySubrequests).toBe(18);
+    expect(recovered.processorResult).toMatchObject({
+      packSha256: result.processorResult.packSha256,
+      idxSha256: result.processorResult.idxSha256,
+      refsSha256: result.processorResult.refsSha256,
+      inputRequests: 1,
+    });
     expect(
       new Uint8Array(await (await env.REPO_BUCKET.get(outputPackKey))!.arrayBuffer())
     ).not.toEqual(pack);
@@ -1955,7 +1982,7 @@ describe("stock Smart HTTP receive spike", () => {
         executionMode: "direct-pack",
         activePackWholeRequests: 0,
         activePackRangeRequests: 1,
-        inputRequests: 1,
+        inputRequests: 0,
         outputValidationRequests: 3,
         stockTiming: {
           planningPhases: {
@@ -2535,6 +2562,56 @@ describe("stock Smart HTTP receive spike", () => {
       newOid: commit.oid,
       digest: authority!.receipt.digest,
     });
+
+    let deferredInputKey = "";
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const operation = await state.storage.get<NativeReceiveOperation>(
+          nativeReceiveOperationKey("stock-tiny-operation")
+        );
+        expect(operation).toMatchObject({ state: "committed", cleanupPending: true });
+        deferredInputKey = operation!.inputPackKey;
+      }
+    );
+    expect(await env.REPO_BUCKET.head(deferredInputKey)).not.toBeNull();
+    const cleanupSendSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    await runDurableObjectAlarm(stub);
+    const cleanupMessage = cleanupSendSpy.mock.calls
+      .map(([message]) => message)
+      .find(
+        (message): message is { kind: string; doId: string; operationId: string } =>
+          typeof message === "object" &&
+          message !== null &&
+          "kind" in message &&
+          message.kind === "native-receive" &&
+          "operationId" in message &&
+          message.operationId === "stock-tiny-operation" &&
+          "doId" in message &&
+          typeof message.doId === "string"
+      );
+    cleanupSendSpy.mockRestore();
+    expect(await runQueueMessage(cleanupMessage)).toEqual({ acked: true, retried: false });
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        expect(
+          await state.storage.get<NativeReceiveOperation>(
+            nativeReceiveOperationKey("stock-tiny-operation")
+          )
+        ).toMatchObject({ state: "committed", cleanupPending: false });
+      }
+    );
+    expect(await env.REPO_BUCKET.head(deferredInputKey)).toBeNull();
+    expect(await env.REPO_BUCKET.head(committedOperation!.result!.packKey!)).not.toBeNull();
+    expect(
+      await env.REPO_BUCKET.head(packIndexKey(committedOperation!.result!.packKey!))
+    ).not.toBeNull();
+    expect(
+      await env.REPO_BUCKET.head(packRefsKey(committedOperation!.result!.packKey!))
+    ).not.toBeNull();
 
     await env.REPO_BUCKET.delete([
       ...authority!.refs.map((ref) => ref.key),
