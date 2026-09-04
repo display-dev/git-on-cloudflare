@@ -17,7 +17,7 @@ import type {
 } from "@/worker/git/nativeReceive/physicalDependencyPlan";
 
 import { asBufferSource, bytesEqual, bytesToHex, createLogger } from "@/worker/common";
-import { buildPackV2 } from "@/worker/git/pack/build";
+import { buildPackV2, buildPackV2Artifacts } from "@/worker/git/pack/build";
 import { createStockPhysicalDependencyPlanner } from "@/worker/git/nativeReceive/physicalDependencyPlan";
 import { resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/resolve";
 import { scanPack } from "@/worker/git/pack/indexer/scan";
@@ -1501,7 +1501,6 @@ export function stockReceivePlanKeys(
   inputSha256: string
 ): {
   temporaryPackKey: string;
-  canonicalPackKey: string;
   prerequisitePackKey: string;
   closureManifestKey: string;
 } {
@@ -1509,7 +1508,6 @@ export function stockReceivePlanKeys(
   const stem = inputRequestKey.slice(0, -".request".length);
   return {
     temporaryPackKey: `${stem}-${inputSha256}.planning.pack`,
-    canonicalPackKey: `${stem}-${inputSha256}.canonical.pack`,
     prerequisitePackKey: `${stem}-${inputSha256}.prerequisite.pack`,
     closureManifestKey: `${stem}-${inputSha256}.closure.json`,
   };
@@ -1869,84 +1867,35 @@ async function planStockReceiveImpl(
     ) {
       throw new Error("stock-plan:direct-resolved-object-missing");
     }
-    const canonicalPack = await buildPackV2(
+    const canonicalArtifacts = await buildPackV2Artifacts(
       resolvedIncomingObjects as Array<{ type: GitObjectType; payload: Uint8Array }>,
       { compressionLevel: 1 }
     );
     resolvedIncomingObjects.length = 0;
+    const canonicalPack = canonicalArtifacts.pack;
+    const canonicalIdxBytes = canonicalArtifacts.idx;
+    const canonicalRefsBytes = canonicalArtifacts.refs;
     const canonicalPackSha256 = await digestHex("SHA-256", canonicalPack);
-    const canonicalTemporaryPut = await putImmutableBytes({
-      env: args.env,
-      key: keys.canonicalPackKey,
-      bytes: canonicalPack,
-      sha256: canonicalPackSha256,
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-    });
-    if (canonicalTemporaryPut.created) ownedImmutableKeys.push(keys.canonicalPackKey);
-    log.info("stock-plan:canonical-pack-staged", {
+    const canonicalIdxSha256 = await digestHex("SHA-256", canonicalIdxBytes);
+    const canonicalRefsSha256 = await digestHex("SHA-256", canonicalRefsBytes);
+    const canonicalIdx = parseIdxView(
+      args.outputPackKey,
+      canonicalIdxBytes,
+      canonicalPack.byteLength
+    );
+    if (!canonicalIdx) throw new Error("stock-plan:canonical-idx-invalid");
+    if (!bytesEqual(canonicalIdx.rawNames, incomingIdx.rawNames)) {
+      throw new Error("stock-plan:canonical-oid-set-mismatch");
+    }
+    const canonicalRefs = parsePackRefView(args.outputPackKey, canonicalRefsBytes, canonicalIdx);
+    if (canonicalRefs.type !== "Ready") throw new Error("stock-plan:canonical-pref-invalid");
+    log.info("stock-plan:canonical-artifacts-built", {
       operationId: args.operationId,
       objectCount: incomingObjectCount,
       packBytes: canonicalPack.byteLength,
+      idxBytes: canonicalIdxBytes.byteLength,
+      refsBytes: canonicalRefsBytes.byteLength,
     });
-    const canonicalScan = await scanPack({
-      env: args.env,
-      packKey: keys.canonicalPackKey,
-      packSize: canonicalPack.byteLength,
-      chunkSize: Math.min(canonicalPack.byteLength, 1024 * 1024),
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-      log,
-      signal: args.signal,
-      maxObjectBytes: MAX_OBJECT_BYTES,
-      onRead: noteInputRead,
-    });
-    const canonicalResolve = await resolveDeltasAndWriteIdx({
-      env: args.env,
-      packKey: keys.canonicalPackKey,
-      packSize: canonicalPack.byteLength,
-      chunkSize: Math.min(canonicalPack.byteLength, 1024 * 1024),
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-      log,
-      signal: args.signal,
-      maxObjectBytes: MAX_OBJECT_BYTES,
-      scanResult: canonicalScan,
-      cacheCtx: args.cacheCtx,
-      repoId: args.repoId,
-      lruBudget: MAX_PREREQUISITE_PAYLOAD_BYTES,
-      onRead: noteInputRead,
-    });
-    const [canonicalIdxObject, canonicalRefsObject] = await Promise.all([
-      getBoundedObject({
-        env: args.env,
-        key: packIndexKey(keys.canonicalPackKey),
-        maximumBytes: MAX_METADATA_BYTES,
-        expectedBytes: canonicalResolve.idxBytes,
-        limiter: args.limiter,
-        countSubrequest: args.countSubrequest,
-        counters,
-      }),
-      getBoundedObject({
-        env: args.env,
-        key: packRefsKey(keys.canonicalPackKey),
-        maximumBytes: MAX_METADATA_BYTES,
-        expectedBytes: canonicalResolve.refIndexBytes,
-        limiter: args.limiter,
-        countSubrequest: args.countSubrequest,
-        counters,
-      }),
-    ]);
-    const canonicalRefs = parsePackRefView(
-      keys.canonicalPackKey,
-      canonicalRefsObject.bytes,
-      canonicalResolve.idxView
-    );
-    if (canonicalRefs.type !== "Ready") throw new Error("stock-plan:canonical-pref-invalid");
-    const canonicalIdxBytes = canonicalIdxObject.bytes;
-    const canonicalRefsBytes = canonicalRefsObject.bytes;
-    const canonicalIdxSha256 = await digestHex("SHA-256", canonicalIdxBytes);
-    const canonicalRefsSha256 = await digestHex("SHA-256", canonicalRefsBytes);
     const canonicalizationCompleteAt = Date.now();
     const activePackBindings = active.map((pack) => ({
       packKey: pack.source.packKey,
@@ -2057,19 +2006,12 @@ async function planStockReceiveImpl(
         keys.temporaryPackKey,
         packIndexKey(keys.temporaryPackKey),
         packRefsKey(keys.temporaryPackKey),
-        keys.canonicalPackKey,
-        packIndexKey(keys.canonicalPackKey),
-        packRefsKey(keys.canonicalPackKey),
       ],
       limiter: args.limiter,
       countSubrequest: args.countSubrequest,
     });
     const temporaryOwnedIndex = ownedImmutableKeys.indexOf(keys.temporaryPackKey);
     if (temporaryOwnedIndex >= 0) ownedImmutableKeys.splice(temporaryOwnedIndex, 1);
-    const canonicalTemporaryOwnedIndex = ownedImmutableKeys.indexOf(keys.canonicalPackKey);
-    if (canonicalTemporaryOwnedIndex >= 0) {
-      ownedImmutableKeys.splice(canonicalTemporaryOwnedIndex, 1);
-    }
     return {
       executionMode: "direct-pack",
       directPackKey: args.outputPackKey,
@@ -2413,12 +2355,7 @@ export async function planStockReceive(args: PlanStockReceiveArgs): Promise<Stoc
           keys.temporaryPackKey,
           packIndexKey(keys.temporaryPackKey),
           packRefsKey(keys.temporaryPackKey),
-          keys.canonicalPackKey,
-          packIndexKey(keys.canonicalPackKey),
-          packRefsKey(keys.canonicalPackKey),
-          ...ownedImmutableKeys.filter(
-            (key) => key !== keys.temporaryPackKey && key !== keys.canonicalPackKey
-          ),
+          ...ownedImmutableKeys.filter((key) => key !== keys.temporaryPackKey),
         ],
         limiter: args.limiter,
         countSubrequest: args.countSubrequest,
