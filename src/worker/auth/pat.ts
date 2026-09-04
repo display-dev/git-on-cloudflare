@@ -4,6 +4,7 @@ import {
   findPatGrantForNamespace,
   findPatGrantForRepo,
   type PatGrantLevel,
+  type PersonalAccessTokenRow,
 } from "@/worker/db/d1/dal/tokens";
 import { findMembership, findNamespaceBySlug } from "@/worker/db/d1/dal/namespaces";
 
@@ -132,6 +133,49 @@ export type PatVerifyError =
 
 export type PatVerifyResult = PatVerifyOk | PatVerifyError;
 
+export type StoredPatCredentialResult = { ok: true; pat: PersonalAccessTokenRow } | PatVerifyError;
+
+export async function verifyStoredPatCredential(
+  pat: PersonalAccessTokenRow | undefined,
+  plaintext: string,
+  now: number
+): Promise<StoredPatCredentialResult> {
+  if (!pat) return { ok: false, reason: "token-not-found" };
+  if (pat.revokedAt !== null) return { ok: false, reason: "token-revoked" };
+  if (pat.expiresAt !== null && pat.expiresAt <= now) {
+    return { ok: false, reason: "token-expired" };
+  }
+  const presentedHash = await hashPatPlaintext(plaintext);
+  if (!(await constantTimeEquals(pat.hash, presentedHash))) {
+    return { ok: false, reason: "token-not-found" };
+  }
+  return { ok: true, pat };
+}
+
+export function completeStoredPatAuthorization(
+  pat: PersonalAccessTokenRow,
+  args: {
+    usernameMatches: boolean;
+    namespaceId: string;
+    repositoryId?: string;
+    repoGrantLevel?: PatGrantLevel;
+    namespaceGrantLevel?: PatGrantLevel;
+  }
+): PatVerifyResult {
+  if (!args.usernameMatches) return { ok: false, reason: "username-mismatch" };
+  const level = args.repoGrantLevel ?? args.namespaceGrantLevel;
+  if (!level) return { ok: false, reason: "grant-missing" };
+  return {
+    ok: true,
+    patId: pat.id,
+    userId: pat.userId,
+    namespaceId: args.namespaceId,
+    repositoryId: args.repositoryId,
+    level,
+    lastUsedAt: pat.lastUsedAt,
+  };
+}
+
 export async function constantTimeEquals(a: string, b: string): Promise<boolean> {
   if (a.length !== b.length) return false;
   const encoder = new TextEncoder();
@@ -178,61 +222,47 @@ export async function verifyPat(env: Env, args: VerifyPatArgs): Promise<PatVerif
 
   const db = args.db ?? createDb(env.DB);
 
-  const pat = await findPatByPrefix(db, parsed.publicPrefix);
-  if (!pat) return { ok: false, reason: "token-not-found" };
-  if (pat.revokedAt !== null) return { ok: false, reason: "token-revoked" };
-  if (pat.expiresAt !== null && pat.expiresAt <= now) return { ok: false, reason: "token-expired" };
-
-  const expectedHash = pat.hash;
-  const presentedHash = await hashPatPlaintext(args.plaintext);
-  if (!(await constantTimeEquals(expectedHash, presentedHash))) {
-    return { ok: false, reason: "token-not-found" };
-  }
+  const storedCredential = await verifyStoredPatCredential(
+    await findPatByPrefix(db, parsed.publicPrefix),
+    args.plaintext,
+    now
+  );
+  if (!storedCredential.ok) return storedCredential;
+  const pat = storedCredential.pat;
 
   // Resolve namespace either directly via id or by username; both must align
   // for the username-as-namespace-slug Git authentication contract.
   let resolvedNamespaceId: string | undefined = args.namespaceId;
   let resolvedRepositoryId: string | undefined = args.repositoryId;
+  let usernameMatches = true;
   if (!resolvedNamespaceId) {
     const namespace = await findNamespaceBySlug(db, args.username);
     if (!namespace) return { ok: false, reason: "username-mismatch" };
     resolvedNamespaceId = namespace.id;
   } else {
     const namespace = await findNamespaceBySlug(db, args.username);
-    if (!namespace || namespace.id !== resolvedNamespaceId) {
-      return { ok: false, reason: "username-mismatch" };
-    }
+    usernameMatches = namespace?.id === resolvedNamespaceId;
   }
 
   // Repo grant takes precedence; namespace grant covers remaining repos.
   if (resolvedRepositoryId) {
     const repoGrant = await findPatGrantForRepo(db, pat.id, resolvedRepositoryId);
     if (repoGrant) {
-      return {
-        ok: true,
-        patId: pat.id,
-        userId: pat.userId,
+      return completeStoredPatAuthorization(pat, {
+        usernameMatches,
         namespaceId: resolvedNamespaceId,
         repositoryId: resolvedRepositoryId,
-        level: repoGrant.level,
-        lastUsedAt: pat.lastUsedAt,
-      };
+        repoGrantLevel: repoGrant.level,
+      });
     }
   }
   const namespaceGrant = await findPatGrantForNamespace(db, pat.id, resolvedNamespaceId);
-  if (namespaceGrant) {
-    return {
-      ok: true,
-      patId: pat.id,
-      userId: pat.userId,
-      namespaceId: resolvedNamespaceId,
-      repositoryId: resolvedRepositoryId,
-      level: namespaceGrant.level,
-      lastUsedAt: pat.lastUsedAt,
-    };
-  }
-
-  return { ok: false, reason: "grant-missing" };
+  return completeStoredPatAuthorization(pat, {
+    usernameMatches,
+    namespaceId: resolvedNamespaceId,
+    repositoryId: resolvedRepositoryId,
+    namespaceGrantLevel: namespaceGrant?.level,
+  });
 }
 
 // Writes always update; reads only when the prior value is older than this

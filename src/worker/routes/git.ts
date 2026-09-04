@@ -17,6 +17,7 @@ import { markRequestPrivate, responseCacheControl } from "@/worker/cache/policy"
 import { isValidOwnerRepo } from "@/shared/web";
 import { resolveRepositoryRoute, type RepositoryRoute } from "@/worker/repositories/route";
 import {
+  authenticateGitRequestFromCanonicalBatch,
   authenticateGitRequest,
   getBasicCredentials,
   scheduleTouchPatLastUsedAt,
@@ -329,7 +330,7 @@ async function resolveGitRoute(
 }
 
 type ResolveGitRouteResult =
-  | { kind: "ok"; route: RepositoryRoute }
+  | { kind: "ok"; route: RepositoryRoute; auth?: GitAuthResult | undefined }
   | { kind: "response"; response: Response };
 
 async function resolveGitRouteForRequest(
@@ -339,6 +340,23 @@ async function resolveGitRouteForRequest(
   service: GitService,
   isDiscovery: boolean
 ): Promise<ResolveGitRouteResult> {
+  const cachedAuthentication = await authenticateGitRequestFromCanonicalBatch(
+    c.env,
+    c.req.raw,
+    owner,
+    repo,
+    { db: c.var.db, log: c.var.logFor({ service: "GitAuthBatch" }) }
+  );
+  if (cachedAuthentication.kind === "resolved") {
+    return {
+      kind: "ok",
+      route: cachedAuthentication.route,
+      auth: cachedAuthentication.auth,
+    };
+  }
+  if (cachedAuthentication.kind === "not-found") {
+    return { kind: "response", response: gitNotFound() };
+  }
   const route = await resolveGitRoute(c, owner, repo);
   if (route) return { kind: "ok", route };
 
@@ -464,14 +482,16 @@ async function authorizeGitRouteForRequest(
   route: RepositoryRoute,
   service: GitService,
   isDiscovery: boolean,
-  patTouchOp: PatTouchOp
+  patTouchOp: PatTouchOp,
+  preauthenticated?: GitAuthResult | undefined
 ): Promise<GitAuthorizationResult> {
   const cacheCtx = c.var.cacheCtx;
   if (route.visibility === "private" || service === "git-receive-pack") {
     markRequestPrivate(cacheCtx);
   }
 
-  const auth = await authenticateGitRequest(c.env, c.req.raw, route, { db: c.var.db });
+  const auth =
+    preauthenticated ?? (await authenticateGitRequest(c.env, c.req.raw, route, { db: c.var.db }));
   const fallbackBlocked = gateD1FallbackGitAuth(c, route, auth);
   if (fallbackBlocked) return { kind: "response", response: fallbackBlocked };
 
@@ -520,7 +540,14 @@ export function registerGitRoutes(router: AppRouter) {
     const resolved = await resolveGitRouteForRequest(c, owner, repo, service, true);
     if (resolved.kind === "response") return resolved.response;
     const route = resolved.route;
-    const authorized = await authorizeGitRouteForRequest(c, route, service, true, "read");
+    const authorized = await authorizeGitRouteForRequest(
+      c,
+      route,
+      service,
+      true,
+      "read",
+      resolved.auth
+    );
     if (authorized.kind === "response") return authorized.response;
     const { cacheCtx } = authorized;
     return await capabilityAdvertisement(c.env, service, route.doName, cacheCtx);
@@ -538,7 +565,8 @@ export function registerGitRoutes(router: AppRouter) {
       route,
       "git-upload-pack",
       false,
-      "read"
+      "read",
+      resolved.auth
     );
     if (authorized.kind === "response") return authorized.response;
     return handleUploadPackPOST(c.env, route, c.req.raw, authorized.cacheCtx);
@@ -556,7 +584,8 @@ export function registerGitRoutes(router: AppRouter) {
       route,
       "git-receive-pack",
       false,
-      "write"
+      "write",
+      resolved.auth
     );
     if (authorized.kind === "response") return authorized.response;
     if (!authorized.principalUserId) return forbidden();

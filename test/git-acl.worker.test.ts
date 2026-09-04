@@ -4,6 +4,7 @@ import { env, exports as workerExports } from "cloudflare:workers";
 import { newPrefixedId } from "@/worker/common";
 import { createDb } from "@/worker/db/d1/client";
 import { generatePatPlaintext, hashPatPlaintext } from "@/worker/auth/pat";
+import { authenticateGitRequestFromCanonicalBatch } from "@/worker/auth/gitAuth";
 import { insertPatWithGrants } from "@/worker/db/d1/dal";
 
 import { ensureD1Migrations } from "./util/d1Setup";
@@ -105,6 +106,24 @@ describe("Git ACL: read paths", () => {
     expect(res.status).toBe(200);
   });
 
+  it("public + cached route + revoked PAT remains an anonymous-readable 200", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-pub-revoked-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "public",
+    });
+    const plaintext = await seedPat({
+      userId: seed.userId,
+      level: "pull",
+      scope: { kind: "repo", repoId: seed.repositoryId },
+      revokedAt: Date.now() - 1,
+    });
+    const res = await workerExports.default.fetch(infoRefs(seed, "git-upload-pack"), {
+      headers: { Authorization: basicAuth(seed.namespaceSlug, plaintext) },
+    });
+    expect(res.status).toBe(200);
+  });
+
   it("public + malformed PAT + missing route cache -> 401", async () => {
     const seed = await seedRepo(env, {
       namespaceSlug: `acl-badpat-miss-${Math.random().toString(36).slice(2, 8)}`,
@@ -178,6 +197,79 @@ describe("Git ACL: read paths", () => {
       headers: { Authorization: basicAuth(seed.namespaceSlug, plaintext) },
     });
     expect(res.status).toBe(200);
+  });
+
+  it("private + namespace PAT grant + info-refs upload-pack -> 200", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-pat-ns-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "private",
+    });
+    const plaintext = await seedPat({
+      userId: seed.userId,
+      level: "pull",
+      scope: { kind: "namespace", namespaceId: seed.namespaceId },
+    });
+    const res = await workerExports.default.fetch(infoRefs(seed, "git-upload-pack"), {
+      headers: { Authorization: basicAuth(seed.namespaceSlug, plaintext) },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("canonical batch resolves a private repository and its repo grant without KV", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-pat-batch-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "private",
+      skipRouteCache: true,
+    });
+    const plaintext = await seedPat({
+      userId: seed.userId,
+      level: "pull",
+      scope: { kind: "repo", repoId: seed.repositoryId },
+    });
+    const result = await authenticateGitRequestFromCanonicalBatch(
+      env,
+      new Request(infoRefs(seed, "git-upload-pack"), {
+        headers: { Authorization: basicAuth(seed.namespaceSlug, plaintext) },
+      }),
+      seed.namespaceSlug,
+      seed.repoSlug
+    );
+    expect(result).toMatchObject({
+      kind: "resolved",
+      route: {
+        repositoryId: seed.repositoryId,
+        namespaceId: seed.namespaceId,
+        doName: seed.doName,
+        visibility: "private",
+        source: "d1",
+      },
+      auth: { kind: "pat", verified: { repositoryId: seed.repositoryId, level: "pull" } },
+    });
+  });
+
+  it("canonical batch reports a PAT-authenticated unknown repository as not found", async () => {
+    const seed = await seedRepo(env, {
+      namespaceSlug: `acl-pat-batch-miss-${Math.random().toString(36).slice(2, 8)}`,
+      repoSlug: "site",
+      visibility: "private",
+      skipRouteCache: true,
+    });
+    const plaintext = await seedPat({
+      userId: seed.userId,
+      level: "pull",
+      scope: { kind: "repo", repoId: seed.repositoryId },
+    });
+    const result = await authenticateGitRequestFromCanonicalBatch(
+      env,
+      new Request(`https://example.com/${seed.namespaceSlug}/missing/info/refs`, {
+        headers: { Authorization: basicAuth(seed.namespaceSlug, plaintext) },
+      }),
+      seed.namespaceSlug,
+      "missing"
+    );
+    expect(result).toEqual({ kind: "not-found" });
   });
 
   it("private + Basic username mismatch -> 401", async () => {
