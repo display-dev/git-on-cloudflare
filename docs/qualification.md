@@ -320,8 +320,10 @@ qualification Worker. A reportable direct sample must expose
 object/ref equality, and show zero Container phases. Planning time excludes the
 separately reported direct immutable-output upload time. The variation admits
 only a single non-empty command whose incoming pack contains exactly the objects
-reachable from its proposed tip; other shapes fall through to the existing stock
-Container path. While the flag is enabled, both direct work and fallthrough use
+reachable from its proposed tip. It publishes those resolved incoming objects
+as a self-contained pack so each new receive has a bounded physical delta depth;
+other shapes fall through to the existing stock Container path. While the flag
+is enabled, both direct work and fallthrough use
 exact authenticated entry ranges for thin-delta bases rather than whole-pack
 preload. The comparison must retain the same Git client, protocol,
 credentials, fixture OIDs, alternating provider order, and predeclared latency

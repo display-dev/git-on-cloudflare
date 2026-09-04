@@ -1785,7 +1785,7 @@ describe("stock Smart HTTP receive spike", () => {
 
     expect(result.processorResult).toMatchObject({
       executionMode: "direct-pack",
-      packBytes: pack.byteLength,
+      packBytes: expect.any(Number),
       objectCount: 1,
       inputPackObjectCount: 1,
       hydratedBytes: 0,
@@ -1796,9 +1796,9 @@ describe("stock Smart HTTP receive spike", () => {
       outputValidationRequests: 3,
     });
     expect(await validateStockReceivePreparedProof(operation, result.processorResult)).toBe(true);
-    expect(new Uint8Array(await (await env.REPO_BUCKET.get(outputPackKey))!.arrayBuffer())).toEqual(
-      pack
-    );
+    expect(
+      new Uint8Array(await (await env.REPO_BUCKET.get(outputPackKey))!.arrayBuffer())
+    ).not.toEqual(pack);
     expect(await env.REPO_BUCKET.head(packIndexKey(outputPackKey))).not.toBeNull();
     expect(await env.REPO_BUCKET.head(packRefsKey(outputPackKey))).not.toBeNull();
 
@@ -1941,7 +1941,8 @@ describe("stock Smart HTTP receive spike", () => {
     expect((await stub.listRefs()).find((ref) => ref.name === "refs/heads/main")?.oid).toBe(
       next.oid
     );
-    expect(await stub.getNativeReceiveOperation("stock-direct-thin-operation")).toMatchObject({
+    const committed = await stub.getNativeReceiveOperation("stock-direct-thin-operation");
+    expect(committed).toMatchObject({
       state: "committed",
       metrics: {
         executionMode: "direct-pack",
@@ -1956,12 +1957,19 @@ describe("stock Smart HTTP receive spike", () => {
             incomingAnalysisMs: expect.any(Number),
             boundaryValidationMs: expect.any(Number),
             physicalPlanMs: expect.any(Number),
+            canonicalizationMs: expect.any(Number),
             manifestPublishMs: expect.any(Number),
             postManifestCleanupAndOverheadMs: expect.any(Number),
           },
         },
       },
     });
+    const canonicalPackKey = committed?.result?.packKey;
+    if (!canonicalPackKey) throw new Error("expected canonical direct pack");
+    const canonicalPackObject = await env.REPO_BUCKET.get(canonicalPackKey);
+    if (!canonicalPackObject) throw new Error("expected canonical direct pack bytes");
+    const canonicalPackBytes = new Uint8Array(await canonicalPackObject.arrayBuffer());
+    expect((canonicalPackBytes[12]! >> 4) & 0x07).toBe(1);
     const loaded = await readObject(env, seeded.doName, next.oid, {
       req: new Request("https://example.invalid/stock-direct-thin-read"),
       ctx: createExecutionContext(),
@@ -1969,6 +1977,67 @@ describe("stock Smart HTTP receive spike", () => {
     });
     expect(loaded?.type).toBe("commit");
     expect(loaded?.payload).toEqual(nextPayload);
+
+    const secondSuffix = new TextEncoder().encode("second direct thin\n");
+    const secondPayload = concatChunks([nextPayload, secondSuffix]);
+    const second = await encodeGitObject("commit", secondPayload);
+    const secondPack = await buildPack([
+      {
+        type: "ref-delta",
+        baseOid: next.oid,
+        delta: buildAppendOnlyDelta(nextPayload, secondSuffix),
+      },
+    ]);
+    const secondPrefix = concatChunks([
+      pktLine(
+        `${next.oid} ${second.oid} refs/heads/main\0 report-status side-band-64k agent=git/2.50.1\n`
+      ),
+      flushPkt(),
+    ]);
+    const secondResponse = await handleStreamingReceivePackPOST(
+      {
+        ...env,
+        NATIVE_RECEIVE_CONTAINER: "1",
+        STOCK_RECEIVE_DIRECT_PACK: "1",
+      } as Env,
+      seeded.doName,
+      new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-request",
+          "Content-Length": String(secondPrefix.byteLength + secondPack.byteLength),
+          "X-Display-Operation-ID": "stock-direct-thin-operation-2",
+        },
+        body: toRequestBody(concatChunks([secondPrefix, secondPack])),
+      }),
+      createExecutionContext(),
+      {
+        limiter: new SubrequestLimiter(900),
+        acceptedWriteContext: {
+          repositoryId: seeded.doName,
+          actor: "stock-direct-thin-test",
+          sourceSurface: "git-push",
+          idempotencyKey: null,
+        },
+      }
+    );
+    expect(secondResponse.status).toBe(200);
+    expect(new Uint8Array(await secondResponse.arrayBuffer())).toEqual(
+      buildSidebandReceiveBody(plainStatus)
+    );
+    expect(await stub.getNativeReceiveOperation("stock-direct-thin-operation-2")).toMatchObject({
+      state: "committed",
+      metrics: {
+        executionMode: "direct-pack",
+        activePackRangeRequests: 1,
+      },
+    });
+    const secondLoaded = await readObject(env, seeded.doName, second.oid, {
+      req: new Request("https://example.invalid/stock-direct-thin-read-2"),
+      ctx: createExecutionContext(),
+      memo: {},
+    });
+    expect(secondLoaded?.payload).toEqual(secondPayload);
   });
 
   it("selectively hydrates an ordinary bounded receive and buffers success until RepoDO commit", async () => {

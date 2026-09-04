@@ -68,6 +68,7 @@ describe("resolveDeltasAndWriteIdx OFS_DELTA", () => {
     expect(scanResult.table.resolved[1]).toBe(0);
 
     const repoId = uniqueRepoId();
+    const resolvedObjects: Array<{ type: string; payload: Uint8Array } | undefined> = [];
     const resolveResult = await resolveDeltasAndWriteIdx({
       env,
       packKey,
@@ -77,6 +78,9 @@ describe("resolveDeltasAndWriteIdx OFS_DELTA", () => {
       log,
       scanResult,
       repoId,
+      onResolvedObject: (index, object) => {
+        resolvedObjects[index] = object;
+      },
     });
 
     expect(scanResult.table.resolved[1]).toBe(1);
@@ -93,6 +97,9 @@ describe("resolveDeltasAndWriteIdx OFS_DELTA", () => {
 
     expect(resolveResult.idxView.count).toBe(2);
     expect(resolveResult.objectCount).toBe(2);
+    expect(resolvedObjects).toHaveLength(2);
+    expect(resolvedObjects[0]).toEqual({ type: "blob", payload: baseBlobPayload });
+    expect(resolvedObjects[1]).toEqual({ type: "blob", payload: expectedPayload });
   });
 
   it("rejects an already-aborted resolve before writing idx", async () => {

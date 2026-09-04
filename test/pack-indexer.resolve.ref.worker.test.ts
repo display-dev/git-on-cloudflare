@@ -65,6 +65,7 @@ describe("resolveDeltasAndWriteIdx REF_DELTA", () => {
     });
 
     const cacheCtx = createTestCacheContext("http://localhost/test");
+    const resolvedObjects: Array<{ type: string; payload: Uint8Array } | undefined> = [];
     const thinResolve = await resolveDeltasAndWriteIdx({
       env,
       packKey: thinPackKey,
@@ -83,6 +84,9 @@ describe("resolveDeltasAndWriteIdx REF_DELTA", () => {
       ],
       cacheCtx,
       repoId,
+      onResolvedObject: (index, object) => {
+        resolvedObjects[index] = object;
+      },
     });
 
     expect(thinScan.table.resolved[0]).toBe(1);
@@ -93,6 +97,7 @@ describe("resolveDeltasAndWriteIdx REF_DELTA", () => {
     expectedPayload.set(suffix, baseBlobPayload.length);
     const expectedOid = await computeOid("blob", expectedPayload);
     expect(bytesToHex(thinScan.table.oids.subarray(0, 20))).toBe(expectedOid);
+    expect(resolvedObjects).toEqual([{ type: "blob", payload: expectedPayload }]);
   });
 
   it("rejects a thin REF_DELTA when the external base is missing", async () => {
@@ -258,6 +263,7 @@ describe("resolveDeltasAndWriteIdx REF_DELTA", () => {
     });
 
     const repoId = uniqueRepoId();
+    const resolvedObjects: Array<{ type: string; payload: Uint8Array } | undefined> = [];
     await resolveDeltasAndWriteIdx({
       env,
       packKey,
@@ -267,12 +273,20 @@ describe("resolveDeltasAndWriteIdx REF_DELTA", () => {
       log,
       scanResult,
       repoId,
+      onResolvedObject: (index, object) => {
+        resolvedObjects[index] = object;
+      },
     });
 
     expect(scanResult.table.resolved.reduce((sum, value) => sum + value, 0)).toBe(3);
     expect(bytesToHex(scanResult.table.oids.subarray(0, 20))).toBe(finalOid);
     expect(bytesToHex(scanResult.table.oids.subarray(20, 40))).toBe(midOid);
     expect(bytesToHex(scanResult.table.oids.subarray(40, 60))).toBe(baseBlob.oid);
+    expect(resolvedObjects).toEqual([
+      { type: "blob", payload: finalPayload },
+      { type: "blob", payload: midPayload },
+      { type: "blob", payload: baseBlobPayload },
+    ]);
   });
 
   it("uses an existing idx to map same-pack REF_DELTA bases during refs-only backfill", async () => {

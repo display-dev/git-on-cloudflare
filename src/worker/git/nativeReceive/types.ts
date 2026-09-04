@@ -56,6 +56,7 @@ export type NativeReceiveStockPlanningPhases = {
   incomingAnalysisMs: number;
   boundaryValidationMs: number;
   physicalPlanMs: number;
+  canonicalizationMs: number;
   manifestPublishMs: number;
   postManifestCleanupAndOverheadMs: number;
 };

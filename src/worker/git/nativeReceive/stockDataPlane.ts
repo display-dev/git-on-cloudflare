@@ -1418,6 +1418,9 @@ export async function cleanupStockReceiveWorkerDataPlane(args: {
     planKeys?.temporaryPackKey,
     planKeys ? packIndexKey(planKeys.temporaryPackKey) : undefined,
     planKeys ? packRefsKey(planKeys.temporaryPackKey) : undefined,
+    planKeys?.canonicalPackKey,
+    planKeys ? packIndexKey(planKeys.canonicalPackKey) : undefined,
+    planKeys ? packRefsKey(planKeys.canonicalPackKey) : undefined,
     planKeys?.prerequisitePackKey,
     planKeys?.closureManifestKey,
     ...(args.includeOutputs

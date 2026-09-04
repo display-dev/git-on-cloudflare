@@ -84,9 +84,11 @@ The codebase is organized into focused modules with `index.ts` export files:
   already scanned and resolved incoming pack plus its generated index/reference
   sidecars directly as immutable R2 artifacts. Cross-pack delta bases still
   receive the physical active-pack proof; semantic external objects do not get
-  redundantly materialized. RepoDO retains the same exact-old CAS, catalog, and
-  receipt authority. Empty/ref-only, multi-command, or partially reachable packs
-  continue through the stock Container path. While the variation is enabled,
+  redundantly materialized. The resolved incoming objects are repacked without
+  external deltas so an uncompacted sequence of pushes cannot create an
+  ever-deepening cross-pack delta chain. RepoDO retains the same exact-old CAS,
+  catalog, and receipt authority. Empty/ref-only, multi-command, or partially
+  reachable packs continue through the stock Container path. While the variation is enabled,
   thin-delta bases use exact authenticated entry ranges rather than bounded
   whole-pack preload. This flag is a bounded spike seam, not a production default.
   Larger or length-unknown requests retain the generic native/streaming path.

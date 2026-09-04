@@ -73,6 +73,7 @@ export async function resolveDeltaEntry(args: ResolveDeltaEntryArgs): Promise<vo
   args.resolvedTypeCodes[args.index] = objTypeCode(base.type);
   args.table.objectTypes[args.index] = args.resolvedTypeCodes[args.index];
   args.resolveOpts.scanResult.refsBuilder?.recordObject(args.index, base.type, result);
+  args.resolveOpts.onResolvedObject?.(args.index, { type: base.type, payload: result });
   if (args.refLookup) {
     promoteWaitingRefDeltas(
       args.refLookup,

@@ -180,6 +180,11 @@ export interface ResolveOptions extends IndexerOptions {
    * the caller can share one physical dependency graph across all roots.
    */
   resolveExternalBase?: (requiredOid: string) => Promise<PackedObjectResult | undefined>;
+  /** Observe every fully resolved object payload in original pack-entry order. */
+  onResolvedObject?: (
+    index: number,
+    object: { type: PackedObjectResult["type"]; payload: Uint8Array }
+  ) => void;
 }
 
 export interface ConnectivityCheckOptions {

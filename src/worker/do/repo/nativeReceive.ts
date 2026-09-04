@@ -138,6 +138,7 @@ const nativeReceiveStockTimingSchema = z
         incomingAnalysisMs: stockTimingMsSchema,
         boundaryValidationMs: stockTimingMsSchema,
         physicalPlanMs: stockTimingMsSchema,
+        canonicalizationMs: stockTimingMsSchema,
         manifestPublishMs: stockTimingMsSchema,
         postManifestCleanupAndOverheadMs: stockTimingMsSchema,
       })

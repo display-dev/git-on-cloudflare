@@ -92,7 +92,7 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
 
   log.info("resolve:start", { objectCount, unresolvedCount });
   throwIfAborted(opts.signal, log, "resolve:start");
-  if (unresolvedCount === 0) {
+  if (unresolvedCount === 0 && !opts.onResolvedObject) {
     return await writeAndParseIdx(resolveOpts, packKey, packSize, table, objectCount, packChecksum);
   }
   opts.onProgress?.(`Resolving deltas: 0% (0/${unresolvedCount})\r`);
@@ -154,7 +154,8 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
           resolvedTypeCodes,
           lru,
           seqReader,
-          !!opts.existingIdxView
+          !!opts.existingIdxView,
+          opts.onResolvedObject
         );
         continue;
       }
@@ -240,7 +241,8 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
         resolvedTypeCodes,
         lru,
         seqReader,
-        !!opts.existingIdxView
+        !!opts.existingIdxView,
+        opts.onResolvedObject
       );
       continue;
     }
@@ -347,6 +349,7 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
     resolvedTypeCodes[index] = objTypeCode(baseObj.type);
     table.objectTypes[index] = resolvedTypeCodes[index];
     scanResult.refsBuilder?.recordObject(index, baseObj.type, result);
+    opts.onResolvedObject?.(index, { type: baseObj.type, payload: result });
     promoteWaitingRefDeltas(
       refLookup,
       index,
@@ -618,14 +621,22 @@ async function cacheResolvedBaseIfNeeded(
   resolvedTypeCodes: Uint8Array,
   lru: PayloadLRU,
   reader: SequentialReader,
-  refsOnlyBackfill: boolean
+  refsOnlyBackfill: boolean,
+  onResolvedObject: ResolveOptions["onResolvedObject"]
 ): Promise<void> {
-  if (!isBase[index] || lru.get(index)) return;
+  const cached = lru.get(index);
+  if (cached) {
+    onResolvedObject?.(index, cached);
+    return;
+  }
+  if (!isBase[index] && !onResolvedObject) return;
   const t = typeCodeToObjectType(resolvedTypeCodes[index]);
   if (!t) return;
   if (refsOnlyBackfill && t === "blob") return;
   const payload = await inflateFromReader(reader, table, index);
-  lru.set(index, { type: t, payload });
+  const object = { type: t, payload };
+  onResolvedObject?.(index, object);
+  if (isBase[index]) lru.set(index, object);
 }
 
 function logResolveProgress(
