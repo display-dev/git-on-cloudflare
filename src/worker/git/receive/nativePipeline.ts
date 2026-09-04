@@ -230,15 +230,18 @@ async function acknowledgeStockOperation(args: {
   operation: NativeReceiveOperationView;
 }): Promise<ReceivePipelineResult> {
   if (args.operation.state === "committed" && args.operation.result?.receivePackResponse) {
-    throwIfClientAckInterrupted(args.operationId);
-    args.pipeline.countSubrequest("do:record-stock-receive-client-ack");
-    const acknowledged = await args.pipeline.limiter.run("do:record-stock-receive-client-ack", () =>
-      args.pipeline.stub.recordNativeReceiveClientAck(args.operationId)
-    );
-    if (!acknowledged) {
-      throw new NativeReceiveIndeterminateError(
-        "Stock receive committed, but the buffered acknowledgement was not durably authorized."
+    if (args.operation.clientAckReadyAt === undefined) {
+      throwIfClientAckInterrupted(args.operationId);
+      args.pipeline.countSubrequest("do:record-stock-receive-client-ack");
+      const acknowledged = await args.pipeline.limiter.run(
+        "do:record-stock-receive-client-ack",
+        () => args.pipeline.stub.recordNativeReceiveClientAck(args.operationId)
       );
+      if (!acknowledged) {
+        throw new NativeReceiveIndeterminateError(
+          "Stock receive committed, but the buffered acknowledgement was not durably authorized."
+        );
+      }
     }
   }
   return resultFromOperation(args.operation, args.pipeline.commands);
@@ -487,10 +490,17 @@ async function executeConcreteStockReceiveSingleHop(args: {
       `Stock receive ref CAS committed before immutable publication completed (${String(error)}).`
     );
   }
+  const authorizeClientAckWithConfirmation = args.pipeline.stockRecovery === undefined;
+  if (authorizeClientAckWithConfirmation) throwIfClientAckInterrupted(args.operation.id);
   args.pipeline.countSubrequest("do:confirm-stock-receive-publication");
   const confirmed = await args.pipeline.limiter.run<ConfirmStockReceivePublicationResult>(
     "do:confirm-stock-receive-publication",
-    async () => await args.pipeline.stub.confirmStockReceivePublication(publicationToken, proof)
+    async () =>
+      await args.pipeline.stub.confirmStockReceivePublication(
+        publicationToken,
+        proof,
+        authorizeClientAckWithConfirmation
+      )
   );
   if (confirmed.status === "rejected") {
     throw new NativeReceiveIndeterminateError(

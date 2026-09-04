@@ -430,12 +430,14 @@ export class RepoDurableObject extends DurableObject {
   /** Confirm the Worker-observed R2 publication without crossing into R2. */
   public async confirmStockReceivePublication(
     publicationToken: string,
-    proof: NativeReceiveAuthorityPublication
+    proof: NativeReceiveAuthorityPublication,
+    authorizeClientAck?: boolean
   ) {
     return await confirmStockReceivePublicationState({
       ctx: this.ctx,
       publicationToken,
       proof,
+      authorizeClientAck,
       logger: this.logger,
     });
   }

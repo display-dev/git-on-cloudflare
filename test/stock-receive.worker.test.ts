@@ -937,9 +937,13 @@ describe("stock Smart HTTP receive spike", () => {
           refs: result.publication.refs.map((ref) => ({ ...ref, etag: "test-ref-etag" })),
           receipt: { ...result.publication.receipt, etag: "test-receipt-etag" },
         };
-        expect(
-          await stub.confirmStockReceivePublication(result.publicationToken, proof)
-        ).toMatchObject({ status: "committed" });
+        const confirmation = await stub.confirmStockReceivePublication(
+          result.publicationToken,
+          proof
+        );
+        // The alarm-owned queue may confirm the same immutable proof first;
+        // both dispositions bind the identical committed operation.
+        expect(["committed", "replayed"]).toContain(confirmation.status);
       }
 
       const refs = await stub.listRefs();
@@ -2637,6 +2641,7 @@ describe("stock Smart HTTP receive spike", () => {
         digest: authority!.receipt.digest,
       })
     );
+    let recoveryPublicationToken = "";
     await runDOWithRetry(
       () => stub,
       async (_instance, state) => {
@@ -2645,6 +2650,7 @@ describe("stock Smart HTTP receive spike", () => {
         if (!operation?.publicationPlan || !operation.result) {
           throw new Error("expected committed stock publication state");
         }
+        recoveryPublicationToken = operation.publicationPlan.token;
         await state.storage.put(key, {
           ...operation,
           state: "finalizing",
@@ -2690,10 +2696,38 @@ describe("stock Smart HTTP receive spike", () => {
       }
     );
     expect(await runQueueMessage(recoveryMessage)).toEqual({ acked: true, retried: false });
-    expect(await stub.getNativeReceiveOperation("stock-tiny-operation")).toMatchObject({
+    const queueConfirmed = await stub.getNativeReceiveOperation("stock-tiny-operation");
+    expect(queueConfirmed).toMatchObject({
       state: "committed",
+      clientAckReadyAt: undefined,
       result: { authorityPublication: expect.any(Object) },
     });
+    expect(
+      await stub.confirmStockReceivePublication(recoveryPublicationToken, authority!, true)
+    ).toMatchObject({
+      status: "replayed",
+      operation: {
+        clientAckReadyAt: expect.any(Number),
+        events: expect.arrayContaining([
+          expect.objectContaining({ phase: "worker-response-ack", at: expect.any(Number) }),
+        ]),
+      },
+    });
+    // Restore the queue-confirmed/no-ack state so the following route-led
+    // recovery continues to prove the retained acknowledgement RPC.
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const key = nativeReceiveOperationKey("stock-tiny-operation");
+        const operation = await state.storage.get<NativeReceiveOperation>(key);
+        if (!operation) throw new Error("expected queue-confirmed stock operation");
+        await state.storage.put(key, {
+          ...operation,
+          clientAckReadyAt: undefined,
+          events: operation.events?.filter((event) => event.phase !== "worker-response-ack"),
+        });
+      }
+    );
 
     const publicationRecovery = await handleStreamingReceivePackPOST(
       { ...env, NATIVE_RECEIVE_CONTAINER: "1" },

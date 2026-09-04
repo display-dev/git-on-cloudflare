@@ -1101,6 +1101,7 @@ export async function confirmStockReceivePublicationState(args: {
   ctx: DurableObjectState;
   publicationToken: string;
   proof: NativeReceiveAuthorityPublication;
+  authorizeClientAck?: boolean | undefined;
   logger: Logger;
 }): Promise<ConfirmStockReceivePublicationResult> {
   return await args.ctx.storage.transaction(async (transaction) => {
@@ -1110,6 +1111,27 @@ export async function confirmStockReceivePublicationState(args: {
       return { status: "rejected", code: "publication-not-found" };
     }
     if (operation.state === "committed") {
+      if (
+        args.authorizeClientAck &&
+        operation.result?.receivePackResponse !== undefined &&
+        operation.clientAckReadyAt === undefined
+      ) {
+        const acknowledgedAt = Date.now();
+        const acknowledged = withEvidence(
+          {
+            ...operation,
+            clientAckReadyAt: acknowledgedAt,
+            updatedAt: acknowledgedAt,
+          },
+          [{ phase: "worker-response-ack", at: acknowledgedAt }]
+        );
+        await store.put(nativeReceiveOperationKey(operation.id), acknowledged);
+        return {
+          status: "replayed",
+          operation: nativeReceiveOperationView(acknowledged),
+          cleanup: cleanupDescriptor(acknowledged),
+        };
+      }
       return {
         status: "replayed",
         operation: nativeReceiveOperationView(operation),
@@ -1122,11 +1144,15 @@ export async function confirmStockReceivePublicationState(args: {
     ) {
       return { status: "rejected", code: "publication-proof-invalid" };
     }
+    const committedAt = Date.now();
+    const authorizeClientAck =
+      args.authorizeClientAck && operation.result?.receivePackResponse !== undefined;
     const committed = withEvidence(
       {
         ...operation,
         state: "committed",
-        updatedAt: Date.now(),
+        updatedAt: committedAt,
+        clientAckReadyAt: authorizeClientAck ? committedAt : undefined,
         result: operation.result
           ? { ...operation.result, authorityPublication: args.proof }
           : undefined,
@@ -1137,6 +1163,7 @@ export async function confirmStockReceivePublicationState(args: {
           durable: true,
           digest: args.proof.receipt.digest,
         },
+        ...(authorizeClientAck ? [{ phase: "worker-response-ack", at: committedAt }] : []),
       ]
     );
     await store.put(nativeReceiveOperationKey(operation.id), committed);
