@@ -395,17 +395,19 @@ async function handleIngestion(c: AppContext): Promise<Response> {
       }
 
       emitAcceptedWriteFacts(log, [acceptedWrite]);
-      try {
-        await touchRepositoryUpdatedAt(c.var.db, route.repositoryId, Date.now());
-      } catch (error) {
-        // The DO ref commit is authoritative. Activity metadata is a
-        // best-effort visibility signal and must not turn an accepted write
-        // into an ambiguous 500 response.
-        log.warn("ingestion:repo-updated-at-failed", {
-          repositoryId: route.repositoryId,
-          error: String(error),
-        });
-      }
+      // The DO ref commit is authoritative. Activity metadata is a
+      // best-effort visibility signal, so keep its D1 round trip outside the
+      // request-to-serveable critical path. The response's D1 bookmark
+      // intentionally does not cover this write, so updatedAt has no
+      // read-your-writes guarantee.
+      ctx.waitUntil(
+        touchRepositoryUpdatedAt(c.var.db, route.repositoryId, Date.now()).catch((error) => {
+          log.warn("ingestion:repo-updated-at-failed", {
+            repositoryId: route.repositoryId,
+            error: String(error),
+          });
+        })
+      );
       log.info("ingestion:committed", {
         repositoryId: route.repositoryId,
         commitOid: built.commitOid,
