@@ -643,7 +643,9 @@ The full active catalog is passed so that delta bases outside the source set are
    - updates `packsetVersion`;
    - clears the compaction timestamps when no follow-up pass is required, otherwise preserves the original pending and latest-activity timestamps;
    - clears the compaction lease.
-9. The worker deletes superseded R2 blobs best-effort in `waitUntil(...)`.
+9. After the final pass, the worker schedules one paged reconciliation of superseded R2 blobs. Deletion remains best-effort and retryable; intermediate passes do not schedule overlapping cleanup messages.
+   A recorded request that is already below the compaction threshold also schedules this recovery reconciliation. A stale queue delivery with no recorded request does nothing, so duplicate deliveries cannot multiply historical cleanup work.
+   If a later pass is blocked by an uncompactable source set, clearing that request also schedules one reconciliation for superseded rows committed by earlier passes.
 
 ### What compaction does not do
 

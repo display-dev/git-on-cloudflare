@@ -36,6 +36,7 @@ import {
   COMPACTION_MAX_DEFERRAL_MS,
 } from "@/worker/do/repo/catalog/shared";
 import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db";
+import * as packRewrite from "@/worker/git/pack/rewrite";
 import type { CompactionDeleteQueueMessage } from "@/worker/tasks/types";
 import {
   compactOnce,
@@ -291,7 +292,7 @@ describe("streaming compaction", () => {
     }
   });
 
-  it("schedules only newly superseded packs and retains a no-work recovery sweep", async () => {
+  it("schedules one final reconciliation and ignores unrequested duplicates", async () => {
     const owner = "o";
     const repo = uniqueRepoId("stream-compaction-cleanup-fanout");
     await setupRepoForTests(env, owner, repo);
@@ -323,22 +324,10 @@ describe("streaming compaction", () => {
       });
       sendSpy.mockClear();
       expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
-      const allSuperseded = await stub.listSupersededGcPacks();
-      const previousKeys = new Set(previouslySuperseded.map((row) => row.packKey));
-      const newlySuperseded = allSuperseded
-        .map((row) => row.packKey)
-        .filter((packKey) => !previousKeys.has(packKey));
-      expect(newlySuperseded).toHaveLength(4);
-
       const cleanupMessages = sendSpy.mock.calls
         .map(([message]) => message)
         .filter(isCompactionDeleteMessage);
-      expect(cleanupMessages).toHaveLength(1);
-      expect(cleanupMessages[0]).toMatchObject({
-        packKeys: expect.arrayContaining(newlySuperseded),
-        removeCatalogRows: true,
-      });
-      expect(cleanupMessages[0]!.packKeys).toHaveLength(newlySuperseded.length);
+      expect(cleanupMessages).toHaveLength(0);
 
       sendSpy.mockClear();
       expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
@@ -356,15 +345,8 @@ describe("streaming compaction", () => {
 
       sendSpy.mockClear();
       expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
-      expect(sendSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          kind: "compaction-delete",
-          packKeys: expect.arrayContaining(
-            supersededAfterFinalCompaction.map((row) => row.packKey)
-          ),
-          removeCatalogRows: true,
-        }),
-        { delaySeconds: 60 }
+      expect(sendSpy.mock.calls.some(([message]) => isCompactionDeleteMessage(message))).toBe(
+        false
       );
     } finally {
       sendSpy.mockRestore();
@@ -421,6 +403,14 @@ describe("streaming compaction", () => {
       .spyOn(env.REPO_TASKS_QUEUE, "send")
       .mockImplementation(async () => createQueueSendResponse());
     try {
+      await runDOWithRetry(
+        () => stub,
+        async (_instance, state) => {
+          const requestedAt = Date.now();
+          await state.storage.put("compactionWantedAt", requestedAt);
+          await state.storage.put("compactionPendingSince", requestedAt);
+        }
+      );
       expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
       const cleanupMessages = sendSpy.mock.calls
         .map(([message]) => message)
@@ -432,6 +422,66 @@ describe("streaming compaction", () => {
       expect(new Set(cleanupMessages.flatMap((message) => message.packKeys)).size).toBe(251);
     } finally {
       sendSpy.mockRestore();
+    }
+  });
+
+  it("reconciles earlier superseded rows when a later compaction pass is blocked", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-compaction-blocked-cleanup");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const seeded = await seedPackFirstRepo(repoId);
+    const stub = getRepoStub(env, repoId);
+    const prefix = doPrefix(stub.id.toString());
+    await promoteToStreaming(owner, repo);
+    await pushOverflowingStreamingHistory({
+      owner,
+      repo,
+      repoId,
+      startingCommitOid: seeded.nextCommit.oid,
+      updates: 4,
+    });
+    const priorPackKey = `${prefix}/objects/pack/prior-superseded.pack`;
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        await upsertPackCatalogRow(getDb(state.storage), {
+          packKey: priorPackKey,
+          kind: "receive",
+          state: "superseded",
+          tier: 0,
+          seqLo: 0,
+          seqHi: 0,
+          objectCount: 1,
+          packBytes: 1,
+          idxBytes: 1,
+          createdAt: 1,
+          supersededBy: "blocked-pass",
+        });
+      }
+    );
+
+    const rewriteSpy = vi.spyOn(packRewrite, "rewritePackResult").mockResolvedValue({
+      status: "failed",
+      failure: { reason: "topology-incomplete", retryable: false },
+    });
+    const sendSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    try {
+      expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
+      expect(sendSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "compaction-delete",
+          packKeys: [priorPackKey],
+          removeCatalogRows: true,
+        }),
+        { delaySeconds: 60 }
+      );
+      expect(await stub.previewCompaction()).toMatchObject({ queued: false });
+    } finally {
+      sendSpy.mockRestore();
+      rewriteSpy.mockRestore();
     }
   });
 
@@ -649,7 +699,11 @@ describe("streaming compaction", () => {
 
       const stateAfterRequest = await getDebugState(owner, repo, seededRepo.cookieHeader);
       expect(stateAfterRequest.compaction?.queued).toBe(true);
-      expect(sendSpy).toHaveBeenCalledTimes(1);
+      expect(sendSpy).toHaveBeenCalledWith({
+        kind: "compaction",
+        doId: env.REPO_DO.idFromName(repoId).toString(),
+        repoId,
+      });
     } finally {
       sendSpy.mockRestore();
     }

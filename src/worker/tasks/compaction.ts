@@ -130,28 +130,22 @@ async function scheduleSupersededPackCleanup(args: {
   limiter: SubrequestLimiter;
   cacheCtx: CacheContext;
   log: Logger;
-  packKeys?: string[];
   supersededAtGeneration?: number;
 }): Promise<void> {
   const packKeyPages: string[][] = [];
-  if (args.packKeys) {
-    if (args.packKeys.length === 0) return;
-    packKeyPages.push(args.packKeys);
-  } else {
-    let cursor: { seqHi: number; tier: number; packKey: string } | undefined;
-    for (;;) {
-      countCompactionSubrequest(args.cacheCtx, args.log, "do:list-superseded-packs");
-      const superseded = await args.limiter.run("do:list-superseded-packs", () =>
-        args.stub.listSupersededGcPacks(cursor, SUPERSEDED_CLEANUP_PAGE_SIZE)
-      );
-      if (superseded.length === 0) break;
-      packKeyPages.push(superseded.map((row) => row.packKey));
-      if (superseded.length < SUPERSEDED_CLEANUP_PAGE_SIZE) break;
-      const last = superseded.at(-1)!;
-      cursor = { seqHi: last.seqHi, tier: last.tier, packKey: last.packKey };
-    }
-    if (packKeyPages.length === 0) return;
+  let cursor: { seqHi: number; tier: number; packKey: string } | undefined;
+  for (;;) {
+    countCompactionSubrequest(args.cacheCtx, args.log, "do:list-superseded-packs");
+    const superseded = await args.limiter.run("do:list-superseded-packs", () =>
+      args.stub.listSupersededGcPacks(cursor, SUPERSEDED_CLEANUP_PAGE_SIZE)
+    );
+    if (superseded.length === 0) break;
+    packKeyPages.push(superseded.map((row) => row.packKey));
+    if (superseded.length < SUPERSEDED_CLEANUP_PAGE_SIZE) break;
+    const last = superseded.at(-1)!;
+    cursor = { seqHi: last.seqHi, tier: last.tier, packKey: last.packKey };
   }
+  if (packKeyPages.length === 0) return;
   const publishedGeneration =
     args.supersededAtGeneration ??
     (await readPublishedRepositoryGeneration({
@@ -278,6 +272,9 @@ export async function handleCompactionMessage(
 
   let stagedUpload: StagedPackUpload | undefined;
   let leaseToken: string | undefined;
+  let finalCleanup:
+    | { packCatalogVersion: number; supersededCount: number }
+    | undefined;
 
   try {
     if (!(await publishPendingGeneration({ env, doId: body.doId, stub, limiter, cacheCtx, log }))) {
@@ -304,7 +301,11 @@ export async function handleCompactionMessage(
         status: begin.status,
         reason: "reason" in begin ? begin.reason : undefined,
       });
-      if (begin.status === "no_work") {
+      // A recorded request whose catalog is already below threshold is a
+      // genuine recovery opportunity. A message with no recorded request is
+      // a stale duplicate after another pass completed; sweeping there would
+      // multiply historical delete work for every duplicate delivery.
+      if (begin.status === "no_work" && begin.reason === "below-threshold") {
         await scheduleSupersededPackCleanup({
           env,
           doId: body.doId,
@@ -418,6 +419,18 @@ export async function handleCompactionMessage(
         sourceSeqLo: begin.sourcePacks[0]?.seqLo,
         sourceSeqHi: begin.sourcePacks[begin.sourcePacks.length - 1]?.seqHi,
       });
+      // Earlier passes may already have committed superseded rows before a
+      // later pass discovers an uncompactable source set. Reconcile once after
+      // clearing the request; duplicate deliveries then become not-requested.
+      await scheduleSupersededPackCleanup({
+        env,
+        doId: body.doId,
+        repoId: body.repoId,
+        stub,
+        limiter,
+        cacheCtx,
+        log,
+      });
       message.ack();
       return;
     }
@@ -485,6 +498,12 @@ export async function handleCompactionMessage(
 
     leaseToken = undefined;
     stagedUpload = undefined;
+    if (!commit.shouldRequeue) {
+      finalCleanup = {
+        packCatalogVersion: commit.packCatalogVersion,
+        supersededCount: commit.supersededPackKeys.length,
+      };
+    }
     if (catalogMetadataBundleEnabled(env)) {
       const staleBundleKey = await catalogMetadataBundleKey(begin.activeCatalog);
       ctx.waitUntil(
@@ -514,33 +533,30 @@ export async function handleCompactionMessage(
     }
 
     if (!(await publishPendingGeneration({ env, doId: body.doId, stub, limiter, cacheCtx, log }))) {
+      if (finalCleanup) {
+        log.warn("compaction:final-cleanup-deferred", {
+          reason: "generation-publication-busy",
+          ...finalCleanup,
+        });
+      }
       message.ack();
       return;
     }
-    await scheduleSupersededPackCleanup(
-      commit.shouldRequeue
-        ? {
-            env,
-            doId: body.doId,
-            repoId: body.repoId,
-            stub,
-            limiter,
-            cacheCtx,
-            log,
-            packKeys: commit.supersededPackKeys,
-            supersededAtGeneration: commit.packCatalogVersion,
-          }
-        : {
-            env,
-            doId: body.doId,
-            repoId: body.repoId,
-            stub,
-            limiter,
-            cacheCtx,
-            log,
-            supersededAtGeneration: commit.packCatalogVersion,
-          }
-    );
+    // One reconciliation after the final pass covers every superseded row.
+    // Scheduling intermediate exact-key work as well would make the final
+    // sweep duplicate those messages while readers still hold generations.
+    if (!commit.shouldRequeue) {
+      await scheduleSupersededPackCleanup({
+        env,
+        doId: body.doId,
+        repoId: body.repoId,
+        stub,
+        limiter,
+        cacheCtx,
+        log,
+        supersededAtGeneration: commit.packCatalogVersion,
+      });
+    }
 
     log.info("compaction:done", {
       targetPackKey: commit.targetPackKey,
@@ -549,6 +565,13 @@ export async function handleCompactionMessage(
     });
     message.ack();
   } catch (error) {
+    if (finalCleanup) {
+      log.warn("compaction:final-cleanup-deferred", {
+        reason: "post-commit-error",
+        ...finalCleanup,
+        error: String(error),
+      });
+    }
     log.error("compaction:error", { error: String(error) });
     await cleanupStagedCompaction({
       stagedUpload,

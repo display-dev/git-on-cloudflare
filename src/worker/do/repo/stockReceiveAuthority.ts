@@ -18,7 +18,7 @@ import type {
 } from "@/worker/git/nativeReceive/types";
 
 import { recordAcceptedWrites, acceptedWritesMatchCommands } from "./acceptedWrites";
-import { getDb, listActivePackCatalog, upsertPackCatalogRow } from "./db";
+import { getDb, listActivePackCatalog, upsertPackCatalogRow, type PackCatalogRow } from "./db";
 import {
   asTypedStorage,
   nativeReceiveOperationKey,
@@ -59,10 +59,10 @@ import {
   STOCK_RECEIVE_EXECUTION_CLAIM_MS,
   removeStockReceivePreparationLease,
 } from "./nativeReceiveActivity";
+import { catalogNeedsCompaction } from "./catalog/compaction/plan";
 
 const MAX_RETAINED_OPERATIONS = 128;
 const MAX_EVIDENCE_EVENTS = 128;
-const COMPACTION_FAN_IN = 4;
 const ZERO_OID = "0".repeat(40);
 const STOCK_PUBLICATION_LEASE_MS = 30_000;
 const STOCK_TRACE_PHASES = new Map<string, string>([
@@ -467,12 +467,6 @@ function nextHead(stored: Head | undefined, refs: Array<{ name: string; oid: str
   return current ? { target, oid: current.oid } : { target, unborn: true };
 }
 
-function catalogNeedsCompaction(rows: Array<{ tier: number }>): boolean {
-  const counts = new Map<number, number>();
-  for (const row of rows) counts.set(row.tier, (counts.get(row.tier) ?? 0) + 1);
-  return [...counts.values()].some((count) => count >= COMPACTION_FAN_IN);
-}
-
 function stagedPackFor(
   operation: NativeReceiveOperation,
   prepared: NativeReceivePrepared
@@ -494,6 +488,13 @@ function stagedPackFor(
       refsEtag: result.outputRefsEtag!,
     },
   };
+}
+
+function shouldQueueStockCompaction(
+  hasStagedPack: boolean,
+  activeCatalog: PackCatalogRow[]
+): boolean {
+  return hasStagedPack && catalogNeedsCompaction(activeCatalog);
 }
 
 /**
@@ -770,7 +771,7 @@ async function finalizeStockReceiveWithPublicationLease(args: {
     });
   }
   const activeAfter = await listActivePackCatalog(db);
-  const shouldQueueCompaction = stagedPack ? catalogNeedsCompaction(activeAfter) : false;
+  const shouldQueueCompaction = shouldQueueStockCompaction(stagedPack !== undefined, activeAfter);
   const committedAt = Date.now();
   const finalizing = withEvidence(
     {
@@ -1514,6 +1515,7 @@ export async function completeStockReceiveCleanupState(args: {
 
 export const __test = {
   ZERO_OID,
+  shouldQueueStockCompaction,
   afterPublicationLeaseOnce(callback: () => Promise<void>): void {
     afterPublicationLeaseForTesting = callback;
   },

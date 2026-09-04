@@ -78,6 +78,25 @@ const stockTrace = [
   "disposable_ref_update_observed",
 ] as const;
 
+it("queues stock compaction only after a staged pack exceeds the canonical fan-in", async () => {
+  const seeded = await setupRepoForTests(env, "o", uniqueRepoId("stock-compaction-threshold"));
+  const stub = getRepoStub(env, seeded.doName);
+  await runDOWithRetry(
+    () => stub,
+    async (instance) => await instance.seedMinimalRepo()
+  );
+  const [catalog] = await stub.getActivePackCatalog();
+  if (!catalog) throw new Error("expected seeded pack catalog row");
+  const rows = Array.from({ length: 5 }, (_, index) => ({
+    ...catalog,
+    packKey: `${catalog.packKey}-${index}`,
+  }));
+
+  expect(stockAuthorityTest.shouldQueueStockCompaction(false, rows)).toBe(false);
+  expect(stockAuthorityTest.shouldQueueStockCompaction(true, rows.slice(0, 4))).toBe(false);
+  expect(stockAuthorityTest.shouldQueueStockCompaction(true, rows)).toBe(true);
+});
+
 async function sha256(bytes: Uint8Array): Promise<string> {
   return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", asBufferSource(bytes))));
 }
