@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createExecutionContext, runDurableObjectAlarm } from "cloudflare:test";
+import {
+  createExecutionContext,
+  runDurableObjectAlarm,
+  waitOnExecutionContext,
+} from "cloudflare:test";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { asBufferSource, bytesToHex, createLogger, getRepoStub } from "@/worker/common";
@@ -38,7 +42,14 @@ import {
   stockReceivePlanKeys,
   StockReceivePlannerError,
 } from "@/worker/git/nativeReceive/stockPlanner";
-import { validateStockReceivePreparedProof } from "@/worker/git/nativeReceive/stockProof";
+import {
+  stockReceivePreparedProofFailure,
+  validateStockReceivePreparedProof,
+} from "@/worker/git/nativeReceive/stockProof";
+import {
+  catalogMetadataBundleKey,
+  putCatalogMetadataBundle,
+} from "@/worker/git/nativeReceive/catalogMetadataBundle";
 import { __test as nativePipelineTest } from "@/worker/git/receive/nativePipeline";
 import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
 import { buildSidebandReceiveBody } from "@/worker/git/receive/response";
@@ -1865,6 +1876,167 @@ describe("stock Smart HTTP receive spike", () => {
     expect(await env.REPO_BUCKET.head(packIndexKey(outputPackKey))).not.toBeNull();
     expect(await env.REPO_BUCKET.head(packRefsKey(outputPackKey))).not.toBeNull();
 
+    const bundleEnv = {
+      ...env,
+      STOCK_RECEIVE_DIRECT_PACK: "1",
+      STOCK_RECEIVE_CATALOG_METADATA_BUNDLE: "1",
+    } as Env;
+    const seedContext = createExecutionContext();
+    await executeStockReceiveWorkerDataPlane({
+      env: bundleEnv,
+      operation,
+      inputPackBytes: pack,
+      cacheCtx: {
+        req: new Request("https://example.invalid/stock-direct-pack-bundle-seed"),
+        ctx: seedContext,
+        memo: {},
+      },
+      limiter: new SubrequestLimiter(40),
+      countSubrequest() {},
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackBundleSeedTest" }),
+    });
+    await waitOnExecutionContext(seedContext);
+    const seededNextCatalogBundleKey = await catalogMetadataBundleKey([
+      catalog,
+      {
+        packKey: outputPackKey,
+        packBytes: result.processorResult.packBytes,
+        idxBytes: result.processorResult.idxBytes,
+      },
+    ]);
+    expect(await env.REPO_BUCKET.head(seededNextCatalogBundleKey)).not.toBeNull();
+    const catalogIdx = new Uint8Array(
+      await (await env.REPO_BUCKET.get(packIndexKey(catalog.packKey)))!.arrayBuffer()
+    );
+    const catalogRefs = new Uint8Array(
+      await (await env.REPO_BUCKET.get(packRefsKey(catalog.packKey)))!.arrayBuffer()
+    );
+    await putCatalogMetadataBundle({
+      env: bundleEnv,
+      entries: [
+        {
+          packKey: catalog.packKey,
+          packBytes: catalog.packBytes,
+          idx: catalogIdx,
+          refs: catalogRefs,
+        },
+      ],
+      limiter: new SubrequestLimiter(4),
+      countSubrequest() {},
+    });
+
+    const bundledOperationId = "direct-pack-bundle-hit-operation";
+    const bundledInputKey = `${prefix}/native-receive/direct-pack-bundle-hit.request`;
+    const bundledInput = await env.REPO_BUCKET.put(bundledInputKey, pack, {
+      customMetadata: { sha256: inputRequestSha256 },
+    });
+    const bundledOutputPackKey = nativeReceiveOutputPackKey(
+      prefix,
+      bundledOperationId,
+      "e".repeat(64)
+    );
+    const bundledOperation: NativeReceiveOperation = {
+      ...operation,
+      id: bundledOperationId,
+      fingerprint: "e".repeat(64),
+      inputPackKey: bundledInputKey,
+      inputEtag: bundledInput.etag,
+      outputPackKey: bundledOutputPackKey,
+      outputIdxKey: packIndexKey(bundledOutputPackKey),
+      outputRefsKey: packRefsKey(bundledOutputPackKey),
+    };
+    let bundleSubrequests = 0;
+    const hitContext = createExecutionContext();
+    const bundled = await executeStockReceiveWorkerDataPlane({
+      env: bundleEnv,
+      operation: bundledOperation,
+      inputPackBytes: pack,
+      cacheCtx: {
+        req: new Request("https://example.invalid/stock-direct-pack-bundle-hit"),
+        ctx: hitContext,
+        memo: {},
+      },
+      limiter: new SubrequestLimiter(40),
+      countSubrequest(_operation, n = 1) {
+        bundleSubrequests += n;
+      },
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackBundleHitTest" }),
+    });
+    expect(bundled.processorResult).toMatchObject({
+      activeMetadataBundle: {
+        key: expect.stringMatching(/\/catalog-metadata\/[0-9a-f]{64}\.bin$/),
+        bytes: expect.any(Number),
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        etag: expect.any(String),
+        catalogFingerprint: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+      activePackTrailerBytes: 20,
+      activePackTrailerRequests: 1,
+    });
+    expect(bundleSubrequests).toBeLessThan(directSubrequests);
+    expect(await validateStockReceivePreparedProof(bundledOperation, bundled.processorResult)).toBe(
+      true
+    );
+    expect(
+      await stockReceivePreparedProofFailure(
+        { ...bundledOperation, activeCatalog: [] },
+        { ...bundled.processorResult, activePackCount: 0 }
+      )
+    ).toBe("direct-metadata-bundle");
+    await waitOnExecutionContext(hitContext);
+
+    const currentCatalogBundleKey = await catalogMetadataBundleKey([catalog]);
+    await env.REPO_BUCKET.put(currentCatalogBundleKey, new TextEncoder().encode("not-a-bundle"), {
+      customMetadata: { sha256: await sha256(new TextEncoder().encode("not-a-bundle")) },
+    });
+    const fallbackOperationId = "direct-pack-bundle-fallback-operation";
+    const fallbackInputKey = `${prefix}/native-receive/direct-pack-bundle-fallback.request`;
+    const fallbackInput = await env.REPO_BUCKET.put(fallbackInputKey, pack, {
+      customMetadata: { sha256: inputRequestSha256 },
+    });
+    const fallbackOutputPackKey = nativeReceiveOutputPackKey(
+      prefix,
+      fallbackOperationId,
+      "d".repeat(64)
+    );
+    const fallbackOperation: NativeReceiveOperation = {
+      ...operation,
+      id: fallbackOperationId,
+      fingerprint: "d".repeat(64),
+      inputPackKey: fallbackInputKey,
+      inputEtag: fallbackInput.etag,
+      outputPackKey: fallbackOutputPackKey,
+      outputIdxKey: packIndexKey(fallbackOutputPackKey),
+      outputRefsKey: packRefsKey(fallbackOutputPackKey),
+    };
+    let fallbackSubrequests = 0;
+    const fallbackContext = createExecutionContext();
+    const fallback = await executeStockReceiveWorkerDataPlane({
+      env: bundleEnv,
+      operation: fallbackOperation,
+      inputPackBytes: pack,
+      cacheCtx: {
+        req: new Request("https://example.invalid/stock-direct-pack-bundle-fallback"),
+        ctx: fallbackContext,
+        memo: {},
+      },
+      limiter: new SubrequestLimiter(40),
+      countSubrequest(_operation, n = 1) {
+        fallbackSubrequests += n;
+      },
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackBundleFallbackTest" }),
+    });
+    expect(fallback.processorResult.activeMetadataBundle).toBeUndefined();
+    expect(fallback.processorResult).toMatchObject({
+      activePackTrailerBytes: 20,
+      activePackTrailerRequests: 1,
+    });
+    expect(fallbackSubrequests).toBeGreaterThan(bundleSubrequests);
+    expect(
+      await validateStockReceivePreparedProof(fallbackOperation, fallback.processorResult)
+    ).toBe(true);
+    await waitOnExecutionContext(fallbackContext);
+
     for (const failedRole of ["manifest", "pack"] as const) {
       stockPlannerTest.reset();
       const failedId = `direct-pack-partial-${failedRole}`;
@@ -2917,6 +3089,28 @@ describe("stock Smart HTTP receive spike", () => {
       head: { target: "refs/heads/main", oid: current.oid },
     });
     const before = await readRepoCatalogState(() => stub);
+    const [activeCatalog] = await stub.getActivePackCatalog();
+    if (!activeCatalog) throw new Error("expected ref-only active catalog");
+    const bundleEnv = { ...env, STOCK_RECEIVE_CATALOG_METADATA_BUNDLE: "1" } as Env;
+    const activeIdx = new Uint8Array(
+      await (await env.REPO_BUCKET.get(packIndexKey(activeCatalog.packKey)))!.arrayBuffer()
+    );
+    const activeRefs = new Uint8Array(
+      await (await env.REPO_BUCKET.get(packRefsKey(activeCatalog.packKey)))!.arrayBuffer()
+    );
+    const currentBundle = await putCatalogMetadataBundle({
+      env: bundleEnv,
+      entries: [
+        {
+          packKey: activeCatalog.packKey,
+          packBytes: activeCatalog.packBytes,
+          idx: activeIdx,
+          refs: activeRefs,
+        },
+      ],
+      limiter: new SubrequestLimiter(4),
+      countSubrequest() {},
+    });
 
     // The input deliberately duplicates objects already reachable from the
     // advertised current tip. The native result therefore has no new output.
@@ -2942,7 +3136,7 @@ describe("stock Smart HTTP receive spike", () => {
         executionCount++;
         const stock = operation.stockReceive!;
         const plan = await planStockReceive({
-          env,
+          env: bundleEnv,
           repoId: operation.repositoryId,
           operationId: operation.id,
           inputRequestKey: operation.inputPackKey,
@@ -3022,6 +3216,7 @@ describe("stock Smart HTTP receive spike", () => {
           topologicalEntryIds: plan.topologicalEntryIds,
           selectedPackChecksums: plan.selectedPackChecksums,
           activePackBindings: plan.activePackBindings,
+          activeMetadataBundle: plan.activeMetadataBundle,
           ranges: plan.ranges,
           activePackReads: plan.activePackReads,
           activePackTrailerBytes: plan.activePackTrailerBytes,
@@ -3112,9 +3307,11 @@ describe("stock Smart HTTP receive spike", () => {
       }
     );
 
-    const push = async (operationId: string) =>
-      await handleStreamingReceivePackPOST(
-        { ...env, NATIVE_RECEIVE_CONTAINER: "1" },
+    let pushContext: ExecutionContext | undefined;
+    const push = async (operationId: string) => {
+      pushContext = createExecutionContext();
+      return await handleStreamingReceivePackPOST(
+        { ...bundleEnv, NATIVE_RECEIVE_CONTAINER: "1" },
         seeded.doName,
         new Request(`https://example.com/${owner}/${repo}/git-receive-pack`, {
           method: "POST",
@@ -3125,7 +3322,7 @@ describe("stock Smart HTTP receive spike", () => {
           },
           body: toRequestBody(requestBody),
         }),
-        createExecutionContext(),
+        pushContext,
         {
           limiter: new SubrequestLimiter(900),
           acceptedWriteContext: {
@@ -3136,6 +3333,7 @@ describe("stock Smart HTTP receive spike", () => {
           },
         }
       );
+    };
 
     const response = await push("stock-ref-only-operation");
     expect(response.status).toBe(200);
@@ -3165,6 +3363,8 @@ describe("stock Smart HTTP receive spike", () => {
     expect(plannedWholePackBytes).toBeGreaterThan(0);
     const after = await readRepoCatalogState(() => stub);
     expect(after).toEqual(before);
+    await waitOnExecutionContext(pushContext!);
+    expect(await env.REPO_BUCKET.head(currentBundle.key)).not.toBeNull();
     expect(
       (await env.REPO_BUCKET.list()).objects.filter(
         (object) =>

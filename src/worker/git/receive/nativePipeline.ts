@@ -12,6 +12,7 @@ import type {
   MatchNativeReceiveOperationResult,
   NativeReceiveAuthorityPublicationPlan,
   NativeReceiveCleanupDescriptor,
+  NativeReceiveExecutionRejection,
   NativeReceiveOperation,
   NativeReceiveOperationView,
   NativeReceivePrepared,
@@ -28,7 +29,11 @@ import {
   packIndexKey,
   packRefsKey,
 } from "@/worker/keys";
-import { isNativeReceiveTerminal } from "@/worker/git/nativeReceive/types";
+import {
+  isNativeReceiveTerminal,
+  STOCK_PLANNER_REJECTION_METRICS_MAX_BYTES,
+  STOCK_PROCESSOR_RESULT_MAX_BYTES,
+} from "@/worker/git/nativeReceive/types";
 import { fingerprintNativeReceive } from "@/worker/git/nativeReceive/fingerprint";
 import { publishNativeReceiveAuthorityPlan } from "@/worker/git/nativeReceive/authorityPublication";
 import {
@@ -45,8 +50,37 @@ import {
 } from "./pipelineTypes";
 
 const NATIVE_RECEIVE_WAIT_MS = 14 * 60_000;
-const STOCK_PROCESSOR_RESULT_MAX_BYTES = 256 * 1024;
 let failBeforeClientAckOperationForTesting: string | undefined;
+
+function boundedStockReceiveRejection(
+  rejection: NativeReceiveExecutionRejection
+): NativeReceiveExecutionRejection {
+  const encoder = new TextEncoder();
+  if (
+    rejection.code === "output-integrity-invalid" &&
+    rejection.processorResult &&
+    encoder.encode(JSON.stringify(rejection.processorResult)).byteLength <=
+      STOCK_PROCESSOR_RESULT_MAX_BYTES
+  )
+    return rejection;
+  if (
+    (rejection.code === "r2-transient" || rejection.code === "replacement-closure-invalid") &&
+    rejection.metrics &&
+    encoder.encode(JSON.stringify(rejection.metrics)).byteLength <=
+      STOCK_PLANNER_REJECTION_METRICS_MAX_BYTES
+  )
+    return rejection;
+  if (
+    rejection.code !== "output-integrity-invalid" &&
+    rejection.code !== "r2-transient" &&
+    rejection.code !== "replacement-closure-invalid"
+  )
+    return rejection;
+  return {
+    code: "native-data-plane-failed",
+    diagnosticCode: "stock-data-plane:rejection-proof-limit",
+  };
+}
 
 export const __test = {
   failBeforeClientAck(operationId: string): void {
@@ -55,6 +89,7 @@ export const __test = {
   reset(): void {
     failBeforeClientAckOperationForTesting = undefined;
   },
+  boundedStockReceiveRejection,
 };
 
 function throwIfClientAckInterrupted(operationId: string): void {
@@ -348,15 +383,15 @@ async function executeConcreteStockReceiveSingleHop(args: {
           logger: args.pipeline.log,
         });
       } catch (error) {
-        const rejection = classifyStockReceiveDataPlaneError(error);
+        const classifiedRejection = classifyStockReceiveDataPlaneError(error);
+        const rejection = boundedStockReceiveRejection(classifiedRejection);
         args.pipeline.log.warn("stock-data-plane:rejected", {
           operationId: args.operation.id,
           code: rejection.code,
+          classifiedCode: classifiedRejection.code,
           diagnosticCode: stockReceiveDiagnosticCode(error),
+          proofReduced: rejection !== classifiedRejection,
         });
-        if (new TextEncoder().encode(JSON.stringify(rejection)).byteLength > 64 * 1024) {
-          throw new Error("stock-receive:rejection-proof-limit");
-        }
         args.pipeline.countSubrequest("do:reject-stock-receive-execution");
         const rejected = await args.pipeline.limiter.run<RejectStockReceiveExecutionResult>(
           "do:reject-stock-receive-execution",
@@ -384,10 +419,34 @@ async function executeConcreteStockReceiveSingleHop(args: {
         );
       }
       if (
-        new TextEncoder().encode(JSON.stringify(prepared)).byteLength >
+        new TextEncoder().encode(JSON.stringify(prepared.processorResult)).byteLength >
         STOCK_PROCESSOR_RESULT_MAX_BYTES
       ) {
-        throw new Error("stock-receive:prepared-proof-limit");
+        args.pipeline.countSubrequest("do:reject-stock-receive-prepared-proof");
+        const rejected = await args.pipeline.limiter.run<RejectStockReceiveExecutionResult>(
+          "do:reject-stock-receive-prepared-proof",
+          () =>
+            args.pipeline.stub.rejectStockReceiveExecution(admission.executionToken, {
+              code: "native-data-plane-failed",
+              diagnosticCode: "stock-data-plane:prepared-proof-limit",
+            })
+        );
+        if (rejected.status === "failed" || rejected.status === "replayed") {
+          await cleanupCurrentStockRetry({
+            ...args,
+            operation: currentCleanup,
+            includeOutputs: false,
+          });
+          await cleanupStockOperation({
+            ...args,
+            operation: stockCleanupDescriptor(admission.operation),
+            includeOutputs: true,
+            complete: true,
+          });
+        }
+        throw new NativeReceiveIndeterminateError(
+          "Stock receive proof exceeded its durable validation bound."
+        );
       }
       finalized = await finalizeStockReceiveWithBoundedWait({
         pipeline: args.pipeline,
@@ -505,6 +564,26 @@ async function executeConcreteStockReceiveSingleHop(args: {
   if (confirmed.status === "rejected") {
     throw new NativeReceiveIndeterminateError(
       `Stock receive publication confirmation was rejected (${confirmed.code}).`
+    );
+  }
+  const consumedMetadataBundleKey = confirmed.operation.metrics?.activeMetadataBundle?.key;
+  // Ref-only publication leaves the catalog unchanged, so its input bundle is
+  // still current. Artifact publication advances the catalog and retires the
+  // exact bundle consumed while planning the previous catalog.
+  if (consumedMetadataBundleKey && confirmed.operation.result?.packKey) {
+    const staleBundleKey = consumedMetadataBundleKey;
+    args.pipeline.cacheCtx.ctx.waitUntil(
+      args.pipeline.limiter
+        .run("r2:delete-consumed-catalog-metadata", () => {
+          args.pipeline.countSubrequest("r2:delete-consumed-catalog-metadata");
+          return args.pipeline.env.REPO_BUCKET.delete(staleBundleKey);
+        })
+        .catch((error) => {
+          args.pipeline.log.warn("stock-receive:catalog-metadata-retire-failed", {
+            key: staleBundleKey,
+            error: String(error),
+          });
+        })
     );
   }
   // Finalize already scheduled durable Queue recovery before authority

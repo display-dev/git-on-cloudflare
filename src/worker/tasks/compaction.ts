@@ -23,6 +23,10 @@ import {
   type StagedPackUpload,
 } from "@/worker/git/receive/r2Upload";
 import { doPrefix, packIndexKey, packRefsKey, r2PackDirPrefix, r2PackKey } from "@/worker/keys";
+import {
+  catalogMetadataBundleEnabled,
+  catalogMetadataBundleKey,
+} from "@/worker/git/nativeReceive/catalogMetadataBundle";
 import { createQueueTaskContext, logSoftBudgetExhausted, retryQueueMessage } from "./context";
 import {
   publishRepositoryGeneration,
@@ -438,6 +442,22 @@ export async function handleCompactionMessage(
 
     leaseToken = undefined;
     stagedUpload = undefined;
+    if (catalogMetadataBundleEnabled(env)) {
+      const staleBundleKey = await catalogMetadataBundleKey(begin.activeCatalog);
+      ctx.waitUntil(
+        limiter
+          .run("r2:delete-compacted-catalog-metadata", () => {
+            countCompactionSubrequest(cacheCtx, log, "r2:delete-compacted-catalog-metadata");
+            return env.REPO_BUCKET.delete(staleBundleKey);
+          })
+          .catch((error) => {
+            log.warn("compaction:catalog-metadata-retire-failed", {
+              key: staleBundleKey,
+              error: String(error),
+            });
+          })
+      );
+    }
     if (commit.shouldRequeue) {
       ctx.waitUntil(
         env.REPO_TASKS_QUEUE.send({

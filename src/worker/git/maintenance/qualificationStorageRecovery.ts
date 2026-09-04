@@ -100,6 +100,10 @@ function compactionOrphanIdentity(relative: string): CompactionOrphanIdentity | 
   return matched ? { leaseToken: matched[1]! } : null;
 }
 
+function isCatalogMetadataCache(relative: string): boolean {
+  return /^catalog-metadata\/[0-9a-f]{64}\.bin$/.test(relative);
+}
+
 function objectProof(object: R2Object): RecoveryObjectProof {
   return { key: object.key, etag: object.etag, size: object.size };
 }
@@ -180,7 +184,9 @@ async function executeRecoveryJournal(args: {
       const relative = prefixMatches ? proof.key.slice(args.prefix.length + 1) : "";
       const recognizedRecoveryObject =
         prefixMatches &&
-        (authorityIdentity(relative) !== null || compactionOrphanIdentity(relative) !== null);
+        (authorityIdentity(relative) !== null ||
+          compactionOrphanIdentity(relative) !== null ||
+          isCatalogMetadataCache(relative));
       const protectedObject = isProtectedRecoveryObject({
         prefix: args.prefix,
         journalKey: args.journalKey,
@@ -548,6 +554,10 @@ export async function recoverQualificationStorage(args: {
           return { status: "conflict", reason: "unrecognized_orphan" } as const;
         }
         addCandidate(`compaction\0${compaction.leaseToken}`, object);
+        continue;
+      }
+      if (isCatalogMetadataCache(relative)) {
+        addCandidate(`catalog-metadata\0${object.key}`, object);
         continue;
       }
       // Legacy authority records are not authenticated against a server-owned

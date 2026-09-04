@@ -29,6 +29,7 @@ import {
   parsePackRefView,
 } from "@/worker/git/pack/refIndex";
 import { handleStreamingReceivePackPOST } from "@/worker/git/receive/streamReceivePack";
+import { __test as nativePipelineTest } from "@/worker/git/receive/nativePipeline";
 import {
   doPrefix,
   nativeReceiveInputPackKey,
@@ -135,6 +136,78 @@ async function runOperationToTerminal(
   }
   throw new Error("native receive did not reach a terminal state");
 }
+
+describe("stock receive rejection RPC bounds", () => {
+  it("preserves a bounded rejection proof", () => {
+    const rejection = {
+      code: "native-data-plane-failed" as const,
+      diagnosticCode: "stock-plan:idx-invalid",
+    };
+
+    expect(nativePipelineTest.boundedStockReceiveRejection(rejection)).toBe(rejection);
+  });
+
+  it("reduces an oversized proof before rejecting the durable execution claim", () => {
+    const ranges = Array.from({ length: 256 }, (_, index) => ({
+      packChecksum: index.toString(16).padStart(40, "0"),
+      start: index,
+      end: index + 1,
+      reason: "required-object" as const,
+      requiredOid: (index + 1).toString(16).padStart(40, "0"),
+    }));
+    const oversized = {
+      code: "r2-transient" as const,
+      metrics: {
+        elapsedMs: 1,
+        scratchBytes: 0,
+        hydratedBytes: 0,
+        downloadedBytes: 256,
+        cacheHitBytes: 0,
+        metadataBytes: 0,
+        metadataRequests: 0,
+        inputBytesRead: 0,
+        inputRequests: 0,
+        rangeBytes: 256,
+        rangeRequests: 256,
+        packsTouched: 256,
+        ranges,
+        activePackReads: ranges.map((range) => ({
+          ...range,
+          returnedBytes: 1,
+          kind: "required-object" as const,
+        })),
+        activePackTrailerBytes: 0,
+        activePackTrailerRequests: 0,
+        activePackRangeBytes: 256,
+        activePackRangeRequests: 256,
+        activePackWholeBytes: 0,
+        activePackWholeRequests: 0,
+        activePackUnattributedBytes: 0,
+        activePackUnattributedRequests: 0,
+        selectedPackBytes: 0,
+        activePackCount: 64,
+        outputValidationBytes: 0,
+        outputValidationRequests: 0,
+        outputBytesWritten: 0,
+        outputRequests: 0,
+      },
+    };
+
+    expect(nativePipelineTest.boundedStockReceiveRejection(oversized as never)).toEqual({
+      code: "native-data-plane-failed",
+      diagnosticCode: "stock-data-plane:rejection-proof-limit",
+    });
+  });
+
+  it("preserves an output-integrity proof within RepoDO's processor-result bound", () => {
+    const rejection = {
+      code: "output-integrity-invalid" as const,
+      processorResult: { operationId: "op", diagnostic: "x".repeat(100 * 1024) },
+    };
+
+    expect(nativePipelineTest.boundedStockReceiveRejection(rejection as never)).toBe(rejection);
+  });
+});
 
 describe("durable native receive and import", () => {
   it("rejects a queryable operation id when the selected path has no durable ledger", async () => {

@@ -262,6 +262,8 @@ describe("qualification repository controls", () => {
     const authorityPrefix = `${prefix}/native-receive/authority/${operationId}-${fingerprint}`;
     const authority = `${authorityPrefix}/ref-0.json`;
     const receipt = `${authorityPrefix}/receipt.json`;
+    const catalogMetadataBundle = `${prefix}/catalog-metadata/${"c".repeat(64)}.bin`;
+    await env.REPO_BUCKET.put(catalogMetadataBundle, new Uint8Array(11));
     await env.REPO_BUCKET.put(
       authority,
       JSON.stringify({
@@ -287,7 +289,7 @@ describe("qualification repository controls", () => {
       const body = JSON.stringify({
         schemaVersion: 1,
         expectedRefStateDigest: inventory.refStateDigest,
-        expectedObjectCount: 7,
+        expectedObjectCount: 8,
       });
       const init = {
         method: "POST",
@@ -339,7 +341,7 @@ describe("qualification repository controls", () => {
         clock.mockReturnValue(now + 8 * 60_000);
         const unknown = `${prefix}/objects/pack/pack-unknown-${crypto.randomUUID()}.pack`;
         await env.REPO_BUCKET.put(unknown, new Uint8Array(3));
-        const bodyWithUnknown = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 8 });
+        const bodyWithUnknown = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 9 });
         const refused = await qualificationRequest("/storage-recovery", {
           ...init,
           body: bodyWithUnknown,
@@ -355,7 +357,7 @@ describe("qualification repository controls", () => {
         await env.REPO_BUCKET.put(forgedJournal, "{");
         const malformedJournalBody = JSON.stringify({
           ...JSON.parse(body),
-          expectedObjectCount: 8,
+          expectedObjectCount: 9,
         });
         const malformedJournal = await qualificationRequest("/storage-recovery", {
           ...init,
@@ -420,7 +422,7 @@ describe("qualification repository controls", () => {
             signature: "b".repeat(64),
           })
         );
-        const forgedBody = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 8 });
+        const forgedBody = JSON.stringify({ ...JSON.parse(body), expectedObjectCount: 9 });
         const forgedResult = await qualificationRequest("/storage-recovery", {
           ...init,
           body: forgedBody,
@@ -478,7 +480,7 @@ describe("qualification repository controls", () => {
         await env.REPO_BUCKET.delete([orphan, orphanIdx, orphanRefs]);
         const authorityOnlyBody = JSON.stringify({
           ...JSON.parse(body),
-          expectedObjectCount: 4,
+          expectedObjectCount: 5,
         });
         const recovered = await qualificationRequest("/storage-recovery", {
           ...init,
@@ -488,10 +490,11 @@ describe("qualification repository controls", () => {
         expect(recovered.status).toBe(200);
         expect(await recovered.json()).toMatchObject({
           status: "recovered",
-          deletedObjectCount: 2,
+          deletedObjectCount: 3,
           remainingObjectCount: 2,
         });
         expect(await env.REPO_BUCKET.head(authority)).toBeNull();
+        expect(await env.REPO_BUCKET.head(catalogMetadataBundle)).toBeNull();
         const inventoryAfter = await stub.getQualificationInventory();
         expect(inventoryAfter).toEqual(inventory);
         const abandonedCompaction = `${prefix}/objects/pack/pack-cmp-${crypto.randomUUID()}.pack`;
@@ -897,6 +900,7 @@ describe("qualification repository controls", () => {
           orphanRefs,
           `${prefix}/generations/0.json`,
           `${prefix}/generation-index.json`,
+          catalogMetadataBundle,
         ]);
       }
     });

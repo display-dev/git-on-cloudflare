@@ -6,8 +6,10 @@ import type {
   NativeReceiveStockRange,
 } from "./types";
 import type { StockPhysicalDependencyEdge, StockPhysicalNode } from "./physicalDependencyPlan";
+import { STOCK_METADATA_MAX_BYTES } from "./types";
 
 import { compareStockPhysicalNodes, stockPhysicalEntryId } from "./physicalDependencyPlan";
+import { catalogMetadataBundleKey, catalogMetadataFingerprint } from "./catalogMetadataBundle";
 
 const OID = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -16,6 +18,29 @@ const MAX_LOGICAL_EDGES = 500_000;
 const MAX_PHYSICAL_NODES = 256;
 const MAX_DEPENDENCY_DEPTH = 255;
 const MAX_ACTIVE_PACK_READS = 320;
+
+async function activeMetadataBundleValid(
+  operation: NativeReceiveOperation,
+  result: NativeReceiveProcessResult
+): Promise<boolean> {
+  const bundle = result.activeMetadataBundle;
+  if (!bundle) return true;
+  if (operation.activeCatalog.length === 0) return false;
+  const fingerprint = await catalogMetadataFingerprint(operation.activeCatalog);
+  return (
+    bundle.catalogFingerprint === fingerprint &&
+    bundle.key === (await catalogMetadataBundleKey(operation.activeCatalog)) &&
+    bundle.bytes > 0 &&
+    bundle.bytes <= STOCK_METADATA_MAX_BYTES &&
+    SHA256.test(bundle.sha256) &&
+    bundle.etag.length > 0 &&
+    bundle.etag.length <= 256 &&
+    result.metadataRequests !== undefined &&
+    result.metadataRequests >= 1 &&
+    result.metadataBytes !== undefined &&
+    result.metadataBytes >= bundle.bytes
+  );
+}
 
 function sortedUnique(values: string[], pattern: RegExp, maximum: number): boolean {
   return (
@@ -439,6 +464,9 @@ async function directPackPreparedProofFailure(
   ) {
     return "direct-identity-or-counts";
   }
+  if (!(await activeMetadataBundleValid(operation, result))) {
+    return "direct-metadata-bundle";
+  }
   if (!(await physicalPlanValid({ operation, result, roots, ranges, reads }))) {
     return "direct-physical-plan";
   }
@@ -565,6 +593,9 @@ export async function stockReceivePreparedProofFailure(
     reads.length > MAX_ACTIVE_PACK_READS
   ) {
     return "identity-or-counts";
+  }
+  if (!(await activeMetadataBundleValid(operation, result))) {
+    return "metadata-bundle";
   }
   const semanticSet = new Set(semantic);
   if (thin.some((oid) => semanticSet.has(oid))) return "root-overlap";

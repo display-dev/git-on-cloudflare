@@ -330,6 +330,12 @@ credentials, fixture OIDs, alternating provider order, and predeclared latency
 thresholds. Enabling the flag without a commit-pinned Worker version is not
 evidence.
 
+When the disposable Worker also sets `STOCK_RECEIVE_CATALOG_METADATA_BUNDLE=1`,
+a bundle-assisted latency sample must expose `metrics.activeMetadataBundle` and
+must report one 20-byte trailer read for every active catalog pack. A sample
+without that proof is a fallback-path observation, not evidence for the bundle
+candidate.
+
 Direct-pack planning phase timings are I/O-anchored wall-clock windows. Workers
 may freeze wall-clock time during synchronous work, so synchronous advertised
 closure and boundary validation can appear near zero and their CPU cost can be

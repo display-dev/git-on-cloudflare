@@ -9,7 +9,14 @@ import type {
 } from "@/worker/git/object-store/candidates";
 import type { IdxView, PackCatalogRow } from "@/worker/git/object-store/types";
 import type { PackRefView } from "@/worker/git/pack/refIndex";
-import type { NativeReceiveStockPlanningPhases } from "@/worker/git/nativeReceive/types";
+import type {
+  NativeReceiveActiveMetadataBundleProof,
+  NativeReceiveStockPlanningPhases,
+} from "@/worker/git/nativeReceive/types";
+import {
+  STOCK_ACTIVE_PACK_MAX_COUNT,
+  STOCK_METADATA_MAX_BYTES,
+} from "@/worker/git/nativeReceive/types";
 import type {
   StockPhysicalDependencyEdge,
   StockPhysicalDependencyPlan,
@@ -19,6 +26,12 @@ import type {
 import { asBufferSource, bytesEqual, bytesToHex, createLogger } from "@/worker/common";
 import { buildPackV2, buildPackV2Artifacts } from "@/worker/git/pack/build";
 import { createStockPhysicalDependencyPlanner } from "@/worker/git/nativeReceive/physicalDependencyPlan";
+import {
+  catalogMetadataFingerprint,
+  catalogMetadataBundleEnabled,
+  readCatalogMetadataBundle,
+  type CatalogMetadataBundleEntry,
+} from "@/worker/git/nativeReceive/catalogMetadataBundle";
 import { resolveDeltasAndWriteIdx } from "@/worker/git/pack/indexer/resolve";
 import { scanPack } from "@/worker/git/pack/indexer/scan";
 import { findOidIndex, getOidHexAt, parseIdxView } from "@/worker/git/object-store";
@@ -30,8 +43,8 @@ import {
 } from "@/worker/git/pack/refIndex";
 import { packIndexKey, packRefsKey } from "@/worker/keys";
 
-const MAX_ACTIVE_PACKS = 64;
-const MAX_METADATA_BYTES = 16 * 1024 * 1024;
+const MAX_ACTIVE_PACKS = STOCK_ACTIVE_PACK_MAX_COUNT;
+const MAX_METADATA_BYTES = STOCK_METADATA_MAX_BYTES;
 const MAX_MANIFEST_BYTES = 512 * 1024;
 const MAX_INPUT_PACK_BYTES = 16 * 1024 * 1024;
 const MAX_OBJECT_BYTES = 8 * 1024 * 1024;
@@ -421,6 +434,8 @@ export type StockReceivePlan = {
     idxSha256: string;
     prefSha256: string;
   }>;
+  activeMetadataBundle?: NativeReceiveActiveMetadataBundleProof | undefined;
+  metadataBundleSeedEntries?: CatalogMetadataBundleEntry[] | undefined;
   incomingObjectCount: number;
   visitedIncomingObjectCount: number;
   logicalEdgeCount: number;
@@ -461,6 +476,7 @@ export type StockPlannerFailureMetrics = Pick<
   | "rangeBytes"
   | "rangeRequests"
   | "activePackReads"
+  | "activeMetadataBundle"
   | "activePackTrailerBytes"
   | "activePackTrailerRequests"
   | "activePackRangeBytes"
@@ -518,6 +534,8 @@ type BoundActivePack = {
   packChecksum: string;
   idxSha256: string;
   refsSha256: string;
+  idxBytesRaw?: Uint8Array | undefined;
+  refsBytesRaw?: Uint8Array | undefined;
 };
 
 type PlannerCounters = {
@@ -1032,6 +1050,7 @@ function throwWrongRangePlannerFailure(args: {
   error: unknown;
   observation: ActivePackReadObservation;
   active: BoundActivePack[];
+  activeMetadataBundle?: NativeReceiveActiveMetadataBundleProof | undefined;
   counters: PlannerCounters;
   startedAt: number;
 }): never {
@@ -1142,6 +1161,7 @@ function throwWrongRangePlannerFailure(args: {
     rangeBytes,
     rangeRequests: requiredReads.length,
     activePackReads: [...observedTrailers, ...requiredReads],
+    activeMetadataBundle: args.activeMetadataBundle,
     activePackTrailerBytes: observedTrailers.reduce((total, read) => total + read.returnedBytes, 0),
     activePackTrailerRequests: observedTrailers.length,
     activePackRangeBytes: rangeBytes,
@@ -1273,7 +1293,10 @@ async function deletePlannerKeys(args: {
 async function loadBoundActivePacks(
   args: PlanStockReceiveArgs,
   counters: PlannerCounters
-): Promise<BoundActivePack[]> {
+): Promise<{
+  packs: BoundActivePack[];
+  bundle?: NativeReceiveActiveMetadataBundleProof | undefined;
+}> {
   if (args.activePacks.length > MAX_ACTIVE_PACKS) {
     throw new Error("stock-plan:active-pack-count-limit");
   }
@@ -1282,8 +1305,95 @@ async function loadBoundActivePacks(
   args.cacheCtx.memo.flags.add("no-isolate-idx-cache");
   args.cacheCtx.memo.idxViews = args.cacheCtx.memo.idxViews || new Map();
   const idxViews = args.cacheCtx.memo.idxViews;
+  const bundleEnabled = catalogMetadataBundleEnabled(args.env);
 
-  return await Promise.all(
+  const bind = async (
+    pack: StockPlannerActivePack,
+    idxBytes: Uint8Array,
+    refsBytes: Uint8Array,
+    trailer?: Uint8Array
+  ): Promise<BoundActivePack> => {
+    const idx = parseIdxView(pack.packKey, idxBytes, pack.packBytes);
+    if (!idx) throw new Error("stock-plan:idx-invalid");
+    const computedIdxChecksum = await digestHex(
+      "SHA-1",
+      idxBytes.subarray(0, idxBytes.byteLength - 20)
+    );
+    if (computedIdxChecksum !== bytesToHex(idx.idxChecksum)) {
+      throw new Error("stock-plan:idx-checksum-mismatch");
+    }
+    const idxSha256 = await digestHex("SHA-256", idxBytes);
+    if (pack.idxSha256 !== undefined && pack.idxSha256 !== idxSha256) {
+      throw new Error("stock-plan:idx-authority-digest-mismatch");
+    }
+    if (trailer && !bytesEqual(trailer, idx.packChecksum)) {
+      throw new Error("stock-plan:pack-trailer-mismatch");
+    }
+    if (pack.packChecksum !== undefined && pack.packChecksum !== bytesToHex(idx.packChecksum)) {
+      throw new Error("stock-plan:pack-authority-checksum-mismatch");
+    }
+    const parsedRefs = parsePackRefView(pack.packKey, refsBytes, idx);
+    if (parsedRefs.type !== "Ready") throw new Error("stock-plan:pref-invalid");
+    const refsSha256 = await digestHex("SHA-256", refsBytes);
+    if (pack.refsSha256 !== undefined && pack.refsSha256 !== refsSha256) {
+      throw new Error("stock-plan:pref-authority-digest-mismatch");
+    }
+    idxViews.set(pack.packKey, idx);
+    return {
+      source: { packKey: pack.packKey, packBytes: pack.packBytes, idx },
+      idxBytes: pack.idxBytes,
+      refs: parsedRefs.view,
+      packChecksum: bytesToHex(idx.packChecksum),
+      idxSha256,
+      refsSha256,
+      ...(bundleEnabled ? { idxBytesRaw: idxBytes, refsBytesRaw: refsBytes } : {}),
+    };
+  };
+  if (bundleEnabled && args.activePacks.length > 0) {
+    throwIfAborted(args.signal);
+    const bundle = await readCatalogMetadataBundle({
+      env: args.env,
+      catalog: args.activePacks,
+      limiter: args.limiter,
+      countSubrequest: args.countSubrequest,
+      observeBytes: (bytes) => {
+        counters.metadataBytes += bytes;
+      },
+      log: args.log ?? createLogger(args.env.LOG_LEVEL, { service: "StockReceivePlanner" }),
+    });
+    counters.metadataRequests++;
+    if (bundle) {
+      const packs = await Promise.all(
+        bundle.entries.map(async (entry, index) => {
+          throwIfAborted(args.signal);
+          const pack = args.activePacks[index]!;
+          const trailer = await readExactRange({
+            env: args.env,
+            key: pack.packKey,
+            offset: pack.packBytes - 20,
+            length: 20,
+            limiter: args.limiter,
+            countSubrequest: args.countSubrequest,
+            kind: "metadata",
+            counters,
+          });
+          return await bind(pack, entry.idx, entry.refs, trailer);
+        })
+      );
+      return {
+        packs,
+        bundle: {
+          key: bundle.key,
+          bytes: bundle.bytes,
+          sha256: bundle.sha256,
+          etag: bundle.etag,
+          catalogFingerprint: await catalogMetadataFingerprint(args.activePacks),
+        },
+      };
+    }
+  }
+
+  const packs = await Promise.all(
     args.activePacks.map(async (pack): Promise<BoundActivePack> => {
       throwIfAborted(args.signal);
       assertSafeBytes(pack.packBytes, "active-pack-bytes", Number.MAX_SAFE_INTEGER);
@@ -1297,20 +1407,6 @@ async function loadBoundActivePacks(
         countSubrequest: args.countSubrequest,
         counters,
       });
-      const idx = parseIdxView(pack.packKey, idxObject.bytes, pack.packBytes);
-      if (!idx) throw new Error("stock-plan:idx-invalid");
-      const computedIdxChecksum = await digestHex(
-        "SHA-1",
-        idxObject.bytes.subarray(0, idxObject.bytes.byteLength - 20)
-      );
-      if (computedIdxChecksum !== bytesToHex(idx.idxChecksum)) {
-        throw new Error("stock-plan:idx-checksum-mismatch");
-      }
-      const idxSha256 = await digestHex("SHA-256", idxObject.bytes);
-      if (pack.idxSha256 !== undefined && pack.idxSha256 !== idxSha256) {
-        throw new Error("stock-plan:idx-authority-digest-mismatch");
-      }
-
       const trailer = await readExactRange({
         env: args.env,
         key: pack.packKey,
@@ -1321,13 +1417,6 @@ async function loadBoundActivePacks(
         kind: "metadata",
         counters,
       });
-      if (!bytesEqual(trailer, idx.packChecksum)) {
-        throw new Error("stock-plan:pack-trailer-mismatch");
-      }
-      if (pack.packChecksum !== undefined && pack.packChecksum !== bytesToHex(idx.packChecksum)) {
-        throw new Error("stock-plan:pack-authority-checksum-mismatch");
-      }
-
       const refsObject = await getBoundedObject({
         env: args.env,
         key: packRefsKey(pack.packKey),
@@ -1336,23 +1425,10 @@ async function loadBoundActivePacks(
         countSubrequest: args.countSubrequest,
         counters,
       });
-      const parsedRefs = parsePackRefView(pack.packKey, refsObject.bytes, idx);
-      if (parsedRefs.type !== "Ready") throw new Error("stock-plan:pref-invalid");
-      const refsSha256 = await digestHex("SHA-256", refsObject.bytes);
-      if (pack.refsSha256 !== undefined && pack.refsSha256 !== refsSha256) {
-        throw new Error("stock-plan:pref-authority-digest-mismatch");
-      }
-      idxViews.set(pack.packKey, idx);
-      return {
-        source: { packKey: pack.packKey, packBytes: pack.packBytes, idx },
-        idxBytes: pack.idxBytes,
-        refs: parsedRefs.view,
-        packChecksum: bytesToHex(idx.packChecksum),
-        idxSha256,
-        refsSha256,
-      };
+      return await bind(pack, idxObject.bytes, refsObject.bytes, trailer);
     })
   );
+  return { packs };
 }
 
 function activeNode(
@@ -1570,7 +1646,8 @@ async function planStockReceiveImpl(
   // metadata read. The failed attempt therefore cannot invoke host Go or Git,
   // and the same operation can be retried against the unchanged authority.
   throwTransientR2ReadFault(args.operationId, counters, args.activePacks.length);
-  const active = await loadBoundActivePacks(args, counters);
+  const activeLoad = await loadBoundActivePacks(args, counters);
+  const active = activeLoad.packs;
   const activeMetadataCompleteAt = Date.now();
   if (unexpectedWholePackReadOperationForTesting === args.operationId) {
     unexpectedWholePackReadOperationForTesting = undefined;
@@ -1762,6 +1839,7 @@ async function planStockReceiveImpl(
             error,
             observation: activePackObservation,
             active,
+            activeMetadataBundle: activeLoad.bundle,
             counters,
             startedAt,
           });
@@ -1806,6 +1884,7 @@ async function planStockReceiveImpl(
       error,
       observation: activePackObservation,
       active,
+      activeMetadataBundle: activeLoad.bundle,
       counters,
       startedAt,
     });
@@ -1862,6 +1941,7 @@ async function planStockReceiveImpl(
         error,
         observation: activePackObservation,
         active,
+        activeMetadataBundle: activeLoad.bundle,
         counters,
         startedAt,
       });
@@ -1919,6 +1999,23 @@ async function planStockReceiveImpl(
     }
     const canonicalRefs = parsePackRefView(args.outputPackKey, canonicalRefsBytes, canonicalIdx);
     if (canonicalRefs.type !== "Ready") throw new Error("stock-plan:canonical-pref-invalid");
+    const metadataBundleSeedEntries: CatalogMetadataBundleEntry[] | undefined =
+      catalogMetadataBundleEnabled(args.env) && active.length < MAX_ACTIVE_PACKS
+        ? [
+            ...active.map((pack) => ({
+              packKey: pack.source.packKey,
+              packBytes: pack.source.packBytes,
+              idx: pack.idxBytesRaw!,
+              refs: pack.refsBytesRaw!,
+            })),
+            {
+              packKey: args.outputPackKey,
+              packBytes: canonicalPack.byteLength,
+              idx: canonicalIdxBytes,
+              refs: canonicalRefsBytes,
+            },
+          ]
+        : undefined;
     log.info("stock-plan:canonical-artifacts-built", {
       operationId: args.operationId,
       objectCount: incomingObjectCount,
@@ -2123,6 +2220,8 @@ async function planStockReceiveImpl(
       topologicalEntryIds: physicalPlan.topologicalEntryIds,
       selectedPackChecksums,
       activePackBindings,
+      activeMetadataBundle: activeLoad.bundle,
+      metadataBundleSeedEntries,
       incomingObjectCount,
       visitedIncomingObjectCount: boundary.visitedIncomingObjectCount,
       logicalEdgeCount: boundary.logicalEdgeCount,
@@ -2185,6 +2284,7 @@ async function planStockReceiveImpl(
       error,
       observation: activePackObservation,
       active,
+      activeMetadataBundle: activeLoad.bundle,
       counters,
       startedAt,
     });
@@ -2288,6 +2388,7 @@ async function planStockReceiveImpl(
       idxSha256: pack.idxSha256,
       prefSha256: pack.refsSha256,
     })),
+    activeMetadataBundle: activeLoad.bundle,
     closure: {
       incomingObjectCount,
       visitedIncomingObjectCount: boundary.visitedIncomingObjectCount,

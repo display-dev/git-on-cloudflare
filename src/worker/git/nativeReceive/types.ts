@@ -13,6 +13,11 @@ export type NativeReceiveOperationState =
   | "aborted"
   | "failed";
 
+export const STOCK_PROCESSOR_RESULT_MAX_BYTES = 256 * 1024;
+export const STOCK_PLANNER_REJECTION_METRICS_MAX_BYTES = 64 * 1024;
+export const STOCK_ACTIVE_PACK_MAX_COUNT = 64;
+export const STOCK_METADATA_MAX_BYTES = 16 * 1024 * 1024;
+
 export type NativeReceiveTerminalResult = {
   refPublication?: ReceiveRefPublication | undefined;
   statuses: ReceiveStatus[];
@@ -119,6 +124,14 @@ export type NativeReceiveStockActivePackRead =
       returnedBytes: number;
       kind: "whole";
     };
+
+export type NativeReceiveActiveMetadataBundleProof = {
+  key: string;
+  bytes: number;
+  sha256: string;
+  etag: string;
+  catalogFingerprint: string;
+};
 
 export type NativeReceiveStockClosureProof = {
   planSha256: string;
@@ -334,6 +347,7 @@ export type NativeReceiveOperationMetrics = Pick<
   | "packsTouched"
   | "ranges"
   | "activePackReads"
+  | "activeMetadataBundle"
   | "activePackTrailerBytes"
   | "activePackTrailerRequests"
   | "activePackRangeBytes"
@@ -473,6 +487,7 @@ export type NativeReceiveProcessResult = {
   topologicalEntryIds?: string[] | undefined;
   selectedPackChecksums?: string[] | undefined;
   activePackBindings?: NativeReceiveActivePackBinding[] | undefined;
+  activeMetadataBundle?: NativeReceiveActiveMetadataBundleProof | undefined;
   ranges?: NativeReceiveStockRange[] | undefined;
   activePackReads?: NativeReceiveStockActivePackRead[] | undefined;
   activePackTrailerBytes?: number | undefined;
@@ -551,6 +566,7 @@ export function nativeReceiveOperationView(
         packsTouched: operation.processorResult.packsTouched,
         ranges: operation.processorResult.ranges,
         activePackReads: operation.processorResult.activePackReads,
+        activeMetadataBundle: operation.processorResult.activeMetadataBundle,
         activePackTrailerBytes: operation.processorResult.activePackTrailerBytes,
         activePackTrailerRequests: operation.processorResult.activePackTrailerRequests,
         activePackRangeBytes: operation.processorResult.activePackRangeBytes,

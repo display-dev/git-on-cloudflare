@@ -130,6 +130,14 @@ function touchPackRefViewCache(cacheKey: string, view: PackRefView): void {
   }
 }
 
+export function primePackRefView(
+  packKey: string,
+  idxChecksum: Uint8Array,
+  view: PackRefView
+): void {
+  touchPackRefViewCache(getPackRefViewCacheKey(packKey, idxChecksum), view);
+}
+
 function writeUint64(dv: DataView, pos: number, value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`ref-index: unsupported 64-bit value ${value}`);

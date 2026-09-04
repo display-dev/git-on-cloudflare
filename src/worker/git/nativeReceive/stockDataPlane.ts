@@ -15,6 +15,10 @@ import { z } from "zod";
 
 import { asBufferSource, bytesToHex, createDigestStream } from "@/worker/common";
 import { packIndexKey, packRefsKey } from "@/worker/keys";
+import {
+  putCatalogMetadataBundle,
+  type CatalogMetadataBundleEntry,
+} from "@/worker/git/nativeReceive/catalogMetadataBundle";
 import { buildSidebandReceiveBody } from "@/worker/git/receive/response";
 import { buildReceiveReportStatus } from "@/worker/git/receive/support";
 import { planStockReceive, stockReceivePlanKeys, StockReceivePlannerError } from "./stockPlanner";
@@ -391,6 +395,7 @@ function plannerFailureOperationMetrics(
     packsTouched: metrics.packsTouched,
     ranges: metrics.ranges,
     activePackReads: metrics.activePackReads,
+    activeMetadataBundle: metrics.activeMetadataBundle,
     activePackTrailerBytes: metrics.activePackTrailerBytes,
     activePackTrailerRequests: metrics.activePackTrailerRequests,
     activePackRangeBytes: metrics.activePackRangeBytes,
@@ -924,6 +929,7 @@ function mergeResult(args: {
     topologicalEntryIds: args.plan.topologicalEntryIds,
     selectedPackChecksums: args.plan.selectedPackChecksums,
     activePackBindings: args.plan.activePackBindings,
+    activeMetadataBundle: args.plan.activeMetadataBundle,
     ranges: args.plan.ranges,
     activePackReads: args.plan.activePackReads,
     activePackTrailerBytes: args.plan.activePackTrailerBytes,
@@ -1068,6 +1074,7 @@ function directPackResult(args: {
     topologicalEntryIds: plan.topologicalEntryIds,
     selectedPackChecksums: plan.selectedPackChecksums,
     activePackBindings: plan.activePackBindings,
+    activeMetadataBundle: plan.activeMetadataBundle,
     ranges: plan.ranges,
     activePackReads: plan.activePackReads,
     activePackTrailerBytes: plan.activePackTrailerBytes,
@@ -1282,6 +1289,7 @@ export async function executeStockReceiveWorkerDataPlane(args: {
 }): Promise<NativeReceivePrepared> {
   if (!args.operation.stockReceive) throw new Error("stock-data-plane:stock-input-absent");
   let result: NativeReceiveProcessResult;
+  let metadataBundleSeedEntries: CatalogMetadataBundleEntry[] | undefined;
   let dataPlaneStartedAt: number | undefined;
   if (workerExecutorForTesting) {
     result = await workerExecutorForTesting(args);
@@ -1311,6 +1319,7 @@ export async function executeStockReceiveWorkerDataPlane(args: {
       log: args.logger,
     });
     const planningMs = Date.now() - planningStartedAt;
+    metadataBundleSeedEntries = plan.metadataBundleSeedEntries;
     if (plan.executionMode === "direct-pack") {
       result = directPackResult({
         operation: args.operation,
@@ -1387,6 +1396,31 @@ export async function executeStockReceiveWorkerDataPlane(args: {
             }
           : undefined,
     };
+  }
+  if (metadataBundleSeedEntries) {
+    const entries = metadataBundleSeedEntries;
+    args.cacheCtx.ctx.waitUntil(
+      putCatalogMetadataBundle({
+        env: args.env,
+        entries,
+        limiter: args.limiter,
+        countSubrequest: (n) => args.countSubrequest("stock-catalog-metadata-seed", n),
+      })
+        .then((bundle) => {
+          args.logger.info("stock-plan:catalog-metadata-seeded", {
+            operationId: args.operation.id,
+            key: bundle.key,
+            bytes: bundle.bytes,
+            packs: entries.length,
+          });
+        })
+        .catch((error) => {
+          args.logger.warn("stock-plan:catalog-metadata-seed-failed", {
+            operationId: args.operation.id,
+            error: String(error),
+          });
+        })
+    );
   }
   args.logger.info("stock-data-plane:prepared", {
     operationId: args.operation.id,

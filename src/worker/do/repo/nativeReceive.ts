@@ -33,6 +33,7 @@ import { z } from "zod";
 import {
   isNativeReceiveTerminal,
   nativeReceiveOperationView,
+  STOCK_METADATA_MAX_BYTES,
 } from "@/worker/git/nativeReceive/types";
 import {
   nativeReceiveAuthorityReceiptKey,
@@ -40,6 +41,10 @@ import {
   packIndexKey,
 } from "@/worker/keys";
 import { MAX_SIMULTANEOUS_CONNECTIONS, SubrequestLimiter } from "@/worker/git/operations/limits";
+import {
+  catalogMetadataBundleKey,
+  catalogMetadataFingerprint,
+} from "@/worker/git/nativeReceive/catalogMetadataBundle";
 
 import {
   finalizeReceiveState,
@@ -243,6 +248,16 @@ export const nativeReceiveProcessResultSchema = z
       .max(256)
       .optional(),
     activePackReads: z.array(stockActivePackReadSchema).max(320).optional(),
+    activeMetadataBundle: z
+      .object({
+        key: z.string().min(1).max(1_024),
+        bytes: z.number().int().positive().max(STOCK_METADATA_MAX_BYTES),
+        sha256: stockSha256Schema,
+        etag: z.string().min(1).max(256),
+        catalogFingerprint: stockSha256Schema,
+      })
+      .strict()
+      .optional(),
     activePackTrailerBytes: z.number().int().nonnegative().optional(),
     activePackTrailerRequests: z.number().int().nonnegative().optional(),
     activePackRangeBytes: z.number().int().nonnegative().optional(),
@@ -390,10 +405,10 @@ function stockRangeKey(range: {
   return `${range.packChecksum}:${range.start}:${range.end}:${range.requiredOid}`;
 }
 
-function validateStockProcessorProof(
+async function validateStockProcessorProof(
   operation: NativeReceiveOperation,
   result: NativeReceiveProcessResult
-): boolean {
+): Promise<boolean> {
   const proof = result.closureProof;
   const semantic = result.semanticExternalOids;
   const thin = result.thinDeltaBaseOids;
@@ -457,6 +472,21 @@ function validateStockProcessorProof(
   const rangeReads = activePackReads.filter((read) => read.kind === "required-object");
   const observedRangeKeys = rangeReads.map(stockRangeKey).sort();
   const plannedRangeKeys = ranges.map(stockRangeKey).sort();
+  const bundle = result.activeMetadataBundle;
+  if (bundle) {
+    if (operation.activeCatalog.length === 0) return false;
+    const fingerprint = await catalogMetadataFingerprint(operation.activeCatalog);
+    if (
+      bundle.catalogFingerprint !== fingerprint ||
+      bundle.key !== (await catalogMetadataBundleKey(operation.activeCatalog)) ||
+      result.metadataRequests === undefined ||
+      result.metadataRequests < 1 ||
+      result.metadataBytes === undefined ||
+      result.metadataBytes < bundle.bytes
+    ) {
+      return false;
+    }
+  }
   if (
     activePackReads.length !== trailerReads.length + rangeReads.length ||
     trailerReads.length !== operation.activeCatalog.length ||
@@ -1950,7 +1980,7 @@ export async function runNativeReceiveOperationState(args: {
       !nativeResult.refsSha256 ||
       nativeResult.quarantinePathInsideOwnedWorkRoot !== true ||
       nativeResult.quarantineRemovedAfterReceive !== true ||
-      !validateStockProcessorProof(operation, nativeResult) ||
+      !(await validateStockProcessorProof(operation, nativeResult)) ||
       nativeResult.stockTrace?.length !== expectedTrace.length ||
       nativeResult.stockTrace.some(
         (entry, index) => entry.sequence !== index + 1 || entry.event !== expectedTrace[index]

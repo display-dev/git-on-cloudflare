@@ -41,8 +41,14 @@ import {
 import {
   isNativeReceiveTerminal,
   nativeReceiveOperationView,
+  STOCK_PLANNER_REJECTION_METRICS_MAX_BYTES,
+  STOCK_PROCESSOR_RESULT_MAX_BYTES,
 } from "@/worker/git/nativeReceive/types";
 import { validateStockReceivePreparedProof } from "@/worker/git/nativeReceive/stockProof";
+import {
+  catalogMetadataBundleKey,
+  catalogMetadataFingerprint,
+} from "@/worker/git/nativeReceive/catalogMetadataBundle";
 import { nativeReceiveClaimOutputPackKey, packIndexKey, packRefsKey } from "@/worker/keys";
 import { LEASE_RETRY_AFTER_SECONDS, RECEIVE_LEASE_TTL_MS } from "./catalog/shared";
 import {
@@ -1205,12 +1211,16 @@ export async function recoverStockReceivePublicationState(
   return { status: "none" };
 }
 
-function validPlannerRejectionMetrics(
+async function validPlannerRejectionMetrics(
   operation: NativeReceiveOperation,
   code: "r2-transient" | "replacement-closure-invalid",
   metrics: NativeReceiveOperationMetrics | undefined
-): metrics is NativeReceiveOperationMetrics {
-  if (!metrics || new TextEncoder().encode(JSON.stringify(metrics)).byteLength > 64 * 1024) {
+): Promise<boolean> {
+  if (
+    !metrics ||
+    new TextEncoder().encode(JSON.stringify(metrics)).byteLength >
+      STOCK_PLANNER_REJECTION_METRICS_MAX_BYTES
+  ) {
     return false;
   }
   const values = [
@@ -1281,6 +1291,19 @@ function validPlannerRejectionMetrics(
   }
   const trailerReads = metrics.activePackReads.filter((read) => read.kind === "trailer");
   const requiredReads = metrics.activePackReads.filter((read) => read.kind === "required-object");
+  const bundle = metrics.activeMetadataBundle;
+  if (bundle) {
+    if (operation.activeCatalog.length === 0) return false;
+    const fingerprint = await catalogMetadataFingerprint(operation.activeCatalog);
+    if (
+      bundle.catalogFingerprint !== fingerprint ||
+      bundle.key !== (await catalogMetadataBundleKey(operation.activeCatalog)) ||
+      metrics.metadataRequests! < 1 ||
+      metrics.metadataBytes! < bundle.bytes
+    ) {
+      return false;
+    }
+  }
   if (
     trailerReads.some(
       (read) =>
@@ -1393,7 +1416,8 @@ export async function rejectStockReceiveExecutionState(args: {
         processorResult.outputValidationRequests! > 3 ||
         !processorResult.outputIntegrityRejectedRole ||
         !new Set(["body", "head"]).has(processorResult.outputIntegrityRejectedAt ?? "") ||
-        new TextEncoder().encode(JSON.stringify(processorResult)).byteLength > 256 * 1024 ||
+        new TextEncoder().encode(JSON.stringify(processorResult)).byteLength >
+          STOCK_PROCESSOR_RESULT_MAX_BYTES ||
         !(await validateStockReceivePreparedProof(operation, processorResult))
       ) {
         return { status: "rejected", code: "execution-rejection-proof-invalid" };
@@ -1402,7 +1426,7 @@ export async function rejectStockReceiveExecutionState(args: {
       return { status: "rejected", code: "execution-rejection-proof-unexpected" };
     }
     if (supplied.code === "r2-transient" || supplied.code === "replacement-closure-invalid") {
-      if (!validPlannerRejectionMetrics(operation, supplied.code, rejectionMetrics)) {
+      if (!(await validPlannerRejectionMetrics(operation, supplied.code, rejectionMetrics))) {
         return { status: "rejected", code: "execution-rejection-metrics-invalid" };
       }
     } else if (rejectionMetrics !== undefined) {

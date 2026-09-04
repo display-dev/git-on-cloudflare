@@ -78,6 +78,14 @@ function touchIdxViewCache(packKey: string, packSize: number, value: IdxView) {
   }
 }
 
+export function primeIdxView(packKey: string, packSize: number, view: IdxView): void {
+  touchIdxViewCache(packKey, packSize, view);
+}
+
+export function hasPrimedIdxView(packKey: string, packSize: number): boolean {
+  return idxViewCache.has(getIdxViewCacheKey(packKey, packSize));
+}
+
 function logOnce(cacheCtx: CacheContext | undefined, flag: string, fn: () => void) {
   if (!cacheCtx) {
     fn();
