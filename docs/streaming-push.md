@@ -610,7 +610,7 @@ Policy:
 3. output one pack in the next tier;
 4. source packs become `superseded` only after DO commit.
 5. no compaction lease may be granted while a receive lease or nonterminal stock preparation is active for the same repo.
-6. generic receive retains priority over compaction; if it becomes active after compaction starts, `commitCompaction()` must fail and the queue worker must retry later. Bounded stock admission is refused while compaction owns its lease, and commit also retries if already-admitted stock work is observed.
+6. receive retains priority over ordinary compaction; if generic receive, bounded stock preparation, or admitted stock work becomes active after compaction starts, `commitCompaction()` must fail and the queue worker must retry later. Reachability GC retains its separate coordinated exclusion.
 
 ### Compaction algorithm
 

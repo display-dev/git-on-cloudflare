@@ -6,6 +6,8 @@ import { encodeGitObject } from "@/worker/git/core/objects";
 import { concatChunks, decodePktLines } from "@/worker/git";
 import {
   doPrefix,
+  nativeReceiveInputRequestKey,
+  nativeReceiveOutputPackKey,
   packIndexKey,
   packRefsKey,
   r2PackKey,
@@ -26,12 +28,7 @@ import { setupRepoForTests } from "./util/repoSeed";
 import { seedPackFirstRepo } from "./util/pack-first";
 import { indexTestPack } from "./util/test-indexer";
 import { decodeReportStatus, promoteToStreaming } from "./util/streaming-helpers";
-import {
-  asTypedStorage,
-  nativeReceiveOperationKey,
-  type RepoStateSchema,
-} from "@/worker/do/repo/repoState";
-import type { NativeReceiveOperation } from "@/worker/git/nativeReceive/types";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 import { createQueueSendResponse } from "./util/queue";
 import {
   compactOnce,
@@ -559,45 +556,9 @@ describe("streaming compaction", () => {
       throw new Error("expected compaction to begin");
     }
 
-    await expect(stub.beginReceive({ stockPreparation: true })).resolves.toMatchObject({
-      ok: false,
-    });
-
-    await runDOWithRetry(getStub, async (_instance, state) => {
-      const store = asTypedStorage<RepoStateSchema>(state.storage);
-      const now = Date.now();
-      const operation: NativeReceiveOperation = {
-        id: "stock-preparation-priority",
-        fingerprint: "1".repeat(64),
-        leaseToken: "released-staging-lease",
-        repositoryId: repoId,
-        state: "processing",
-        inputPackKey: "stock-input",
-        inputBytes: 1,
-        inputEtag: "stock-input-etag",
-        stockReceive: {
-          inputRequestSha256: "2".repeat(64),
-          packOffset: 1,
-          packBytes: 1,
-          advertisedRefs: [],
-        },
-        outputPackKey: "stock-output.pack",
-        outputIdxKey: "stock-output.idx",
-        outputRefsKey: "stock-output.refs",
-        commands: [],
-        acceptedWrites: [],
-        activeCatalog: begin.sourcePacks,
-        catalogGeneration: begin.packsetVersion,
-        createdAt: now,
-        updatedAt: now,
-        attempts: 1,
-        cleanupPending: false,
-        claimId: "stock-preparation-claim",
-        claimExpiresAt: now + 60_000,
-      };
-      await store.put(nativeReceiveOperationKey(operation.id), operation);
-      await store.put("nativeReceiveOperationIndex", [operation.id]);
-    });
+    const stock = await stub.beginReceive({ stockPreparation: true });
+    expect(stock).toMatchObject({ ok: true, stockPreparationReserved: true });
+    if (!stock.ok) throw new Error("expected stock preparation to preempt compaction");
 
     const result = await stub.commitCompaction({
       token: begin.lease.token,
@@ -615,9 +576,112 @@ describe("streaming compaction", () => {
     if (result.status === "retry") {
       expect(result.reason).toBe("receive-active");
     }
+    expect(await stub.abortReceive(stock.lease.token)).toBe(true);
 
     const state = await getDebugState(owner, repo, seededRepo.cookieHeader);
     expect(state.activePacks?.every((pack) => pack.kind !== "compact")).toBe(true);
+    expect(
+      begin.sourcePacks.every((source) =>
+        state.activePacks?.some((pack) => pack.key === source.packKey)
+      )
+    ).toBe(true);
+
+    const promotionCompaction = await stub.beginCompaction();
+    expect(promotionCompaction.ok).toBe(true);
+    if (!promotionCompaction.ok) throw new Error("expected promotion compaction to begin");
+    const promotedStock = await stub.beginReceive({ stockPreparation: true });
+    if (!promotedStock.ok) throw new Error("expected stock preparation for promotion");
+    expect(await stub.promoteStockPreparation(promotedStock.lease.token)).toBe(true);
+    const promotedRetry = await stub.commitCompaction({
+      token: promotionCompaction.lease.token,
+      sourcePacks: promotionCompaction.sourcePacks,
+      targetTier: promotionCompaction.targetTier,
+      packsetVersion: promotionCompaction.packsetVersion,
+      stagedPack: {
+        packKey: `${promotionCompaction.sourcePacks[0]!.packKey}.fake-promotion-compaction`,
+        packBytes: promotionCompaction.sourcePacks[0]!.packBytes,
+        idxBytes: promotionCompaction.sourcePacks[0]!.idxBytes,
+        objectCount: promotionCompaction.sourcePacks[0]!.objectCount,
+      },
+    });
+    expect(promotedRetry).toMatchObject({ status: "retry", reason: "receive-active" });
+    const promotedState = await getDebugState(owner, repo, seededRepo.cookieHeader);
+    expect(
+      promotionCompaction.sourcePacks.every((source) =>
+        promotedState.activePacks?.some((pack) => pack.key === source.packKey)
+      )
+    ).toBe(true);
+    expect(await stub.abortReceive(promotedStock.lease.token)).toBe(true);
+
+    const operationCompaction = await stub.beginCompaction();
+    expect(operationCompaction.ok).toBe(true);
+    if (!operationCompaction.ok) throw new Error("expected operation compaction to begin");
+    const operationStock = await stub.beginReceive({ stockPreparation: true });
+    if (!operationStock.ok) throw new Error("expected stock preparation for admission");
+    const operationId = "stock-operation-priority";
+    const fingerprint = "1".repeat(64);
+    const outputPackKey = nativeReceiveOutputPackKey(
+      doPrefix(stub.id.toString()),
+      operationId,
+      fingerprint
+    );
+    const admitted = await stub.admitStockReceive({
+      id: operationId,
+      fingerprint,
+      leaseToken: operationStock.lease.token,
+      repositoryId: repoId,
+      state: "staged",
+      inputPackKey: nativeReceiveInputRequestKey(
+        doPrefix(stub.id.toString()),
+        operationStock.lease.token
+      ),
+      inputBytes: 64,
+      inputEtag: "stock-operation-input",
+      stockReceive: {
+        inputRequestSha256: "2".repeat(64),
+        packOffset: 16,
+        packBytes: 48,
+        advertisedRefs: operationStock.refs,
+      },
+      outputPackKey,
+      outputIdxKey: packIndexKey(outputPackKey),
+      outputRefsKey: packRefsKey(outputPackKey),
+      commands: [],
+      acceptedWrites: [],
+      activeCatalog: operationStock.activeCatalog,
+      catalogGeneration: operationStock.packsetVersion,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      attempts: 0,
+      cleanupPending: false,
+    });
+    expect(admitted.status).toBe("admitted");
+    const operationRetry = await stub.commitCompaction({
+      token: operationCompaction.lease.token,
+      sourcePacks: operationCompaction.sourcePacks,
+      targetTier: operationCompaction.targetTier,
+      packsetVersion: operationCompaction.packsetVersion,
+      stagedPack: {
+        packKey: `${operationCompaction.sourcePacks[0]!.packKey}.fake-operation-compaction`,
+        packBytes: operationCompaction.sourcePacks[0]!.packBytes,
+        idxBytes: operationCompaction.sourcePacks[0]!.idxBytes,
+        objectCount: operationCompaction.sourcePacks[0]!.objectCount,
+      },
+    });
+    expect(operationRetry).toMatchObject({ status: "retry", reason: "receive-active" });
+    const operationState = await getDebugState(owner, repo, seededRepo.cookieHeader);
+    expect(
+      operationCompaction.sourcePacks.every((source) =>
+        operationState.activePacks?.some((pack) => pack.key === source.packKey)
+      )
+    ).toBe(true);
+    if (admitted.status === "admitted") {
+      await stub.rejectStockReceiveExecution(admitted.executionToken, "test-cleanup");
+      await stub.completeStockReceiveCleanup(operationId, fingerprint);
+    }
+    await runDOWithRetry(getStub, async (_instance, durableState) => {
+      expect(await durableState.storage.get("compactLease")).toBeUndefined();
+    });
   });
 
   it("returns retry when packsetVersion changes before compaction commit", async () => {

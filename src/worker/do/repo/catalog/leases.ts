@@ -237,14 +237,10 @@ export async function beginReceiveLease(
       }
       const compactLease = activeLeaseOrUndefined(await transactionStore.get("compactLease"), now);
       const gc = await transaction.get<GcOperation>(GC_OPERATION_KEY);
-      // Generic receives retain their existing priority and force compaction
-      // to retry at commit. A stock receive entering the parallel pool releases
-      // this snapshot lease, so it must not do so after compaction owns the fence.
-      if (
-        compactLease?.operation === "compaction" &&
-        options?.stockPreparationConcurrency !== undefined
-      )
-        return false;
+      // All receives retain foreground priority over ordinary compaction. A
+      // stock receive hands this lease into the bounded preparation pool below;
+      // compaction commit observes that preparation lease and retries before
+      // it can publish or retire any source pack.
       if (
         compactLease?.operation === "reachability-gc" &&
         !(gc?.coordination && gc.snapshot?.token === compactLease.token)
@@ -470,14 +466,9 @@ export async function promoteStockPreparationLease(
     if (await store.get("repositoryDeleting")) return false;
     if (await store.get("receiveLease")) return false;
     const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), Date.now());
-    if (compactLease) {
+    if (compactLease?.operation === "reachability-gc") {
       const gc = await transaction.get<GcOperation>(GC_OPERATION_KEY);
-      if (
-        compactLease.operation !== "reachability-gc" ||
-        !gc?.coordination ||
-        gc.snapshot?.token !== compactLease.token
-      )
-        return false;
+      if (!gc?.coordination || gc.snapshot?.token !== compactLease.token) return false;
     }
     const preparations = await store.get("stockReceivePreparationLeases");
     const selected = preparations?.find(
