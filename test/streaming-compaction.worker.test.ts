@@ -29,14 +29,19 @@ import { seedPackFirstRepo } from "./util/pack-first";
 import { indexTestPack } from "./util/test-indexer";
 import { decodeReportStatus, promoteToStreaming } from "./util/streaming-helpers";
 import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
-import { createQueueSendResponse } from "./util/queue";
+import { createQueueSendResponse, runQueueMessage } from "./util/queue";
 import { compactionDeleteRetryDelaySeconds } from "@/worker/tasks/compaction";
+import {
+  COMPACTION_ACTIVITY_QUIET_MS,
+  COMPACTION_MAX_DEFERRAL_MS,
+} from "@/worker/do/repo/catalog/shared";
 import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db";
 import type { CompactionDeleteQueueMessage } from "@/worker/tasks/types";
 import {
   compactOnce,
   deleteSupersededOnce,
   collectPackObjects,
+  expireCompactionQuietPeriod,
   pushOverflowingStreamingHistory,
 } from "./util/compaction-helpers";
 
@@ -450,6 +455,12 @@ describe("streaming compaction", () => {
         startingCommitOid: seeded.nextCommit.oid,
         updates: 4,
       });
+      expect(await stub.beginCompaction()).toMatchObject({
+        ok: false,
+        status: "busy",
+        reason: "recent-activity",
+      });
+      await expireCompactionQuietPeriod(repoId);
       const held = await stub.beginCompaction();
       expect(held.ok).toBe(true);
       if (!held.ok) throw new Error("expected compaction lease");
@@ -462,6 +473,133 @@ describe("streaming compaction", () => {
     } finally {
       sendSpy.mockRestore();
       if (heldToken) await stub.abortCompaction(heldToken);
+    }
+  });
+
+  it("defers compaction for recent writes but cannot starve it indefinitely", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-compaction-activity-window");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const doId = env.REPO_DO.idFromName(repoId).toString();
+    const seeded = await seedPackFirstRepo(repoId);
+    const stub = getRepoStub(env, repoId);
+    const sendSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    try {
+      await promoteToStreaming(owner, repo);
+      const overflowing = await pushOverflowingStreamingHistory({
+        owner,
+        repo,
+        repoId,
+        startingCommitOid: seeded.nextCommit.oid,
+        updates: 4,
+      });
+
+      expect(await runQueueMessage({ kind: "compaction", doId, repoId })).toEqual({
+        acked: false,
+        retried: true,
+      });
+
+      const priorActivityAt = Date.now() - COMPACTION_ACTIVITY_QUIET_MS - 1;
+      await runDOWithRetry(
+        () => stub,
+        async (_instance, state) => {
+          await state.storage.put("compactionPendingSince", priorActivityAt);
+          await state.storage.put("compactionWantedAt", priorActivityAt);
+        }
+      );
+      await pushOverflowingStreamingHistory({
+        owner,
+        repo,
+        repoId,
+        startingCommitOid: overflowing.currentCommitOid,
+        updates: 1,
+      });
+      const movedSchedule = await runDOWithRetry(
+        () => stub,
+        async (_instance, state) => ({
+          wantedAt: await state.storage.get<number>("compactionWantedAt"),
+          pendingSince: await state.storage.get<number>("compactionPendingSince"),
+        })
+      );
+      expect(movedSchedule.pendingSince).toBe(priorActivityAt);
+      expect(movedSchedule.wantedAt).toBeGreaterThan(priorActivityAt);
+      const moved = await stub.beginCompaction();
+      expect(moved).toMatchObject({
+        ok: false,
+        status: "busy",
+        reason: "recent-activity",
+      });
+      if (moved.ok || moved.status !== "busy") throw new Error("expected recent activity");
+      expect(moved.retryAfter).toBeGreaterThanOrEqual(1);
+      expect(moved.retryAfter).toBeLessThanOrEqual(COMPACTION_ACTIVITY_QUIET_MS / 1_000);
+
+      // A repository that never becomes quiet still reaches the existing
+      // alarm-recovery deadline and is allowed to compact.
+      await runDOWithRetry(
+        () => stub,
+        async (_instance, state) => {
+          await state.storage.put(
+            "compactionPendingSince",
+            Date.now() - COMPACTION_MAX_DEFERRAL_MS - 1
+          );
+          await state.storage.put("compactionWantedAt", Date.now());
+        }
+      );
+      expect(await runQueueMessage({ kind: "compaction", doId, repoId })).toEqual({
+        acked: true,
+        retried: false,
+      });
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("preserves the activity window across internal compaction passes", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-compaction-follow-up-window");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const doId = env.REPO_DO.idFromName(repoId).toString();
+    const seeded = await seedPackFirstRepo(repoId);
+    const stub = getRepoStub(env, repoId);
+    const sendSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    try {
+      await promoteToStreaming(owner, repo);
+      await pushOverflowingStreamingHistory({
+        owner,
+        repo,
+        repoId,
+        startingCommitOid: seeded.nextCommit.oid,
+        updates: 8,
+      });
+      await expireCompactionQuietPeriod(repoId);
+      const before = await runDOWithRetry(
+        () => stub,
+        async (_instance, state) => ({
+          wantedAt: await state.storage.get<number>("compactionWantedAt"),
+          pendingSince: await state.storage.get<number>("compactionPendingSince"),
+        })
+      );
+
+      expect(await runQueueMessage({ kind: "compaction", doId, repoId })).toEqual({
+        acked: true,
+        retried: false,
+      });
+      const after = await runDOWithRetry(
+        () => stub,
+        async (_instance, state) => ({
+          wantedAt: await state.storage.get<number>("compactionWantedAt"),
+          pendingSince: await state.storage.get<number>("compactionPendingSince"),
+        })
+      );
+      expect(after).toEqual(before);
+    } finally {
+      sendSpy.mockRestore();
     }
   });
 
@@ -564,6 +702,13 @@ describe("streaming compaction", () => {
       expect(clearResponse.status).toBe(200);
       const clearJson = (await clearResponse.json()) as { cleared?: boolean };
       expect(clearJson.cleared).toBe(true);
+      await runDOWithRetry(
+        () => getRepoStub(env, repoId),
+        async (_instance, state) => {
+          expect(await state.storage.get("compactionWantedAt")).toBeUndefined();
+          expect(await state.storage.get("compactionPendingSince")).toBeUndefined();
+        }
+      );
 
       // Preview should still show the plan with queued: false.
       const previewResponse = await workerExports.default.fetch(
@@ -758,6 +903,7 @@ describe("streaming compaction", () => {
     });
 
     const stub = getStub();
+    await expireCompactionQuietPeriod(repoId);
     const begin = await stub.beginCompaction();
     expect(begin.ok).toBe(true);
     if (!begin.ok) {
@@ -910,6 +1056,7 @@ describe("streaming compaction", () => {
     });
 
     const stub = getStub();
+    await expireCompactionQuietPeriod(repoId);
     const begin = await stub.beginCompaction();
     expect(begin.ok).toBe(true);
     if (!begin.ok) {

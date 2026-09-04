@@ -291,10 +291,12 @@ export async function handleCompactionMessage(
     if (!begin.ok) {
       if (
         begin.status === "busy" &&
-        (begin.reason === "receive-active" || begin.reason === "compact-active")
+        (begin.reason === "receive-active" ||
+          begin.reason === "compact-active" ||
+          begin.reason === "recent-activity")
       ) {
         log.info("compaction:busy-retry", { reason: begin.reason });
-        retryQueueMessage(message, COMPACTION_CONFLICT_RETRY_DELAY_SECONDS);
+        retryQueueMessage(message, begin.retryAfter);
         return;
       }
 

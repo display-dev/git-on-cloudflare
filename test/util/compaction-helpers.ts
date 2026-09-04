@@ -2,14 +2,41 @@ import { env } from "cloudflare:test";
 import { packIndexKey, packRefsKey } from "@/worker/keys";
 import { pushStreamingUpdate } from "./streaming-helpers";
 import { runQueueMessage, type QueueRunResult } from "./queue";
+import { getRepoStub } from "@/worker/common";
+import {
+  COMPACTION_ACTIVITY_QUIET_MS,
+  COMPACTION_MAX_DEFERRAL_MS,
+} from "@/worker/do/repo/catalog/shared";
+import { runDOWithRetry } from "./test-helpers";
 
 export async function compactOnce(repoId: string): Promise<QueueRunResult> {
   const doId = env.REPO_DO.idFromName(repoId).toString();
+  await expireCompactionQuietPeriod(repoId);
   return await runQueueMessage({
     kind: "compaction",
     doId,
     repoId,
   });
+}
+
+export async function expireCompactionQuietPeriod(repoId: string): Promise<void> {
+  const stub = getRepoStub(env, repoId);
+  await runDOWithRetry(
+    () => stub,
+    async (_instance, state) => {
+      const wantedAt = await state.storage.get<number>("compactionWantedAt");
+      if (typeof wantedAt === "number") {
+        await state.storage.put(
+          "compactionWantedAt",
+          Date.now() - COMPACTION_ACTIVITY_QUIET_MS - 1
+        );
+        await state.storage.put(
+          "compactionPendingSince",
+          Date.now() - COMPACTION_MAX_DEFERRAL_MS - 1
+        );
+      }
+    }
+  );
 }
 
 export async function deleteSupersededOnce(

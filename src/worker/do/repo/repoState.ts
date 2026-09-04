@@ -181,6 +181,7 @@ export type RepoStateSchema = {
   snapshotPrefixes: string[] | undefined;
   repositoryDeleting: boolean | undefined;
   compactionWantedAt: number | undefined;
+  compactionPendingSince: number | undefined;
   lastAccessMs: number;
 } & Record<ObjKey, Uint8Array | ArrayBuffer> &
   Record<ReceiveOutcomeKey, ReceiveCommitOutcome> &

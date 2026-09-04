@@ -21,6 +21,7 @@ export type DebugCompactionState = {
   queued: boolean;
   startedAt?: number;
   wantedAt?: number;
+  pendingSince?: number;
   lease?: RepoLease;
 };
 

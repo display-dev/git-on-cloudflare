@@ -27,7 +27,12 @@ import {
   validateReceiveCommands,
 } from "@/worker/git/operations/validation";
 import { getDb, listActivePackCatalog, upsertPackCatalogRow } from "../db";
-import { DEFAULT_HEAD, RECEIVE_LEASE_TTL_MS, ensureRepoMetadataDefaults } from "./shared";
+import {
+  DEFAULT_HEAD,
+  RECEIVE_LEASE_TTL_MS,
+  ensureRepoMetadataDefaults,
+  markCompactionActivity,
+} from "./shared";
 import { catalogNeedsCompaction, scheduleCompactionWake } from "./compaction/plan";
 import { acceptedWritesMatchCommands, recordAcceptedWrites } from "../acceptedWrites";
 import {
@@ -400,7 +405,7 @@ export async function reconcileReceiveState(
     await storeReceiveOutcome(ctx.storage, outcome);
     if (args.ingestionReceipt) await storeIngestionReceipt(ctx.storage, args.ingestionReceipt);
     if (outcome.shouldQueueCompaction && !suppressCompactionSchedulingForTesting) {
-      await store.put("compactionWantedAt", Date.now());
+      await markCompactionActivity(store, Date.now());
       await scheduleCompactionWake(ctx, env);
     }
     await clearMatchingReceiveLease(store, args.token);
@@ -622,7 +627,7 @@ export async function finalizeReceiveState(args: {
       await storeIngestionReceipt(args.ctx.storage, args.ingestionReceipt);
     }
     if (priorOutcome.shouldQueueCompaction && !suppressCompactionSchedulingForTesting) {
-      await store.put("compactionWantedAt", Date.now());
+      await markCompactionActivity(store, Date.now());
       await scheduleCompactionWake(args.ctx, args.env);
     }
     await store.delete(intentKey);
@@ -897,7 +902,7 @@ export async function finalizeReceiveState(args: {
     await storeIngestionReceipt(args.ctx.storage, intent.ingestionReceipt);
   }
   if (shouldQueueCompaction && !suppressCompactionSchedulingForTesting) {
-    await store.put("compactionWantedAt", Date.now());
+    await markCompactionActivity(store, Date.now());
     await scheduleCompactionWake(args.ctx, args.env);
   }
   await store.delete(intentKey);

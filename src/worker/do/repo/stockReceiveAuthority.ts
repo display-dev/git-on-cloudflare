@@ -50,7 +50,11 @@ import {
   catalogMetadataFingerprint,
 } from "@/worker/git/nativeReceive/catalogMetadataBundle";
 import { nativeReceiveClaimOutputPackKey, packIndexKey, packRefsKey } from "@/worker/keys";
-import { LEASE_RETRY_AFTER_SECONDS, RECEIVE_LEASE_TTL_MS } from "./catalog/shared";
+import {
+  LEASE_RETRY_AFTER_SECONDS,
+  RECEIVE_LEASE_TTL_MS,
+  markCompactionActivity,
+} from "./catalog/shared";
 import {
   STOCK_RECEIVE_EXECUTION_CLAIM_MS,
   removeStockReceivePreparationLease,
@@ -850,7 +854,7 @@ async function finalizeStockReceiveWithPublicationLease(args: {
     await tx.put(nativeReceiveOperationKey(operation!.id), finalizing);
     const lease = await tx.get("receiveLease");
     if (lease?.token === operation!.leaseToken) await tx.delete("receiveLease");
-    if (shouldQueueCompaction) await tx.put("compactionWantedAt", committedAt);
+    if (shouldQueueCompaction) await markCompactionActivity(tx, committedAt);
     const currentAlarm = await transaction.getAlarm();
     if (currentAlarm === null || currentAlarm > committedAt + 1) {
       await transaction.setAlarm(committedAt + 1);

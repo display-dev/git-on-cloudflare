@@ -179,10 +179,12 @@ it("alarm: re-arms compaction via queue when compactionWantedAt is set", async (
     await instance.seedMinimalRepo();
   });
 
-  // Set compactionWantedAt to signal a pending compaction request
+  // Backdate both timestamps so the alarm dispatches work immediately.
   await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
-    await store.put("compactionWantedAt", Date.now());
+    const elapsedAt = Date.now() - 60_001;
+    await store.put("compactionWantedAt", elapsedAt);
+    await store.put("compactionPendingSince", elapsedAt);
     await state.storage.setAlarm(manualAlarmTime());
   });
 
@@ -191,6 +193,11 @@ it("alarm: re-arms compaction via queue when compactionWantedAt is set", async (
   const ran = await runAlarmWithRetry(getStub);
   expect(ran).toBe(true);
 
+  // The next ordinary access retains the durable request but restores the
+  // bounded recovery cadence instead of arming another immediate alarm.
+  const accessedAt = Date.now();
+  await getStub().listRefs();
+
   // compactionWantedAt should still be set (cleared by the queue consumer after
   // successful compaction, not by the alarm rearm itself)
   await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
@@ -198,5 +205,32 @@ it("alarm: re-arms compaction via queue when compactionWantedAt is set", async (
     const wantedAt = await store.get("compactionWantedAt");
     expect(wantedAt).not.toBeUndefined();
     expect(typeof wantedAt).toBe("number");
+    const alarm = await state.storage.getAlarm();
+    expect(alarm).toBeGreaterThanOrEqual(accessedAt + 59_000);
+    expect(alarm).toBeLessThanOrEqual(accessedAt + 61_000);
+  });
+});
+
+it("alarm: waits for the bounded compaction activity deadline before enqueueing", async () => {
+  const repoId = makeRepoId("compact-quiet-window");
+  const id = env.REPO_DO.idFromName(repoId);
+  const getStub = () => env.REPO_DO.get(id);
+  const activityAt = Date.now();
+
+  await runDOWithRetry(getStub, async (instance: any, state: DurableObjectState) => {
+    await instance.seedMinimalRepo();
+    const store = asTypedStorage<RepoStateSchema>(state.storage);
+    await store.put("compactionWantedAt", activityAt);
+    await store.put("compactionPendingSince", activityAt);
+    await state.storage.setAlarm(manualAlarmTime());
+  });
+
+  expect(await runAlarmWithRetry(getStub)).toBe(true);
+  await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
+    const alarm = await state.storage.getAlarm();
+    expect(alarm).toBeGreaterThanOrEqual(activityAt + 14_000);
+    expect(alarm).toBeLessThanOrEqual(activityAt + 16_000);
+    expect(await state.storage.get("compactionWantedAt")).toBe(activityAt);
+    expect(await state.storage.get("compactionPendingSince")).toBe(activityAt);
   });
 });

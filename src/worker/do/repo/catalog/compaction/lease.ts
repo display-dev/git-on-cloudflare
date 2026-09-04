@@ -22,32 +22,46 @@ import {
 import { getActivePackCatalogSnapshot } from "../state";
 import {
   bumpPacksetVersion,
+  clearCompactionSchedule,
+  compactionStartAt,
   COMPACT_LEASE_TTL_MS,
   COMPACTION_REARM_DELAY_MS,
   ensureRepoMetadataDefaults,
   LEASE_RETRY_AFTER_SECONDS,
+  markCompactionActivity,
 } from "../shared";
 import { activeLeaseOrUndefined } from "../activity";
 import {
   listActiveStockReceiveOperations,
   listActiveStockReceivePreparationLeases,
 } from "../../nativeReceiveActivity";
+import { scheduleAlarmIfSooner } from "../../scheduler";
 import {
   selectCompactionPlan,
   catalogNeedsCompaction,
   scheduleCompactionWake,
   scheduleCompactionAlarm,
   rowsMatchForCommit,
+  type CompactionBusyReason,
   type BeginCompactionResult,
   type CommitCompactionResult,
 } from "./plan";
 
+type CompactionLeaseAcquisition =
+  | { status: "acquired" }
+  | {
+      status: "busy";
+      reason: CompactionBusyReason;
+      retryAfter: number;
+    }
+  | { status: "no-work" };
+
 /**
  * Acquire a compaction lease and select source packs for compaction.
  *
- * Rejects when: no compaction request is recorded, a receive or compaction
- * lease is already active, or the active catalog is already within the
- * compaction policy.
+ * Rejects when: no compaction request is recorded, repository activity is
+ * inside its bounded quiet window, a receive or compaction lease is already
+ * active, or the active catalog is already within the compaction policy.
  */
 export async function beginCompactionState(args: {
   ctx: DurableObjectState;
@@ -65,7 +79,6 @@ export async function beginCompactionState(args: {
       message: "Repository deletion has started, so compaction cannot begin.",
     };
   }
-  const wantedAt = await store.get("compactionWantedAt");
   if (gcOwnsMaintenance(await args.ctx.storage.get<GcOperation>(GC_OPERATION_KEY))) {
     return {
       ok: false,
@@ -75,7 +88,8 @@ export async function beginCompactionState(args: {
       message: "GC still owns its source catalog; compaction remains queued.",
     };
   }
-  if (typeof wantedAt !== "number") {
+  const observedWantedAt = await store.get("compactionWantedAt");
+  if (typeof observedWantedAt !== "number") {
     return {
       ok: false,
       status: "no_work",
@@ -90,8 +104,11 @@ export async function beginCompactionState(args: {
   if (!plan) {
     await args.ctx.storage.transaction(async (transaction) => {
       const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
-      if (!(await transactionStore.get("repositoryDeleting"))) {
-        await transactionStore.delete("compactionWantedAt");
+      if (
+        !(await transactionStore.get("repositoryDeleting")) &&
+        (await transactionStore.get("compactionWantedAt")) === observedWantedAt
+      ) {
+        await clearCompactionSchedule(transactionStore);
       }
     });
     args.logger?.info("compaction:begin-no-work", {
@@ -111,38 +128,91 @@ export async function beginCompactionState(args: {
     expiresAt: now + COMPACT_LEASE_TTL_MS,
     operation: "compaction",
   };
-  const acquisition = await args.ctx.storage.transaction(async (transaction) => {
-    const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
-    if (await transactionStore.get("repositoryDeleting")) return "repository-deleting";
-    if (gcOwnsMaintenance(await transaction.get<GcOperation>(GC_OPERATION_KEY)))
-      return "compact-active";
-    if (activeLeaseOrUndefined(await transactionStore.get("receiveLease"), now)) {
-      return "receive-active";
+  const acquisition: CompactionLeaseAcquisition = await args.ctx.storage.transaction(
+    async (transaction) => {
+      const transactionStore = asTypedStorage<RepoStateSchema>(transaction);
+      if (await transactionStore.get("repositoryDeleting")) {
+        return {
+          status: "busy",
+          reason: "repository-deleting",
+          retryAfter: LEASE_RETRY_AFTER_SECONDS,
+        };
+      }
+      if (gcOwnsMaintenance(await transaction.get<GcOperation>(GC_OPERATION_KEY)))
+        return {
+          status: "busy",
+          reason: "compact-active",
+          retryAfter: LEASE_RETRY_AFTER_SECONDS,
+        };
+      if (activeLeaseOrUndefined(await transactionStore.get("receiveLease"), now)) {
+        return {
+          status: "busy",
+          reason: "receive-active",
+          retryAfter: LEASE_RETRY_AFTER_SECONDS,
+        };
+      }
+      if ((await listActiveStockReceivePreparationLeases(transactionStore, now)).length > 0) {
+        return {
+          status: "busy",
+          reason: "receive-active",
+          retryAfter: LEASE_RETRY_AFTER_SECONDS,
+        };
+      }
+      if ((await listActiveStockReceiveOperations(transactionStore)).length > 0) {
+        return {
+          status: "busy",
+          reason: "receive-active",
+          retryAfter: LEASE_RETRY_AFTER_SECONDS,
+        };
+      }
+      if (activeLeaseOrUndefined(await transactionStore.get("compactLease"), now)) {
+        return {
+          status: "busy",
+          reason: "compact-active",
+          retryAfter: LEASE_RETRY_AFTER_SECONDS,
+        };
+      }
+
+      // Re-read activity in the same transaction that publishes the lease. A
+      // receive that commits first moves the deadline. A receive that publishes
+      // later changes the packset version, so the compaction commit fence retries.
+      const wantedAt = await transactionStore.get("compactionWantedAt");
+      if (typeof wantedAt !== "number") return { status: "no-work" };
+      const pendingSince = (await transactionStore.get("compactionPendingSince")) ?? wantedAt;
+      const startAt = compactionStartAt(wantedAt, pendingSince);
+      if (now < startAt) {
+        return {
+          status: "busy",
+          reason: "recent-activity",
+          retryAfter: Math.max(1, Math.ceil((startAt - now) / 1000)),
+        };
+      }
+      await transactionStore.put("compactLease", lease);
+      return { status: "acquired" };
     }
-    if ((await listActiveStockReceivePreparationLeases(transactionStore, now)).length > 0) {
-      return "receive-active";
-    }
-    if ((await listActiveStockReceiveOperations(transactionStore)).length > 0) {
-      return "receive-active";
-    }
-    if (activeLeaseOrUndefined(await transactionStore.get("compactLease"), now)) {
-      return "compact-active";
-    }
-    await transactionStore.put("compactLease", lease);
-    return "acquired";
-  });
-  if (acquisition !== "acquired") {
+  );
+  if (acquisition.status === "no-work") {
+    return {
+      ok: false,
+      status: "no_work",
+      reason: "not-requested",
+      message: "No compaction request is currently recorded for this repository.",
+    };
+  }
+  if (acquisition.status === "busy") {
     return {
       ok: false,
       status: "busy",
-      retryAfter: LEASE_RETRY_AFTER_SECONDS,
-      reason: acquisition,
+      retryAfter: acquisition.retryAfter,
+      reason: acquisition.reason,
       message:
-        acquisition === "repository-deleting"
+        acquisition.reason === "repository-deleting"
           ? "Repository deletion has started, so compaction cannot begin."
-          : acquisition === "receive-active"
+          : acquisition.reason === "receive-active"
             ? "A receive lease is active, so compaction must retry later."
-            : "A compaction lease is already active for this repository.",
+            : acquisition.reason === "recent-activity"
+              ? "Repository activity is still inside the bounded compaction quiet period."
+              : "A compaction lease is already active for this repository.",
     };
   }
 
@@ -305,10 +375,18 @@ export async function commitCompactionState(args: {
 
   const shouldRequeue = catalogNeedsCompaction(activeCatalog);
   if (shouldRequeue) {
-    await store.put("compactionWantedAt", Date.now());
+    // Preserve both timestamps across internal passes. If an operator cleared
+    // the request mid-pass, record a fresh schedule for the remaining work.
+    const wantedAt = await store.get("compactionWantedAt");
+    if (typeof wantedAt !== "number") {
+      await markCompactionActivity(store, Date.now());
+    } else if (typeof (await store.get("compactionPendingSince")) !== "number") {
+      // Backfill repositories whose request predates the bounded-window key.
+      await store.put("compactionPendingSince", wantedAt);
+    }
     await scheduleCompactionWake(args.ctx, args.env);
   } else {
-    await store.delete("compactionWantedAt");
+    await clearCompactionSchedule(store);
   }
 
   await store.delete("compactLease");
@@ -328,9 +406,10 @@ export async function commitCompactionState(args: {
 }
 
 /**
- * Called from the DO alarm handler for streaming repos. If `compactionWantedAt`
- * is set and no leases are active, enqueue a compaction message to the
- * maintenance queue. Reschedules the alarm on queue send failure.
+ * Called from the DO alarm handler for streaming repos. A request inside its
+ * activity window re-arms the exact eligibility deadline without enqueueing.
+ * Once eligible and no lease is active, the alarm enqueues maintenance work;
+ * a queue-send failure re-arms the bounded recovery cadence.
  */
 export async function rearmCompactionQueueFromAlarm(args: {
   ctx: DurableObjectState;
@@ -344,6 +423,17 @@ export async function rearmCompactionQueueFromAlarm(args: {
   if (typeof wantedAt !== "number") return false;
 
   const now = Date.now();
+  const pendingSince = (await store.get("compactionPendingSince")) ?? wantedAt;
+  const startAt = compactionStartAt(wantedAt, pendingSince);
+  if (startAt > now) {
+    await scheduleAlarmIfSooner(args.ctx, args.env, startAt, now);
+    args.logger?.info("compaction:alarm-rearm-deferred", {
+      startAt,
+      retryAfter: Math.max(1, Math.ceil((startAt - now) / 1000)),
+    });
+    return true;
+  }
+
   if (gcOwnsMaintenance(await args.ctx.storage.get<GcOperation>(GC_OPERATION_KEY))) return false;
   if (activeLeaseOrUndefined(await store.get("receiveLease"), now)) return false;
   if ((await listActiveStockReceivePreparationLeases(store, now)).length > 0) return false;

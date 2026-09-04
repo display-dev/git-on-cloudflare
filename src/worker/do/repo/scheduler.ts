@@ -3,7 +3,7 @@ import { asTypedStorage } from "./repoState";
 import { getConfig } from "./repoConfig";
 import { createLogger } from "@/worker/common";
 import { activeLeaseOrUndefined } from "./catalog/activity";
-import { COMPACTION_REARM_DELAY_MS } from "./catalog/shared";
+import { compactionStartAt, COMPACTION_REARM_DELAY_MS } from "./catalog/shared";
 import { activeStockReceivePreparationLeases } from "./nativeReceiveActivity";
 
 export const RECOVERY_ESCALATION_ATTEMPTS = 5;
@@ -31,8 +31,15 @@ export async function planNextAlarm(
 
   // 1) Re-arm compaction via alarms when a compaction request or lease is active.
   try {
-    const [compactionWantedAt, receiveLease, preparationLeases, compactLease] = await Promise.all([
+    const [
+      compactionWantedAt,
+      compactionPendingSince,
+      receiveLease,
+      preparationLeases,
+      compactLease,
+    ] = await Promise.all([
       store.get("compactionWantedAt"),
+      store.get("compactionPendingSince"),
       store.get("receiveLease"),
       store.get("stockReceivePreparationLeases"),
       store.get("compactLease"),
@@ -56,7 +63,11 @@ export async function planNextAlarm(
     }
 
     if (typeof compactionWantedAt === "number") {
-      return { when: now + COMPACTION_REARM_DELAY_MS, reason: "compaction" };
+      const startAt = compactionStartAt(compactionWantedAt, compactionPendingSince);
+      return {
+        when: startAt > now ? startAt : now + COMPACTION_REARM_DELAY_MS,
+        reason: "compaction",
+      };
     }
   } catch (e) {
     log.warn("sched:read-compaction-state-failed", { error: String(e) });

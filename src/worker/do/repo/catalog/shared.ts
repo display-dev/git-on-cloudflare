@@ -7,8 +7,21 @@ export const COMPACT_LEASE_TTL_MS = 20 * 60_000;
 export const LEASE_RETRY_AFTER_SECONDS = 10;
 export const COMPACTION_REARM_DELAY_MS = 60_000;
 export const COMPACTION_WAKE_DELAY_MS = 5_000;
+export const COMPACTION_ACTIVITY_QUIET_MS = 15_000;
+// Do not let a continuously written repository postpone maintenance forever.
+// Reuse the existing recovery cadence as the longest activity deferral so an
+// alarm cycle is also an upper bound on accumulated uncompacted packs.
+export const COMPACTION_MAX_DEFERRAL_MS = COMPACTION_REARM_DELAY_MS;
 export const DEFAULT_HEAD: Head = { target: "refs/heads/main", unborn: true };
 export const IDX_HEADER_LEN = 8 + 256 * 4;
+
+/** Earliest safe start: after a quiet window, but never beyond the hard deferral. */
+export function compactionStartAt(wantedAt: number, pendingSince = wantedAt): number {
+  return Math.min(
+    wantedAt + COMPACTION_ACTIVITY_QUIET_MS,
+    pendingSince + COMPACTION_MAX_DEFERRAL_MS
+  );
+}
 
 export type BeginReceiveResult =
   | { ok: false; retryAfter: number }
@@ -59,4 +72,23 @@ export async function bumpPacksetVersion(store: TypedStorage<RepoStateSchema>): 
   const next = ((await store.get("packsetVersion")) || 0) + 1;
   await store.put("packsetVersion", next);
   return next;
+}
+
+/** Record the latest repository activity without moving the first pending deadline. */
+export async function markCompactionActivity(
+  store: TypedStorage<RepoStateSchema>,
+  activityAt: number
+): Promise<void> {
+  // Publish the backward-compatible schedule key first. Repositories without
+  // the newer pending boundary safely use wantedAt for both deadline inputs.
+  await store.put("compactionWantedAt", activityAt);
+  if (typeof (await store.get("compactionPendingSince")) !== "number") {
+    await store.put("compactionPendingSince", activityAt);
+  }
+}
+
+/** Clear both timestamps that make up one pending compaction schedule. */
+export async function clearCompactionSchedule(store: TypedStorage<RepoStateSchema>): Promise<void> {
+  await store.delete("compactionWantedAt");
+  await store.delete("compactionPendingSince");
 }

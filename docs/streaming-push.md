@@ -186,6 +186,7 @@ Notes:
 - `receiveLease`
 - `compactLease`
 - `compactionWantedAt`
+- `compactionPendingSince`
 
 Lease contents:
 
@@ -230,7 +231,7 @@ Fetch and UI reads operate on a read-only snapshot of the active catalog. They n
 
 ### Rule 6
 
-Queue delivery is a hint, not the durable record of pending compaction. The durable record is `compactionWantedAt` in DO metadata. Queue delivery failure may delay compaction, but it must not lose the need for compaction.
+Queue delivery is a hint, not the durable record of pending compaction. The durable record is `compactionWantedAt` plus `compactionPendingSince` in DO metadata. Queue delivery failure may delay compaction, but it must not lose the need for compaction. The DO alarm waits until the earlier of 15 seconds without repository activity or 60 seconds since compaction first became pending before re-enqueueing.
 
 ## Receive Path
 
@@ -288,7 +289,7 @@ Changed internally:
     - allocates `nextPackSeq`;
     - inserts the new active pack row;
     - updates `refs`, `head`, `refsVersion`, and `packsetVersion`;
-    - sets or refreshes `compactionWantedAt` if the catalog now violates the compaction policy;
+    - records the first-pending and latest-activity compaction timestamps if the catalog now violates the compaction policy;
     - clears the receive lease;
     - returns whether compaction should be queued.
 11. The Worker returns the pkt-line `report-status` response.
@@ -586,7 +587,7 @@ Recommended Queue config:
 
 - `max_batch_size = 1`
 - `max_batch_timeout = 1`
-- default retries are acceptable
+- default retries are acceptable because the DO alarm retains and re-arms the durable request
 
 No additional compaction env vars are required; the stock preparation limit is configured separately.
 
@@ -594,6 +595,7 @@ The DO alarm remains in use, but only for lightweight metadata work:
 
 - expire stale receive and compaction leases;
 - retry queue re-arm when `compactionWantedAt` is set and no compaction lease is active;
+- wait until the bounded activity deadline before queue re-arm;
 - never perform pack indexing, unpacking, or compaction itself.
 
 ### Compaction policy
@@ -611,6 +613,7 @@ Policy:
 4. source packs become `superseded` only after DO commit.
 5. no compaction lease may be granted while a receive lease or nonterminal stock preparation is active for the same repo.
 6. receive retains priority over ordinary compaction; if generic receive, bounded stock preparation, or admitted stock work becomes active after compaction starts, `commitCompaction()` must fail and the queue worker must retry later. Reachability GC retains its separate coordinated exclusion.
+7. compaction starts after 15 seconds without repository activity, but continuous activity cannot defer the first pass for more than 60 seconds.
 
 ### Compaction algorithm
 
@@ -638,7 +641,7 @@ The full active catalog is passed so that delta bases outside the source set are
    - marks the new pack active;
    - marks source packs superseded;
    - updates `packsetVersion`;
-   - clears or refreshes `compactionWantedAt` based on the post-commit catalog state;
+   - clears the compaction timestamps when no follow-up pass is required, otherwise preserves the original pending and latest-activity timestamps;
    - clears the compaction lease.
 9. The worker deletes superseded R2 blobs best-effort in `waitUntil(...)`.
 
@@ -745,7 +748,7 @@ During phase 2, these files may continue to render a banner, but they must stop 
 
 ### Admin endpoints
 
-- `POST /:owner/:repo/admin/compact` — returns a compaction plan by default and triggers compaction when `dryRun === false`
+- `POST /:owner/:repo/admin/compact` — returns a compaction plan by default and triggers compaction when `dryRun === false`; triggered work uses the same bounded activity window as automatic compaction
 - `DELETE /:owner/:repo/admin/compact` — clears queued compaction work for the repo
 
 The `/admin/hydrate` aliases and `/admin/storage-mode` endpoints were removed in the closure release.

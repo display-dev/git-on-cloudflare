@@ -14,6 +14,7 @@ import {
 import { getActivePackCatalogSnapshot } from "./state";
 import {
   bumpPacksetVersion,
+  clearCompactionSchedule,
   COMPACT_LEASE_TTL_MS,
   ensureRepoMetadataDefaults,
   LEASE_RETRY_AFTER_SECONDS,
@@ -359,7 +360,7 @@ export async function commitReachabilityGcState(args: {
     // a lost response, their compaction request is newer authority and must
     // survive reconciliation.
     if (currentVersion <= args.packsetVersion + 1) {
-      await store.delete("compactionWantedAt");
+      await clearCompactionSchedule(store);
     }
     const committed: GcCommit = {
       status: "committed",
@@ -515,7 +516,7 @@ export async function commitReachabilityGcState(args: {
     generation: packCatalogVersion,
     activePackKeys: committedActiveCatalog.map((row) => row.packKey),
   });
-  await store.delete("compactionWantedAt");
+  await clearCompactionSchedule(store);
   const committed: GcCommit = {
     status: "committed",
     packCatalogVersion,

@@ -58,6 +58,12 @@ export type ClearCompactionRequestResult = {
   message: string;
 };
 
+export type CompactionBusyReason =
+  | "receive-active"
+  | "compact-active"
+  | "recent-activity"
+  | "repository-deleting";
+
 export type BeginCompactionResult =
   | {
       ok: true;
@@ -71,7 +77,7 @@ export type BeginCompactionResult =
       ok: false;
       status: "busy";
       retryAfter: number;
-      reason: "receive-active" | "compact-active" | "repository-deleting";
+      reason: CompactionBusyReason;
       message: string;
     }
   | {

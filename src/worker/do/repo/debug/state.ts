@@ -62,6 +62,7 @@ export async function debugState(ctx: DurableObjectState, env: Env): Promise<Deb
   const receiveLease = activeLeaseOrUndefined(await store.get("receiveLease"), now);
   const compactLease = activeLeaseOrUndefined(await store.get("compactLease"), now);
   const compactionWantedAt = await store.get("compactionWantedAt");
+  const compactionPendingSince = await store.get("compactionPendingSince");
 
   const looseSample = await listLooseSample(ctx);
   const dbSizeBytes = getDatabaseSize(ctx);
@@ -86,6 +87,7 @@ export async function debugState(ctx: DurableObjectState, env: Env): Promise<Deb
       queued: typeof compactionWantedAt === "number",
       startedAt: compactLease?.createdAt,
       wantedAt: compactionWantedAt,
+      pendingSince: compactionPendingSince,
       lease: compactLease,
     },
     looseSample,

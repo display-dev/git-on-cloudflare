@@ -2,8 +2,8 @@
  * Admin-facing compaction state transitions: preview, request, and clear.
  *
  * These operations are triggered by POST/DELETE on /admin/compact.
- * They read or mutate `compactionWantedAt` in DO storage but never
- * acquire or release compaction leases.
+ * They read or mutate the paired compaction schedule timestamps in DO storage
+ * but never acquire or release compaction leases.
  */
 import type { Logger } from "@/worker/common/logger";
 import type { RepoStateSchema } from "../../repoState";
@@ -16,6 +16,7 @@ import {
   type RequestCompactionResult,
   type ClearCompactionRequestResult,
 } from "./plan";
+import { clearCompactionSchedule, markCompactionActivity } from "../shared";
 
 /**
  * Preview the current compaction plan without recording a request.
@@ -84,7 +85,7 @@ export async function requestCompactionState(args: {
 
   if (!context.plan) {
     if (typeof context.wantedAt === "number") {
-      await context.store.delete("compactionWantedAt");
+      await clearCompactionSchedule(context.store);
     }
     args.logger?.info("compaction:request-no-work", {});
     return {
@@ -103,7 +104,7 @@ export async function requestCompactionState(args: {
   const recorded = await args.ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
     if (await store.get("repositoryDeleting")) return false;
-    await store.put("compactionWantedAt", wantedAt);
+    await markCompactionActivity(store, wantedAt);
     return true;
   });
   if (!recorded) {
@@ -148,7 +149,7 @@ export async function clearCompactionRequestState(args: {
     const store = asTypedStorage<RepoStateSchema>(transaction);
     if (await store.get("repositoryDeleting")) return false;
     const queued = typeof (await store.get("compactionWantedAt")) === "number";
-    await store.delete("compactionWantedAt");
+    await clearCompactionSchedule(store);
     return queued;
   });
   args.logger?.info("compaction:clear", {

@@ -110,7 +110,7 @@ export function CompactionCard({
           <div className="font-mono">{compactionStatus}</div>
           {compactionData?.wantedAt ? (
             <div className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-              requested {new Date(compactionData.wantedAt).toLocaleString()}
+              latest activity {new Date(compactionData.wantedAt).toLocaleString()}
             </div>
           ) : null}
         </div>

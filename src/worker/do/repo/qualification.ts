@@ -30,6 +30,7 @@ const TRANSIENT_KEYS = [
   "stockReceivePreparationLeases",
   "reachabilityGcPending",
   "compactionWantedAt",
+  "compactionPendingSince",
   "nativeInputHold:foreground",
   "nativeInputHold:maintenance",
   GC_OPERATION_KEY,
@@ -68,6 +69,7 @@ export async function settleQualificationCompaction(
       return { schemaVersion: 1 as const, status: "conflict" as const };
     const cleared = (await transaction.get("compactionWantedAt")) !== undefined;
     await transaction.delete("compactionWantedAt");
+    await transaction.delete("compactionPendingSince");
     return {
       schemaVersion: 1 as const,
       status: "request-cleared" as const,
@@ -150,6 +152,7 @@ export async function resetQualificationRepositoryState(
     // Clear it in this exact-ref transaction so a waiting queue message sees
     // no work; an already-started worker would have held a lease above.
     await transaction.delete("compactionWantedAt");
+    await transaction.delete("compactionPendingSince");
     const deletedProjectionCount = await clearQualificationSnapshotProjectionState(
       transaction,
       refs
