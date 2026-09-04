@@ -133,6 +133,85 @@ let unexpectedWholePackReadOperationForTesting: string | undefined;
 let transientWholePackReadForTesting: { operationId: string; attempts: number } | undefined;
 let shortWholePackReadForTesting: { operationId: string; attempts: number } | undefined;
 
+const ACTIVE_METADATA_CACHE_DEFAULT_MAX_BYTES = 4 * 1024 * 1024;
+type CachedActiveMetadata = {
+  packKey: string;
+  packBytes: number;
+  idxBytes: number;
+  idx: IdxView;
+  refs: PackRefView;
+  packChecksum: string;
+  idxSha256: string;
+  refsSha256: string;
+  idxBytesRaw: Uint8Array;
+  refsBytesRaw: Uint8Array;
+  bytes: number;
+};
+const activeMetadataCache = new Map<string, CachedActiveMetadata>();
+let activeMetadataCacheBytes = 0;
+let activeMetadataCacheMaxBytes = ACTIVE_METADATA_CACHE_DEFAULT_MAX_BYTES;
+
+function trimActiveMetadataCache(): string[] {
+  const evicted: string[] = [];
+  while (activeMetadataCacheBytes > activeMetadataCacheMaxBytes) {
+    const oldestKey = activeMetadataCache.keys().next().value;
+    if (!oldestKey) break;
+    const oldest = activeMetadataCache.get(oldestKey);
+    activeMetadataCache.delete(oldestKey);
+    activeMetadataCacheBytes -= oldest?.bytes ?? 0;
+    evicted.push(oldestKey);
+  }
+  return evicted;
+}
+
+function cacheActiveMetadata(value: Omit<CachedActiveMetadata, "bytes">): {
+  stored: boolean;
+  evicted: string[];
+} {
+  const existing = activeMetadataCache.get(value.packKey);
+  if (existing) {
+    activeMetadataCache.delete(value.packKey);
+    activeMetadataCacheBytes -= existing.bytes;
+  }
+  const bytes =
+    value.idxBytesRaw.byteLength +
+    value.refsBytesRaw.byteLength +
+    value.idx.fanout.byteLength +
+    value.idx.rawNames.byteLength +
+    value.idx.offsets.byteLength +
+    value.idx.nextOffsetByIndex.byteLength +
+    value.idx.sortedOffsets.byteLength +
+    value.idx.sortedOffsetIndices.byteLength +
+    value.idx.packChecksum.byteLength +
+    value.idx.idxChecksum.byteLength +
+    value.refs.typeCodes.byteLength +
+    value.refs.refStartsBytes.byteLength +
+    value.refs.rawRefs.byteLength +
+    value.refs.packChecksum.byteLength +
+    value.refs.idxChecksum.byteLength;
+  if (bytes > activeMetadataCacheMaxBytes) return { stored: false, evicted: [] };
+  activeMetadataCache.set(value.packKey, { ...value, bytes });
+  activeMetadataCacheBytes += bytes;
+  return { stored: true, evicted: trimActiveMetadataCache() };
+}
+
+function cachedActiveMetadata(pack: StockPlannerActivePack): CachedActiveMetadata | undefined {
+  const cached = activeMetadataCache.get(pack.packKey);
+  if (
+    !cached ||
+    cached.packBytes !== pack.packBytes ||
+    cached.idxBytes !== pack.idxBytes ||
+    (pack.packChecksum !== undefined && pack.packChecksum !== cached.packChecksum) ||
+    (pack.idxSha256 !== undefined && pack.idxSha256 !== cached.idxSha256) ||
+    (pack.refsSha256 !== undefined && pack.refsSha256 !== cached.refsSha256)
+  ) {
+    return undefined;
+  }
+  activeMetadataCache.delete(pack.packKey);
+  activeMetadataCache.set(pack.packKey, cached);
+  return cached;
+}
+
 export const __test = {
   failWrongPrerequisiteRange(operationId: string): void {
     wrongPrerequisiteRangeFaultForTesting = {
@@ -213,6 +292,20 @@ export const __test = {
       ),
     ].sort();
   },
+  activeMetadataCacheState(): { bytes: number; maxBytes: number; keys: string[] } {
+    return {
+      bytes: activeMetadataCacheBytes,
+      maxBytes: activeMetadataCacheMaxBytes,
+      keys: [...activeMetadataCache.keys()],
+    };
+  },
+  setActiveMetadataCacheMaxBytes(maxBytes: number): void {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+      throw new Error("stock-plan:test-active-metadata-cache-limit-invalid");
+    }
+    activeMetadataCacheMaxBytes = maxBytes;
+    trimActiveMetadataCache();
+  },
   reset(): void {
     wrongPrerequisiteRangeFaultForTesting = undefined;
     transientR2ReadFaultForTesting = undefined;
@@ -220,6 +313,9 @@ export const __test = {
     unexpectedWholePackReadOperationForTesting = undefined;
     transientWholePackReadForTesting = undefined;
     shortWholePackReadForTesting = undefined;
+    activeMetadataCache.clear();
+    activeMetadataCacheBytes = 0;
+    activeMetadataCacheMaxBytes = ACTIVE_METADATA_CACHE_DEFAULT_MAX_BYTES;
   },
 };
 
@@ -1291,7 +1387,7 @@ async function deletePlannerKeys(args: {
 }
 
 async function loadBoundActivePacks(
-  args: PlanStockReceiveArgs,
+  args: PlanStockReceiveArgs & { log: Logger },
   counters: PlannerCounters
 ): Promise<{
   packs: BoundActivePack[];
@@ -1339,7 +1435,7 @@ async function loadBoundActivePacks(
       throw new Error("stock-plan:pref-authority-digest-mismatch");
     }
     idxViews.set(pack.packKey, idx);
-    return {
+    const bound = {
       source: { packKey: pack.packKey, packBytes: pack.packBytes, idx },
       idxBytes: pack.idxBytes,
       refs: parsedRefs.view,
@@ -1348,7 +1444,85 @@ async function loadBoundActivePacks(
       refsSha256,
       ...(bundleEnabled ? { idxBytesRaw: idxBytes, refsBytesRaw: refsBytes } : {}),
     };
+    if (bundleEnabled) {
+      const cached = cacheActiveMetadata({
+        packKey: pack.packKey,
+        packBytes: pack.packBytes,
+        idxBytes: pack.idxBytes,
+        idx,
+        refs: parsedRefs.view,
+        packChecksum: bound.packChecksum,
+        idxSha256,
+        refsSha256,
+        idxBytesRaw: idxBytes,
+        refsBytesRaw: refsBytes,
+      });
+      args.log.debug("stock-plan:active-metadata-cache-store", {
+        packKey: pack.packKey,
+        stored: cached.stored,
+        evicted: cached.evicted.length,
+        cacheBytes: activeMetadataCacheBytes,
+      });
+    }
+    return bound;
   };
+  const cached = bundleEnabled ? args.activePacks.map(cachedActiveMetadata) : [];
+  if (
+    bundleEnabled &&
+    cached.length > 0 &&
+    cached.every((entry): entry is CachedActiveMetadata => entry !== undefined)
+  ) {
+    throwIfAborted(args.signal);
+    args.log.debug("stock-plan:active-metadata-cache-hit", {
+      activePacks: cached.length,
+      cacheBytes: activeMetadataCacheBytes,
+    });
+    const packs = await Promise.all(
+      cached.map(async (entry) => {
+        throwIfAborted(args.signal);
+        const trailer = await readExactRange({
+          env: args.env,
+          key: entry.packKey,
+          offset: entry.packBytes - 20,
+          length: 20,
+          limiter: args.limiter,
+          countSubrequest: args.countSubrequest,
+          kind: "metadata",
+          counters,
+        });
+        if (!bytesEqual(trailer, entry.idx.packChecksum)) {
+          if (activeMetadataCache.get(entry.packKey) === entry) {
+            activeMetadataCache.delete(entry.packKey);
+            activeMetadataCacheBytes -= entry.bytes;
+          }
+          args.log.warn("stock-plan:active-metadata-cache-trailer-mismatch", {
+            packKey: entry.packKey,
+          });
+          throw new Error("stock-plan:cached-pack-trailer-mismatch");
+        }
+        idxViews.set(entry.packKey, entry.idx);
+        return {
+          source: { packKey: entry.packKey, packBytes: entry.packBytes, idx: entry.idx },
+          idxBytes: entry.idxBytes,
+          refs: entry.refs,
+          packChecksum: entry.packChecksum,
+          idxSha256: entry.idxSha256,
+          refsSha256: entry.refsSha256,
+          ...(bundleEnabled
+            ? { idxBytesRaw: entry.idxBytesRaw, refsBytesRaw: entry.refsBytesRaw }
+            : {}),
+        };
+      })
+    );
+    return { packs };
+  }
+  if (bundleEnabled && args.activePacks.length > 0) {
+    args.log.debug("stock-plan:active-metadata-cache-miss", {
+      activePacks: args.activePacks.length,
+      cachedPacks: cached.filter((entry) => entry !== undefined).length,
+      cacheBytes: activeMetadataCacheBytes,
+    });
+  }
   if (bundleEnabled && args.activePacks.length > 0) {
     throwIfAborted(args.signal);
     const bundle = await readCatalogMetadataBundle({
@@ -1359,7 +1533,7 @@ async function loadBoundActivePacks(
       observeBytes: (bytes) => {
         counters.metadataBytes += bytes;
       },
-      log: args.log ?? createLogger(args.env.LOG_LEVEL, { service: "StockReceivePlanner" }),
+      log: args.log,
     });
     counters.metadataRequests++;
     if (bundle) {
@@ -1646,7 +1820,7 @@ async function planStockReceiveImpl(
   // metadata read. The failed attempt therefore cannot invoke host Go or Git,
   // and the same operation can be retried against the unchanged authority.
   throwTransientR2ReadFault(args.operationId, counters, args.activePacks.length);
-  const activeLoad = await loadBoundActivePacks(args, counters);
+  const activeLoad = await loadBoundActivePacks({ ...args, log }, counters);
   const active = activeLoad.packs;
   const activeMetadataCompleteAt = Date.now();
   if (unexpectedWholePackReadOperationForTesting === args.operationId) {
@@ -1999,6 +2173,26 @@ async function planStockReceiveImpl(
     }
     const canonicalRefs = parsePackRefView(args.outputPackKey, canonicalRefsBytes, canonicalIdx);
     if (canonicalRefs.type !== "Ready") throw new Error("stock-plan:canonical-pref-invalid");
+    if (catalogMetadataBundleEnabled(args.env)) {
+      const cached = cacheActiveMetadata({
+        packKey: args.outputPackKey,
+        packBytes: canonicalPack.byteLength,
+        idxBytes: canonicalIdxBytes.byteLength,
+        idx: canonicalIdx,
+        refs: canonicalRefs.view,
+        packChecksum: bytesToHex(canonicalIdx.packChecksum),
+        idxSha256: canonicalIdxSha256,
+        refsSha256: canonicalRefsSha256,
+        idxBytesRaw: canonicalIdxBytes,
+        refsBytesRaw: canonicalRefsBytes,
+      });
+      log.debug("stock-plan:active-metadata-cache-prime-output", {
+        packKey: args.outputPackKey,
+        stored: cached.stored,
+        evicted: cached.evicted.length,
+        cacheBytes: activeMetadataCacheBytes,
+      });
+    }
     const metadataBundleSeedEntries: CatalogMetadataBundleEntry[] | undefined =
       catalogMetadataBundleEnabled(args.env) && active.length < MAX_ACTIVE_PACKS
         ? [

@@ -1924,6 +1924,7 @@ describe("stock Smart HTTP receive spike", () => {
       limiter: new SubrequestLimiter(4),
       countSubrequest() {},
     });
+    stockPlannerTest.reset();
 
     const bundledOperationId = "direct-pack-bundle-hit-operation";
     const bundledInputKey = `${prefix}/native-receive/direct-pack-bundle-hit.request`;
@@ -1985,6 +1986,119 @@ describe("stock Smart HTTP receive spike", () => {
     ).toBe("direct-metadata-bundle");
     await waitOnExecutionContext(hitContext);
 
+    const cached = await executeStockReceiveWorkerDataPlane({
+      env: bundleEnv,
+      operation: bundledOperation,
+      inputPackBytes: pack,
+      cacheCtx: {
+        req: new Request("https://example.invalid/stock-direct-pack-stable-cache-hit"),
+        ctx: createExecutionContext(),
+        memo: {},
+      },
+      limiter: new SubrequestLimiter(40),
+      countSubrequest() {},
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackStableCacheHitTest" }),
+    });
+    expect(cached.processorResult).toMatchObject({
+      activeMetadataBundle: undefined,
+      activePackTrailerBytes: 20,
+      activePackTrailerRequests: 1,
+      metadataRequests: 2,
+    });
+    expect(await validateStockReceivePreparedProof(bundledOperation, cached.processorResult)).toBe(
+      true
+    );
+
+    const grownOperationId = "direct-pack-stable-cache-next-catalog-operation";
+    const grownOutputPackKey = nativeReceiveOutputPackKey(prefix, grownOperationId, "c".repeat(64));
+    const grownInputKey = `${prefix}/native-receive/${grownOperationId}.request`;
+    const grownInput = await env.REPO_BUCKET.put(grownInputKey, pack, {
+      customMetadata: { sha256: inputRequestSha256 },
+    });
+    const grownOperation: NativeReceiveOperation = {
+      ...bundledOperation,
+      id: grownOperationId,
+      fingerprint: "c".repeat(64),
+      inputPackKey: grownInputKey,
+      inputEtag: grownInput.etag,
+      activeCatalog: [
+        {
+          ...catalog,
+          packKey: bundledOutputPackKey,
+          seqLo: catalog.seqHi + 1,
+          seqHi: catalog.seqHi + 1,
+          objectCount: bundled.processorResult.objectCount!,
+          packBytes: bundled.processorResult.packBytes,
+          idxBytes: bundled.processorResult.idxBytes,
+        },
+        catalog,
+      ],
+      outputPackKey: grownOutputPackKey,
+      outputIdxKey: packIndexKey(grownOutputPackKey),
+      outputRefsKey: packRefsKey(grownOutputPackKey),
+    };
+    const grown = await executeStockReceiveWorkerDataPlane({
+      env: bundleEnv,
+      operation: grownOperation,
+      inputPackBytes: pack,
+      cacheCtx: {
+        req: new Request("https://example.invalid/stock-direct-pack-stable-cache-next-catalog"),
+        ctx: createExecutionContext(),
+        memo: {},
+      },
+      limiter: new SubrequestLimiter(40),
+      countSubrequest() {},
+      logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackStableCacheNextCatalogTest" }),
+    });
+    expect(grown.processorResult).toMatchObject({
+      activeMetadataBundle: undefined,
+      activePackTrailerBytes: 40,
+      activePackTrailerRequests: 2,
+    });
+    expect(await validateStockReceivePreparedProof(grownOperation, grown.processorResult)).toBe(
+      true
+    );
+    expect(stockPlannerTest.activeMetadataCacheState()).toMatchObject({
+      bytes: expect.any(Number),
+      maxBytes: 4 * 1024 * 1024,
+      keys: expect.arrayContaining([catalog.packKey, bundledOutputPackKey, grownOutputPackKey]),
+    });
+
+    const cachedPackObject = await env.REPO_BUCKET.get(catalog.packKey);
+    if (!cachedPackObject) throw new Error("expected cached source pack");
+    const cachedPackBytes = new Uint8Array(await cachedPackObject.arrayBuffer());
+    const changedPackBytes = cachedPackBytes.slice();
+    changedPackBytes[changedPackBytes.byteLength - 1]! ^= 0x01;
+    await env.REPO_BUCKET.put(catalog.packKey, changedPackBytes, {
+      customMetadata: cachedPackObject.customMetadata,
+    });
+    await expect(
+      executeStockReceiveWorkerDataPlane({
+        env: bundleEnv,
+        operation: bundledOperation,
+        inputPackBytes: pack,
+        cacheCtx: {
+          req: new Request("https://example.invalid/stock-direct-pack-stable-cache-mismatch"),
+          ctx: createExecutionContext(),
+          memo: {},
+        },
+        limiter: new SubrequestLimiter(40),
+        countSubrequest() {},
+        logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackStableCacheMismatchTest" }),
+      })
+    ).rejects.toThrow("stock-plan:cached-pack-trailer-mismatch");
+    await env.REPO_BUCKET.put(catalog.packKey, cachedPackBytes, {
+      customMetadata: cachedPackObject.customMetadata,
+    });
+
+    stockPlannerTest.setActiveMetadataCacheMaxBytes(0);
+    expect(stockPlannerTest.activeMetadataCacheState()).toEqual({
+      bytes: 0,
+      maxBytes: 0,
+      keys: [],
+    });
+
+    stockPlannerTest.reset();
     const currentCatalogBundleKey = await catalogMetadataBundleKey([catalog]);
     await env.REPO_BUCKET.put(currentCatalogBundleKey, new TextEncoder().encode("not-a-bundle"), {
       customMetadata: { sha256: await sha256(new TextEncoder().encode("not-a-bundle")) },
