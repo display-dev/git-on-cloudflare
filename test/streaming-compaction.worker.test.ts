@@ -30,6 +30,9 @@ import { indexTestPack } from "./util/test-indexer";
 import { decodeReportStatus, promoteToStreaming } from "./util/streaming-helpers";
 import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 import { createQueueSendResponse } from "./util/queue";
+import { compactionDeleteRetryDelaySeconds } from "@/worker/tasks/compaction";
+import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db";
+import type { CompactionDeleteQueueMessage } from "@/worker/tasks/types";
 import {
   compactOnce,
   deleteSupersededOnce,
@@ -56,7 +59,33 @@ async function getDebugState(
   return (await response.json()) as DebugState;
 }
 
+function isCompactionDeleteMessage(message: unknown): message is CompactionDeleteQueueMessage {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    "kind" in message &&
+    message.kind === "compaction-delete"
+  );
+}
+
 describe("streaming compaction", () => {
+  it("deterministically spreads reader-fenced cleanup retries", () => {
+    const body = {
+      supersededAtGeneration: 42,
+      packKeys: ["repos/repo/objects/pack/pack-a.pack"],
+    };
+    const first = compactionDeleteRetryDelaySeconds(20, body);
+    expect(first).toBe(compactionDeleteRetryDelaySeconds(20, body));
+    expect(first).toBeGreaterThanOrEqual(21);
+    expect(first).toBeLessThanOrEqual(35);
+    expect(
+      compactionDeleteRetryDelaySeconds(20, {
+        supersededAtGeneration: 43,
+        packKeys: body.packKeys,
+      })
+    ).not.toBe(first);
+  });
+
   it("defers superseded artifact deletion while an older native generation reader is active", async () => {
     const repoId = `o/${uniqueRepoId("native-reader-fence")}`;
     await setupRepoForTests(env, "o", repoId.slice(2));
@@ -254,6 +283,185 @@ describe("streaming compaction", () => {
       });
     } finally {
       sendSpy.mockRestore();
+    }
+  });
+
+  it("schedules only newly superseded packs and retains a no-work recovery sweep", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-compaction-cleanup-fanout");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const seeded = await seedPackFirstRepo(repoId);
+    const stub = getRepoStub(env, repoId);
+    const sendSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    try {
+      await promoteToStreaming(owner, repo);
+      const firstPush = await pushOverflowingStreamingHistory({
+        owner,
+        repo,
+        repoId,
+        startingCommitOid: seeded.nextCommit.oid,
+        updates: 4,
+      });
+      expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
+      const previouslySuperseded = await stub.listSupersededGcPacks();
+      expect(previouslySuperseded).toHaveLength(4);
+
+      await pushOverflowingStreamingHistory({
+        owner,
+        repo,
+        repoId,
+        startingCommitOid: firstPush.currentCommitOid,
+        updates: 8,
+      });
+      sendSpy.mockClear();
+      expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
+      const allSuperseded = await stub.listSupersededGcPacks();
+      const previousKeys = new Set(previouslySuperseded.map((row) => row.packKey));
+      const newlySuperseded = allSuperseded
+        .map((row) => row.packKey)
+        .filter((packKey) => !previousKeys.has(packKey));
+      expect(newlySuperseded).toHaveLength(4);
+
+      const cleanupMessages = sendSpy.mock.calls
+        .map(([message]) => message)
+        .filter(isCompactionDeleteMessage);
+      expect(cleanupMessages).toHaveLength(1);
+      expect(cleanupMessages[0]).toMatchObject({
+        packKeys: expect.arrayContaining(newlySuperseded),
+        removeCatalogRows: true,
+      });
+      expect(cleanupMessages[0]!.packKeys).toHaveLength(newlySuperseded.length);
+
+      sendSpy.mockClear();
+      expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
+      const supersededAfterFinalCompaction = await stub.listSupersededGcPacks();
+      expect(sendSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "compaction-delete",
+          packKeys: expect.arrayContaining(
+            supersededAfterFinalCompaction.map((row) => row.packKey)
+          ),
+          removeCatalogRows: true,
+        }),
+        { delaySeconds: 60 }
+      );
+
+      sendSpy.mockClear();
+      expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
+      expect(sendSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "compaction-delete",
+          packKeys: expect.arrayContaining(
+            supersededAfterFinalCompaction.map((row) => row.packKey)
+          ),
+          removeCatalogRows: true,
+        }),
+        { delaySeconds: 60 }
+      );
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("pages a no-work recovery backlog beyond one cleanup message", async () => {
+    const repoId = `o/${uniqueRepoId("stream-compaction-cleanup-pages")}`;
+    await setupRepoForTests(env, "o", repoId.slice(2));
+    const stub = getRepoStub(env, repoId);
+    const prefix = doPrefix(stub.id.toString());
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const db = getDb(state.storage);
+        for (let index = 0; index < 251; index++) {
+          await upsertPackCatalogRow(db, {
+            packKey: `${prefix}/objects/pack/backlog-${String(index).padStart(3, "0")}.pack`,
+            kind: "receive",
+            state: "superseded",
+            tier: 0,
+            seqLo: index + 1,
+            seqHi: index + 1,
+            objectCount: 1,
+            packBytes: 1,
+            idxBytes: 1,
+            createdAt: index + 1,
+            supersededBy: "recovery",
+          });
+        }
+      }
+    );
+
+    const firstPage = await stub.listSupersededGcPacks(undefined, 250);
+    expect(firstPage).toHaveLength(250);
+    const cursorRow = firstPage.at(-1)!;
+    expect(await stub.removeSupersededGcPacks(firstPage.map((row) => row.packKey))).toMatchObject({
+      status: "removed",
+    });
+    const secondPageAfterRemoval = await stub.listSupersededGcPacks(
+      { seqHi: cursorRow.seqHi, tier: cursorRow.tier, packKey: cursorRow.packKey },
+      250
+    );
+    expect(secondPageAfterRemoval).toHaveLength(1);
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        const db = getDb(state.storage);
+        for (const row of firstPage) await upsertPackCatalogRow(db, row);
+      }
+    );
+
+    const sendSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    try {
+      expect(await compactOnce(repoId)).toEqual({ acked: true, retried: false });
+      const cleanupMessages = sendSpy.mock.calls
+        .map(([message]) => message)
+        .filter(
+          (message): message is CompactionDeleteQueueMessage =>
+            isCompactionDeleteMessage(message) && message.repoId === repoId
+        );
+      expect(cleanupMessages.map((message) => message.packKeys.length)).toEqual([250, 1]);
+      expect(new Set(cleanupMessages.flatMap((message) => message.packKeys)).size).toBe(251);
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("does not schedule a historical sweep for a duplicate while compaction is active", async () => {
+    const owner = "o";
+    const repo = uniqueRepoId("stream-compaction-cleanup-busy");
+    await setupRepoForTests(env, owner, repo);
+    const repoId = `${owner}/${repo}`;
+    const seeded = await seedPackFirstRepo(repoId);
+    const stub = getRepoStub(env, repoId);
+    const sendSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    let heldToken: string | undefined;
+    try {
+      await promoteToStreaming(owner, repo);
+      await pushOverflowingStreamingHistory({
+        owner,
+        repo,
+        repoId,
+        startingCommitOid: seeded.nextCommit.oid,
+        updates: 4,
+      });
+      const held = await stub.beginCompaction();
+      expect(held.ok).toBe(true);
+      if (!held.ok) throw new Error("expected compaction lease");
+      heldToken = held.lease.token;
+      sendSpy.mockClear();
+      expect(await compactOnce(repoId)).toEqual({ acked: false, retried: true });
+      expect(sendSpy.mock.calls.some(([message]) => isCompactionDeleteMessage(message))).toBe(
+        false
+      );
+    } finally {
+      sendSpy.mockRestore();
+      if (heldToken) await stub.abortCompaction(heldToken);
     }
   });
 

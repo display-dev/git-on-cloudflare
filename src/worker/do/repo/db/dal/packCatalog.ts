@@ -1,7 +1,7 @@
 import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import type { PackCatalogRow } from "../schema";
 
-import { desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import { packCatalog } from "../schema";
 import { SAFE_ROWS_1COL } from "./shared";
 
@@ -48,13 +48,29 @@ export async function listActivePackCatalog(
 
 export async function listSupersededPackCatalog(
   db: DrizzleSqliteDODatabase,
-  limit: number
+  limit: number,
+  cursor?: { seqHi: number; tier: number; packKey: string }
 ): Promise<PackCatalogRow[]> {
+  const afterCursor = cursor
+    ? or(
+        lt(packCatalog.seqHi, cursor.seqHi),
+        and(eq(packCatalog.seqHi, cursor.seqHi), lt(packCatalog.tier, cursor.tier)),
+        and(
+          eq(packCatalog.seqHi, cursor.seqHi),
+          eq(packCatalog.tier, cursor.tier),
+          lt(packCatalog.packKey, cursor.packKey)
+        )
+      )
+    : undefined;
   return await db
     .select()
     .from(packCatalog)
-    .where(eq(packCatalog.state, "superseded"))
-    .orderBy(desc(packCatalog.seqHi), desc(packCatalog.tier))
+    .where(
+      afterCursor
+        ? and(eq(packCatalog.state, "superseded"), afterCursor)
+        : eq(packCatalog.state, "superseded")
+    )
+    .orderBy(desc(packCatalog.seqHi), desc(packCatalog.tier), desc(packCatalog.packKey))
     .limit(limit);
 }
 

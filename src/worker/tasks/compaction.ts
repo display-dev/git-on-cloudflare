@@ -37,6 +37,22 @@ import {
 const COMPACTION_SUBREQUEST_BUDGET = 7_500;
 const COMPACTION_RETRY_DELAY_SECONDS = 30;
 const COMPACTION_CONFLICT_RETRY_DELAY_SECONDS = 10;
+const COMPACTION_DELETE_RETRY_SPREAD_SECONDS = 15;
+const SUPERSEDED_CLEANUP_PAGE_SIZE = 250;
+
+export function compactionDeleteRetryDelaySeconds(
+  readerRetryAfterSeconds: number | undefined,
+  body: Pick<CompactionDeleteQueueMessage, "packKeys" | "supersededAtGeneration">
+): number {
+  let hash = body.supersededAtGeneration ?? 0;
+  for (const packKey of body.packKeys) {
+    for (let index = 0; index < packKey.length; index++) {
+      hash = Math.imul(hash ^ packKey.charCodeAt(index), 16_777_619) >>> 0;
+    }
+  }
+  const spread = (hash % COMPACTION_DELETE_RETRY_SPREAD_SECONDS) + 1;
+  return Math.max(1, readerRetryAfterSeconds ?? COMPACTION_RETRY_DELAY_SECONDS) + spread;
+}
 
 function countCompactionSubrequest(cacheCtx: CacheContext, log: Logger, op: string, n = 1): void {
   logSoftBudgetExhausted({
@@ -114,35 +130,55 @@ async function scheduleSupersededPackCleanup(args: {
   limiter: SubrequestLimiter;
   cacheCtx: CacheContext;
   log: Logger;
+  packKeys?: string[];
+  supersededAtGeneration?: number;
 }): Promise<void> {
-  countCompactionSubrequest(args.cacheCtx, args.log, "do:list-superseded-packs");
-  const superseded = await args.limiter.run("do:list-superseded-packs", () =>
-    args.stub.listSupersededGcPacks()
-  );
-  if (superseded.length === 0) return;
-  const publishedGeneration = await readPublishedRepositoryGeneration({
-    env: args.env,
-    doId: args.doId,
-    limiter: args.limiter,
-    countSubrequest: (op, n = 1) => countCompactionSubrequest(args.cacheCtx, args.log, op, n),
-  });
+  const packKeyPages: string[][] = [];
+  if (args.packKeys) {
+    if (args.packKeys.length === 0) return;
+    packKeyPages.push(args.packKeys);
+  } else {
+    let cursor: { seqHi: number; tier: number; packKey: string } | undefined;
+    for (;;) {
+      countCompactionSubrequest(args.cacheCtx, args.log, "do:list-superseded-packs");
+      const superseded = await args.limiter.run("do:list-superseded-packs", () =>
+        args.stub.listSupersededGcPacks(cursor, SUPERSEDED_CLEANUP_PAGE_SIZE)
+      );
+      if (superseded.length === 0) break;
+      packKeyPages.push(superseded.map((row) => row.packKey));
+      if (superseded.length < SUPERSEDED_CLEANUP_PAGE_SIZE) break;
+      const last = superseded.at(-1)!;
+      cursor = { seqHi: last.seqHi, tier: last.tier, packKey: last.packKey };
+    }
+    if (packKeyPages.length === 0) return;
+  }
+  const publishedGeneration =
+    args.supersededAtGeneration ??
+    (await readPublishedRepositoryGeneration({
+      env: args.env,
+      doId: args.doId,
+      limiter: args.limiter,
+      countSubrequest: (op, n = 1) => countCompactionSubrequest(args.cacheCtx, args.log, op, n),
+    }));
   if (publishedGeneration === null) {
     throw new Error("superseded cleanup is waiting for a published repository generation");
   }
-  countCompactionSubrequest(args.cacheCtx, args.log, "queue:compaction-delete");
-  await args.limiter.run("queue:compaction-delete", () =>
-    args.env.REPO_TASKS_QUEUE.send(
-      {
-        kind: "compaction-delete",
-        doId: args.doId,
-        repoId: args.repoId,
-        packKeys: superseded.map((row) => row.packKey),
-        supersededAtGeneration: publishedGeneration,
-        removeCatalogRows: true,
-      },
-      { delaySeconds: SUPERSEDED_PACK_DELETE_DELAY_SECONDS }
-    )
-  );
+  for (const packKeys of packKeyPages) {
+    countCompactionSubrequest(args.cacheCtx, args.log, "queue:compaction-delete");
+    await args.limiter.run("queue:compaction-delete", () =>
+      args.env.REPO_TASKS_QUEUE.send(
+        {
+          kind: "compaction-delete",
+          doId: args.doId,
+          repoId: args.repoId,
+          packKeys,
+          supersededAtGeneration: publishedGeneration,
+          removeCatalogRows: true,
+        },
+        { delaySeconds: SUPERSEDED_PACK_DELETE_DELAY_SECONDS }
+      )
+    );
+  }
 }
 
 async function cleanupStagedCompaction(args: {
@@ -248,21 +284,15 @@ export async function handleCompactionMessage(
       message.ack();
       return;
     }
-    await scheduleSupersededPackCleanup({
-      env,
-      doId: body.doId,
-      repoId: body.repoId,
-      stub,
-      limiter,
-      cacheCtx,
-      log,
-    });
     countCompactionSubrequest(cacheCtx, log, "do:begin-compaction");
     const begin = await limiter.run("do:begin-compaction", async () => {
       return await stub.beginCompaction();
     });
     if (!begin.ok) {
-      if (begin.status === "busy" && begin.reason === "receive-active") {
+      if (
+        begin.status === "busy" &&
+        (begin.reason === "receive-active" || begin.reason === "compact-active")
+      ) {
         log.info("compaction:busy-retry", { reason: begin.reason });
         retryQueueMessage(message, COMPACTION_CONFLICT_RETRY_DELAY_SECONDS);
         return;
@@ -272,6 +302,17 @@ export async function handleCompactionMessage(
         status: begin.status,
         reason: "reason" in begin ? begin.reason : undefined,
       });
+      if (begin.status === "no_work") {
+        await scheduleSupersededPackCleanup({
+          env,
+          doId: body.doId,
+          repoId: body.repoId,
+          stub,
+          limiter,
+          cacheCtx,
+          log,
+        });
+      }
       message.ack();
       return;
     }
@@ -474,15 +515,30 @@ export async function handleCompactionMessage(
       message.ack();
       return;
     }
-    await scheduleSupersededPackCleanup({
-      env,
-      doId: body.doId,
-      repoId: body.repoId,
-      stub,
-      limiter,
-      cacheCtx,
-      log,
-    });
+    await scheduleSupersededPackCleanup(
+      commit.shouldRequeue
+        ? {
+            env,
+            doId: body.doId,
+            repoId: body.repoId,
+            stub,
+            limiter,
+            cacheCtx,
+            log,
+            packKeys: commit.supersededPackKeys,
+            supersededAtGeneration: commit.packCatalogVersion,
+          }
+        : {
+            env,
+            doId: body.doId,
+            repoId: body.repoId,
+            stub,
+            limiter,
+            cacheCtx,
+            log,
+            supersededAtGeneration: commit.packCatalogVersion,
+          }
+    );
 
     log.info("compaction:done", {
       targetPackKey: commit.targetPackKey,
@@ -568,7 +624,10 @@ export async function handleCompactionDeleteMessage(
         supersededAtGeneration: deletionGeneration,
         retryAfterSeconds: readerFence.retryAfterSeconds,
       });
-      retryQueueMessage(message, readerFence.retryAfterSeconds ?? 30);
+      retryQueueMessage(
+        message,
+        compactionDeleteRetryDelaySeconds(readerFence.retryAfterSeconds, body)
+      );
       return;
     }
     let confirmedPackKeys = body.packKeys;
@@ -585,6 +644,12 @@ export async function handleCompactionDeleteMessage(
         return;
       }
       confirmedPackKeys = claim.packKeys;
+    }
+
+    if (confirmedPackKeys.length === 0) {
+      log.info("compaction:delete-complete", { packCount: 0, artifactCount: 0 });
+      message.ack();
+      return;
     }
 
     const keysToDelete: string[] = [];

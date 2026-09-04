@@ -88,9 +88,11 @@ export type ClaimSupersededGcPacksResult =
   | { status: "retry"; reason: "repository-deleting" | "pack-became-active" };
 
 export async function listSupersededGcPacksState(
-  ctx: DurableObjectState
+  ctx: DurableObjectState,
+  cursor?: { seqHi: number; tier: number; packKey: string },
+  limit = 250
 ): Promise<PackCatalogRow[]> {
-  return await listSupersededPackCatalog(getDb(ctx.storage), 250);
+  return await listSupersededPackCatalog(getDb(ctx.storage), limit, cursor);
 }
 
 export async function removeSupersededGcPacksState(args: {

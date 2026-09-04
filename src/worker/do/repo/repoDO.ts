@@ -793,10 +793,13 @@ export class RepoDurableObject extends DurableObject {
     return await completeReachabilityGcPendingCleanupState({ ctx: this.ctx, ...args });
   }
 
-  public async listSupersededGcPacks(): Promise<PackCatalogRow[]> {
+  public async listSupersededGcPacks(
+    cursor?: { seqHi: number; tier: number; packKey: string },
+    limit = 250
+  ): Promise<PackCatalogRow[]> {
     await this.ensureAccessAndAlarm();
-    const rows = await listSupersededGcPacksState(this.ctx);
-    this.logger.debug("reachability-gc:list-superseded", { packCount: rows.length });
+    const rows = await listSupersededGcPacksState(this.ctx, cursor, limit);
+    this.logger.debug("reachability-gc:list-superseded", { packCount: rows.length, cursor, limit });
     return rows;
   }
 
