@@ -1,11 +1,11 @@
 /**
  * Streaming pack scanner (Pass 1).
  *
- * Reads a .pack file from R2 in sequential chunks, parses every entry header,
- * inflates compressed data to determine span boundaries, computes OIDs for
- * non-delta objects, and records metadata for delta objects. The entire pack is
- * never buffered in memory; at most one object's inflated payload is held at a
- * time before being discarded.
+ * Reads a .pack file from R2 or supplied authenticated bytes in sequential
+ * chunks, parses every entry header, inflates compressed data to determine span
+ * boundaries, computes OIDs for non-delta objects, and records metadata for
+ * delta objects. The scanner does not make another whole-pack copy; at most one
+ * object's inflated payload is held at a time before being discarded.
  */
 
 import { bytesToHex } from "@/worker/common/hex";
@@ -194,7 +194,7 @@ function validatePackObjectCount(packSize: number, objectCount: number): void {
 }
 
 // ---------------------------------------------------------------------------
-// Buffered reader – manages a sliding window over sequential R2 range reads
+// Buffered reader – manages a sliding window over R2 ranges or supplied bytes
 // ---------------------------------------------------------------------------
 
 class BufferedPackReader {
@@ -207,6 +207,7 @@ class BufferedPackReader {
   private log: IndexerOptions["log"];
   private signal?: AbortSignal;
   private onRead?: IndexerOptions["onRead"];
+  private packData?: Uint8Array;
 
   /** Current in-memory buffer. */
   buf: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
@@ -225,6 +226,7 @@ class BufferedPackReader {
     this.log = opts.log;
     this.signal = opts.signal;
     this.onRead = opts.onRead;
+    this.packData = opts.packData;
   }
 
   /** Absolute offset of the current read position in the pack. */
@@ -239,11 +241,15 @@ class BufferedPackReader {
 
   /**
    * Ensure the buffer has at least `minBytes` available from the current
-   * position. Reads a new chunk from R2 if necessary, concatenating with
-   * any leftover bytes from the current buffer.
+   * position. Reads a new chunk from R2 or the supplied pack if necessary,
+   * concatenating with any leftover bytes from the current buffer.
    */
   async ensure(minBytes: number): Promise<void> {
     while (this.remaining < minBytes) {
+      if (this.signal?.aborted) {
+        this.log.debug("scan:aborted", { stage: "reader:ensure" });
+        throw new Error("scan: aborted during reader:ensure");
+      }
       // `buf` always represents one contiguous window: unread bytes from the
       // previous chunk followed by freshly fetched bytes. Reading from
       // `bufAbsStart + buf.length` therefore continues exactly where the
@@ -253,15 +259,17 @@ class BufferedPackReader {
       if (bytesLeft <= 0) return;
       const readLen = Math.min(this.chunkSize, bytesLeft);
 
-      const chunk = await readPackRange(this.env, this.packKey, nextAbsOffset, readLen, {
-        limiter: this.limiter,
-        countSubrequest: this.countSub,
-        signal: this.signal,
-        exactLength: true,
-        log: this.log,
-        onRead: this.onRead,
-      });
-      if (!chunk) throw new Error("scan: unexpected R2 read failure");
+      const chunk = this.packData
+        ? this.packData.subarray(nextAbsOffset, nextAbsOffset + readLen)
+        : await readPackRange(this.env, this.packKey, nextAbsOffset, readLen, {
+            limiter: this.limiter,
+            countSubrequest: this.countSub,
+            signal: this.signal,
+            exactLength: true,
+            log: this.log,
+            onRead: this.onRead,
+          });
+      if (!chunk) throw new Error("scan: unexpected pack read failure");
 
       const leftover = this.buf.subarray(this.pos);
       if (leftover.length === 0) {
@@ -297,6 +305,9 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
   const { env, packKey, packSize, log } = opts;
   if (!Number.isSafeInteger(packSize) || packSize < MIN_PACK_BYTES) {
     throw new Error(`scan: pack size ${packSize} is smaller than the minimum valid pack size`);
+  }
+  if (opts.packData && opts.packData.byteLength !== packSize) {
+    throw new Error("scan: in-memory pack length mismatch");
   }
   const reader = new BufferedPackReader(opts);
   if (packSize - PACK_TRAILER_BYTES > MAX_PACK_OFFSET) {
@@ -480,14 +491,16 @@ export async function scanPack(opts: IndexerOptions): Promise<ScanResult> {
   const computedHash = new Uint8Array(await digestStream.digest);
 
   // Read the trailing 20 bytes.
-  const trailer = await readPackRange(env, packKey, trailingOffset, PACK_TRAILER_BYTES, {
-    limiter: opts.limiter,
-    countSubrequest: opts.countSubrequest,
-    signal: opts.signal,
-    exactLength: true,
-    log: opts.log,
-    onRead: opts.onRead,
-  });
+  const trailer = opts.packData
+    ? opts.packData.subarray(trailingOffset)
+    : await readPackRange(env, packKey, trailingOffset, PACK_TRAILER_BYTES, {
+        limiter: opts.limiter,
+        countSubrequest: opts.countSubrequest,
+        signal: opts.signal,
+        exactLength: true,
+        log: opts.log,
+        onRead: opts.onRead,
+      });
   if (!trailer || trailer.length !== PACK_TRAILER_BYTES) {
     throw new Error("scan: failed to read pack trailer checksum");
   }

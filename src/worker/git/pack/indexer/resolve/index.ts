@@ -2,8 +2,9 @@
  * Delta resolution and idx writing (Pass 2).
  *
  * Processes entries from the scan result in pack-offset order, resolves delta
- * chains, computes OIDs, and writes standard Git idx v2 plus logical-reference
- * sidecar artifacts to R2.
+ * chains, computes OIDs, and builds standard Git idx v2 plus logical-reference
+ * sidecar artifacts. Callers persist them to R2 by default or retain the
+ * validated bytes in memory for bounded direct processing.
  *
  * Processing in offset order naturally satisfies the OFS_DELTA dependency
  * ordering (bases are always at lower offsets). REF_DELTA entries are first
@@ -72,6 +73,9 @@ function emitResolveProgress(
 
 export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<ResolveResult> {
   const { env, packKey, packSize, log, scanResult, repoId, lruBudget } = opts;
+  if (opts.packData && opts.packData.byteLength !== packSize) {
+    throw new Error("resolve: in-memory pack length mismatch");
+  }
   const { table, objectCount, packChecksum } = scanResult;
   const initialResolvedCount = scanResult.resolvedCount;
   const unresolvedCount = objectCount - initialResolvedCount;
@@ -111,7 +115,8 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
     opts.countSubrequest,
     log,
     opts.signal,
-    opts.onRead
+    opts.onRead,
+    opts.packData
   );
   const auxReader = new SequentialReader(
     env,
@@ -122,7 +127,8 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
     opts.countSubrequest,
     log,
     opts.signal,
-    opts.onRead
+    opts.onRead,
+    opts.packData
   );
 
   const isBase = new Uint8Array(objectCount);
@@ -762,12 +768,14 @@ async function writeAndParseIdx(
   opts.onProgress?.("Writing pack index\n");
   let idxBytes = 0;
   let idxView = opts.existingIdxView;
+  let idxData: Uint8Array | undefined;
 
   if (opts.writeIdx !== false) {
     const idxBuf = await writeIdxV2(table, objectCount, packChecksum);
+    idxData = idxBuf;
     idxBytes = idxBuf.byteLength;
     throwIfAborted(opts.signal, opts.log, "resolve:write-idx");
-    await putPackIdx(opts, idxBuf);
+    if (opts.persistArtifacts !== false) await putPackIdx(opts, idxBuf);
     idxView = parseIdxView(packKey, idxBuf, packSize);
     if (!idxView) throw new Error("resolve: failed to parse generated idx");
   }
@@ -791,12 +799,20 @@ async function writeAndParseIdx(
     idxChecksum: idxView.idxChecksum,
   });
   throwIfAborted(opts.signal, opts.log, "resolve:write-pack-refs");
-  await putPackRefs(opts, refsResult.bytes);
+  if (opts.persistArtifacts !== false) await putPackRefs(opts, refsResult.bytes);
 
   opts.log.info("resolve:done", {
     objectCount,
     idxBytes,
     refIndexBytes: refsResult.refIndexBytes,
+    persisted: opts.persistArtifacts !== false,
   });
-  return { objectCount, idxBytes, refIndexBytes: refsResult.refIndexBytes, idxView };
+  return {
+    objectCount,
+    idxBytes,
+    refIndexBytes: refsResult.refIndexBytes,
+    idxView,
+    idxData: opts.persistArtifacts === false ? idxData : undefined,
+    refIndexData: opts.persistArtifacts === false ? refsResult.bytes : undefined,
+  };
 }

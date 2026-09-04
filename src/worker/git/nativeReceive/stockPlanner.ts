@@ -1581,15 +1581,17 @@ async function planStockReceiveImpl(
   }
 
   const tempSha256 = await digestHex("SHA-256", inputPack);
-  const temporaryPut = await putImmutableBytes({
-    env: args.env,
-    key: keys.temporaryPackKey,
-    bytes: inputPack,
-    sha256: tempSha256,
-    limiter: args.limiter,
-    countSubrequest: args.countSubrequest,
-  });
-  if (temporaryPut.created) ownedImmutableKeys.push(keys.temporaryPackKey);
+  if (!directPackRequested) {
+    const temporaryPut = await putImmutableBytes({
+      env: args.env,
+      key: keys.temporaryPackKey,
+      bytes: inputPack,
+      sha256: tempSha256,
+      limiter: args.limiter,
+      countSubrequest: args.countSubrequest,
+    });
+    if (temporaryPut.created) ownedImmutableKeys.push(keys.temporaryPackKey);
+  }
   const inputStagingCompleteAt = Date.now();
 
   const thinDeltaBaseOids = new Set<string>();
@@ -1676,6 +1678,7 @@ async function planStockReceiveImpl(
   let incomingRefsBytes: Uint8Array | undefined;
   let incomingObjectCount = 0;
   let incomingIdxBytes = 0;
+  let incomingIdxData: Uint8Array | undefined;
   let directObjectCaptureEligible = false;
   let resolvedIncomingObjectCount = 0;
   const resolvedIncomingObjects: Array<{ type: GitObjectType; payload: Uint8Array } | undefined> =
@@ -1695,6 +1698,7 @@ async function planStockReceiveImpl(
       log,
       signal: args.signal,
       maxObjectBytes: MAX_OBJECT_BYTES,
+      packData: directPackRequested ? inputPack : undefined,
       onRead: noteInputRead,
     });
     let resolvedPayloadBytes = 0;
@@ -1722,6 +1726,8 @@ async function planStockReceiveImpl(
       cacheCtx: args.cacheCtx,
       repoId: args.repoId,
       lruBudget: MAX_PREREQUISITE_PAYLOAD_BYTES,
+      packData: directPackRequested ? inputPack : undefined,
+      persistArtifacts: !directPackRequested,
       resolveExternalBase: async (requiredOid) => {
         thinDeltaBaseOids.add(requiredOid);
         try {
@@ -1750,20 +1756,26 @@ async function planStockReceiveImpl(
     });
     incomingIdx = resolve.idxView;
     incomingIdxBytes = resolve.idxBytes;
+    incomingIdxData = resolve.idxData;
     incomingObjectCount = resolve.objectCount;
-    const generatedRefs = await getBoundedObject({
-      env: args.env,
-      key: packRefsKey(keys.temporaryPackKey),
-      maximumBytes: MAX_METADATA_BYTES,
-      expectedBytes: resolve.refIndexBytes,
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-      counters,
-    });
-    const parsed = parsePackRefView(keys.temporaryPackKey, generatedRefs.bytes, incomingIdx);
+    const generatedRefsBytes = directPackRequested
+      ? resolve.refIndexData
+      : (
+          await getBoundedObject({
+            env: args.env,
+            key: packRefsKey(keys.temporaryPackKey),
+            maximumBytes: MAX_METADATA_BYTES,
+            expectedBytes: resolve.refIndexBytes,
+            limiter: args.limiter,
+            countSubrequest: args.countSubrequest,
+            counters,
+          })
+        ).bytes;
+    if (!generatedRefsBytes) throw new Error("stock-plan:generated-pref-missing");
+    const parsed = parsePackRefView(keys.temporaryPackKey, generatedRefsBytes, incomingIdx);
     if (parsed.type !== "Ready") throw new Error("stock-plan:generated-pref-invalid");
     incomingRefs = parsed.view;
-    incomingRefsBytes = generatedRefs.bytes;
+    incomingRefsBytes = generatedRefsBytes;
   } catch (error) {
     throwWrongRangePlannerFailure({
       operationId: args.operationId,
@@ -1845,16 +1857,10 @@ async function planStockReceiveImpl(
       ranges: plannedRanges,
     });
     const physicalPlanCompleteAt = Date.now();
-    const inputIdxObject = await getBoundedObject({
-      env: args.env,
-      key: packIndexKey(keys.temporaryPackKey),
-      maximumBytes: MAX_METADATA_BYTES,
-      expectedBytes: incomingIdxBytes,
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-      counters,
-    });
-    const inputIdxBytes = inputIdxObject.bytes;
+    const inputIdxBytes = incomingIdxData;
+    if (!inputIdxBytes || inputIdxBytes.byteLength !== incomingIdxBytes) {
+      throw new Error("stock-plan:generated-idx-missing");
+    }
     const inputRefsBytes = incomingRefsBytes;
     if (!inputRefsBytes) throw new Error("stock-plan:generated-pref-missing");
     const inputIdxSha256 = await digestHex("SHA-256", inputIdxBytes);
@@ -2000,18 +2006,6 @@ async function planStockReceiveImpl(
     }
     const directOutputUploadMs = Date.now() - directOutputUploadStartedAt;
 
-    await deletePlannerKeys({
-      env: args.env,
-      keys: [
-        keys.temporaryPackKey,
-        packIndexKey(keys.temporaryPackKey),
-        packRefsKey(keys.temporaryPackKey),
-      ],
-      limiter: args.limiter,
-      countSubrequest: args.countSubrequest,
-    });
-    const temporaryOwnedIndex = ownedImmutableKeys.indexOf(keys.temporaryPackKey);
-    if (temporaryOwnedIndex >= 0) ownedImmutableKeys.splice(temporaryOwnedIndex, 1);
     return {
       executionMode: "direct-pack",
       directPackKey: args.outputPackKey,
@@ -2259,16 +2253,18 @@ async function planStockReceiveImpl(
   });
   if (closureManifestPut.created) ownedImmutableKeys.push(keys.closureManifestKey);
 
-  await deletePlannerKeys({
-    env: args.env,
-    keys: [
-      keys.temporaryPackKey,
-      packIndexKey(keys.temporaryPackKey),
-      packRefsKey(keys.temporaryPackKey),
-    ],
-    limiter: args.limiter,
-    countSubrequest: args.countSubrequest,
-  });
+  if (!directPackRequested) {
+    await deletePlannerKeys({
+      env: args.env,
+      keys: [
+        keys.temporaryPackKey,
+        packIndexKey(keys.temporaryPackKey),
+        packRefsKey(keys.temporaryPackKey),
+      ],
+      limiter: args.limiter,
+      countSubrequest: args.countSubrequest,
+    });
+  }
   const temporaryOwnedIndex = ownedImmutableKeys.indexOf(keys.temporaryPackKey);
   if (temporaryOwnedIndex >= 0) ownedImmutableKeys.splice(temporaryOwnedIndex, 1);
   log.info("stock-plan:complete", {
@@ -2348,13 +2344,19 @@ export async function planStockReceive(args: PlanStockReceiveArgs): Promise<Stoc
     return await planStockReceiveImpl(args, ownedImmutableKeys);
   } catch (error) {
     const keys = stockReceivePlanKeys(args.inputRequestKey, args.inputRequestSha256);
+    const directPackRequested =
+      (args.env as Env & { STOCK_RECEIVE_DIRECT_PACK?: string }).STOCK_RECEIVE_DIRECT_PACK === "1";
     try {
       await deletePlannerKeys({
         env: args.env,
         keys: [
-          keys.temporaryPackKey,
-          packIndexKey(keys.temporaryPackKey),
-          packRefsKey(keys.temporaryPackKey),
+          ...(directPackRequested
+            ? []
+            : [
+                keys.temporaryPackKey,
+                packIndexKey(keys.temporaryPackKey),
+                packRefsKey(keys.temporaryPackKey),
+              ]),
           ...ownedImmutableKeys.filter((key) => key !== keys.temporaryPackKey),
         ],
         limiter: args.limiter,

@@ -128,6 +128,10 @@ export interface ResolveResult {
   idxBytes: number;
   refIndexBytes: number;
   idxView: IdxView;
+  /** Generated IDX bytes, returned only when artifact persistence is disabled. */
+  idxData?: Uint8Array | undefined;
+  /** Generated PREF bytes, returned only when artifact persistence is disabled. */
+  refIndexData?: Uint8Array | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +155,8 @@ export interface IndexerOptions {
   maxObjectBytes?: number;
   /** Successful R2 pack reads, for exact per-operation byte attribution. */
   onRead?: (read: { offset: number; length: number }) => void;
+  /** Already authenticated pack bytes for bounded in-memory qualification work. */
+  packData?: Uint8Array | undefined;
 }
 
 export interface ResolveOptions extends IndexerOptions {
@@ -169,6 +175,8 @@ export interface ResolveOptions extends IndexerOptions {
   writeIdx?: boolean;
   /** Existing idx view required when `writeIdx` is false. */
   existingIdxView?: IdxView;
+  /** Build and validate derived artifacts without persisting them beside the pack. */
+  persistArtifacts?: boolean | undefined;
   /** Bounded exact-range evidence for active-catalog objects needed by a thin pack. */
   onExternalBaseRange?: (
     requiredOid: string,

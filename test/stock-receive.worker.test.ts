@@ -1770,6 +1770,7 @@ describe("stock Smart HTTP receive spike", () => {
       attempts: 1,
       cleanupPending: false,
     } satisfies NativeReceiveOperation;
+    let directSubrequests = 0;
     const result = await executeStockReceiveWorkerDataPlane({
       env: { ...env, STOCK_RECEIVE_DIRECT_PACK: "1" } as Env,
       operation,
@@ -1779,7 +1780,9 @@ describe("stock Smart HTTP receive spike", () => {
         memo: {},
       },
       limiter: new SubrequestLimiter(40),
-      countSubrequest() {},
+      countSubrequest(_operation, n = 1) {
+        directSubrequests += n;
+      },
       logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackTest" }),
     });
 
@@ -1795,6 +1798,10 @@ describe("stock Smart HTTP receive spike", () => {
       outputRequests: 3,
       outputValidationRequests: 3,
     });
+    // This exact request count includes the bounded input/metadata reads plus
+    // publication and body/head verification of the three authoritative outputs.
+    // A temporary planning-pack PUT or its three cleanup deletes increases it.
+    expect(directSubrequests).toBe(14);
     expect(await validateStockReceivePreparedProof(operation, result.processorResult)).toBe(true);
     expect(
       new Uint8Array(await (await env.REPO_BUCKET.get(outputPackKey))!.arrayBuffer())
@@ -1948,6 +1955,7 @@ describe("stock Smart HTTP receive spike", () => {
         executionMode: "direct-pack",
         activePackWholeRequests: 0,
         activePackRangeRequests: 1,
+        inputRequests: 1,
         outputValidationRequests: 3,
         stockTiming: {
           planningPhases: {

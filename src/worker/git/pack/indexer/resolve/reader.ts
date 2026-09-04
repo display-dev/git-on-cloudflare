@@ -16,6 +16,7 @@ export class SequentialReader {
   private log: ResolveOptions["log"];
   private signal?: AbortSignal;
   private onRead?: ResolveOptions["onRead"];
+  private packData?: Uint8Array;
 
   constructor(
     env: Env,
@@ -26,7 +27,8 @@ export class SequentialReader {
     countSub: ResolveOptions["countSubrequest"],
     log: ResolveOptions["log"],
     signal?: AbortSignal,
-    onRead?: ResolveOptions["onRead"]
+    onRead?: ResolveOptions["onRead"],
+    packData?: Uint8Array
   ) {
     this.env = env;
     this.packKey = packKey;
@@ -37,6 +39,22 @@ export class SequentialReader {
     this.log = log;
     this.signal = signal;
     this.onRead = onRead;
+    this.packData = packData;
+  }
+
+  private async load(offset: number, length: number): Promise<Uint8Array | undefined> {
+    if (this.packData) {
+      const bytes = this.packData.subarray(offset, offset + length);
+      return bytes.byteLength === length ? bytes : undefined;
+    }
+    return await readPackRange(this.env, this.packKey, offset, length, {
+      limiter: this.limiter,
+      countSubrequest: this.countSub,
+      signal: this.signal,
+      exactLength: true,
+      log: this.log,
+      onRead: this.onRead,
+    });
   }
 
   throwIfAborted(stage: string): void {
@@ -56,17 +74,12 @@ export class SequentialReader {
       return this.buf.subarray(localStart, localStart + length);
     }
     if (length > this.chunkSize) {
-      const data = await readPackRange(this.env, this.packKey, offset, length, {
-        limiter: this.limiter,
-        countSubrequest: this.countSub,
-        signal: this.signal,
-        exactLength: true,
-        log: this.log,
-        onRead: this.onRead,
-      });
+      const data = await this.load(offset, length);
       if (!data) {
         this.throwIfAborted("reader:read-range");
-        throw new Error("resolve: R2 read failure");
+        throw new Error(
+          this.packData ? "resolve: in-memory pack read failure" : "resolve: R2 read failure"
+        );
       }
       return data;
     }
@@ -78,17 +91,12 @@ export class SequentialReader {
       return this.buf.subarray(localStart, localStart + length);
     }
 
-    const data = await readPackRange(this.env, this.packKey, offset, length, {
-      limiter: this.limiter,
-      countSubrequest: this.countSub,
-      signal: this.signal,
-      exactLength: true,
-      log: this.log,
-      onRead: this.onRead,
-    });
+    const data = await this.load(offset, length);
     if (!data) {
       this.throwIfAborted("reader:read-range");
-      throw new Error("resolve: R2 read failure");
+      throw new Error(
+        this.packData ? "resolve: in-memory pack read failure" : "resolve: R2 read failure"
+      );
     }
     return data;
   }
@@ -110,17 +118,12 @@ export class SequentialReader {
 
     const windowEnd = this.bufAbsStart + this.buf.length;
     if (offset < this.bufAbsStart || offset >= windowEnd) {
-      const data = await readPackRange(this.env, this.packKey, offset, Math.min(maxLength, 1), {
-        limiter: this.limiter,
-        countSubrequest: this.countSub,
-        signal: this.signal,
-        exactLength: true,
-        log: this.log,
-        onRead: this.onRead,
-      });
+      const data = await this.load(offset, Math.min(maxLength, 1));
       if (!data) {
         this.throwIfAborted("reader:read-window");
-        throw new Error("resolve: R2 read failure");
+        throw new Error(
+          this.packData ? "resolve: in-memory pack read failure" : "resolve: R2 read failure"
+        );
       }
       return data;
     }
@@ -136,17 +139,12 @@ export class SequentialReader {
     const bytesLeft = this.packSize - offset;
     if (bytesLeft <= 0) return;
     const readLen = Math.min(this.chunkSize, bytesLeft);
-    const chunk = await readPackRange(this.env, this.packKey, offset, readLen, {
-      limiter: this.limiter,
-      countSubrequest: this.countSub,
-      signal: this.signal,
-      exactLength: true,
-      log: this.log,
-      onRead: this.onRead,
-    });
+    const chunk = await this.load(offset, readLen);
     if (!chunk) {
       this.throwIfAborted("reader:preload");
-      throw new Error("resolve: R2 preload failure");
+      throw new Error(
+        this.packData ? "resolve: in-memory pack preload failure" : "resolve: R2 preload failure"
+      );
     }
     this.buf = chunk;
     this.bufAbsStart = offset;
