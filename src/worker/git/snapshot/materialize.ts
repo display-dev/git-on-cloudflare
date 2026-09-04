@@ -1,6 +1,7 @@
 import type { CacheContext } from "@/worker/cache";
 import { asBufferSource, bytesToHex, getRepoStub } from "@/worker/common";
 import type { Logger } from "@/worker/common/logger";
+import type { RepoDurableObject } from "@/worker/do";
 import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 import type { IngestionFile } from "@/worker/git/ingestion/pack";
 import type { Limiter } from "@/worker/git/operations/limits";
@@ -136,7 +137,88 @@ function count(cacheCtx: CacheContext, log: Logger, op: string): void {
   if (!countSubrequest(cacheCtx)) log.warn("snapshot:soft-budget-exhausted", { op });
 }
 
-export async function materializeAcceptedWrite(args: {
+type SnapshotFile = { path: string; bytes: Uint8Array; sha256: string };
+type RepoStub = DurableObjectStub<RepoDurableObject>;
+
+type PreparedSnapshotBundle = {
+  files: SnapshotManifest["files"];
+  bundleBytes: Uint8Array;
+  bundleSha256: string;
+};
+
+type SnapshotLease = {
+  env: Env;
+  fact: SnapshotMaterializationTarget;
+  limiter: Limiter;
+  log: Logger;
+  cacheCtx: CacheContext;
+  stub: RepoStub;
+  token: string;
+  root: string;
+  finished: boolean;
+};
+
+export type StagedSnapshotBundle = {
+  lease: SnapshotLease;
+  manifest: SnapshotManifest;
+};
+
+async function filesFromSource(source: { files: IngestionFile[] }): Promise<SnapshotFile[]> {
+  const files: SnapshotFile[] = [];
+  let totalBytes = 0;
+  let maxPathBytes = 0;
+  let maxSegments = 0;
+  const sourceFiles = [...source.files].sort((left, right) =>
+    compareSnapshotPaths(left.path, right.path)
+  );
+  for (const file of sourceFiles) {
+    validateSnapshotPath(file.path);
+    const pathBytes = new TextEncoder().encode(file.path).byteLength;
+    const pathSegments = file.path.split("/").length;
+    maxPathBytes = Math.max(maxPathBytes, pathBytes);
+    maxSegments = Math.max(maxSegments, pathSegments);
+    totalBytes += file.bytes.byteLength;
+    const observed: SnapshotLimitObservation = {
+      fileCount: files.length + 1,
+      totalBytes,
+      maxPathBytes,
+      maxSegments,
+    };
+    if (files.length >= MAX_FILES) {
+      throw new SnapshotLimitError("snapshot-file-count-limit", observed);
+    }
+    if (totalBytes > MAX_TOTAL_BYTES) {
+      throw new SnapshotLimitError("snapshot-total-bytes-limit", observed);
+    }
+    files.push({ path: file.path, bytes: file.bytes, sha256: await digest(file.bytes) });
+  }
+  return files;
+}
+
+async function prepareBundle(files: SnapshotFile[]): Promise<PreparedSnapshotBundle> {
+  let offset = 0;
+  const manifestFiles = files.map((file) => {
+    const entry = {
+      path: file.path,
+      bytes: file.bytes.byteLength,
+      sha256: file.sha256,
+      offset,
+    };
+    offset += file.bytes.byteLength;
+    return entry;
+  });
+  const bundleBytes = new Uint8Array(offset);
+  for (const [index, file] of files.entries()) {
+    bundleBytes.set(file.bytes, manifestFiles[index]!.offset);
+  }
+  return {
+    files: manifestFiles,
+    bundleBytes,
+    bundleSha256: await digest(bundleBytes),
+  };
+}
+
+async function beginSnapshotLease(args: {
   env: Env;
   repoId: string;
   fact: SnapshotMaterializationTarget;
@@ -144,8 +226,7 @@ export async function materializeAcceptedWrite(args: {
   ctx: ExecutionContext;
   limiter: Limiter;
   log: Logger;
-  source?: { treeSha: string; files: IngestionFile[] };
-}): Promise<SnapshotManifest | null> {
+}): Promise<SnapshotLease | null> {
   const prefix = configuredPrefix(args.env);
   if (!prefix) return null;
   const repositoryPrefix = snapshotRepositoryPrefix(args.env, args.fact.repositoryId);
@@ -168,23 +249,178 @@ export async function materializeAcceptedWrite(args: {
     });
     return null;
   }
+  return {
+    env: args.env,
+    fact: args.fact,
+    limiter: args.limiter,
+    log: args.log,
+    cacheCtx,
+    stub,
+    token: lease.token,
+    root: snapshotRoot(prefix, args.fact.repositoryId, args.fact.afterSha),
+    finished: false,
+  };
+}
+
+async function renewSnapshotLease(lease: SnapshotLease): Promise<void> {
+  count(lease.cacheCtx, lease.log, "do:renew-snapshot-materialization");
+  const renewed = await lease.limiter.run("do:renew-snapshot-materialization", () =>
+    lease.stub.renewSnapshotMaterialization(lease.token)
+  );
+  if (!renewed) throw new Error("Snapshot materialization lease is no longer active");
+}
+
+async function finishSnapshotLease(lease: SnapshotLease): Promise<void> {
+  if (lease.finished) return;
+  count(lease.cacheCtx, lease.log, "do:finish-snapshot-materialization");
+  const finished = await lease.limiter.run("do:finish-snapshot-materialization", () =>
+    lease.stub.finishSnapshotMaterialization(lease.token)
+  );
+  lease.finished = true;
+  if (!finished) {
+    lease.log.warn("snapshot:materialization-lease-missing", {
+      repositoryId: lease.fact.repositoryId,
+    });
+  }
+}
+
+async function finishSnapshotLeaseSafely(lease: SnapshotLease, reason: string): Promise<void> {
+  try {
+    await finishSnapshotLease(lease);
+  } catch (error) {
+    lease.log.warn("snapshot:materialization-finish-failed", {
+      repositoryId: lease.fact.repositoryId,
+      commitSha: lease.fact.afterSha,
+      reason,
+      error: String(error),
+    });
+  }
+}
+
+async function putSnapshotBundle(
+  lease: SnapshotLease,
+  prepared: PreparedSnapshotBundle
+): Promise<void> {
+  if (prepared.bundleBytes.byteLength === 0) return;
+  await renewSnapshotLease(lease);
+  count(lease.cacheCtx, lease.log, "r2:put-snapshot-bundle");
+  try {
+    await lease.limiter.run("r2:put-snapshot-bundle", () =>
+      lease.env.REPO_BUCKET.put(`${lease.root}/bundle.bin`, prepared.bundleBytes, {
+        httpMetadata: { contentType: "application/octet-stream" },
+        customMetadata: { sha256: prepared.bundleSha256 },
+      })
+    );
+  } catch (error) {
+    lease.log.warn("snapshot:bundle-write-failed", {
+      repositoryId: lease.fact.repositoryId,
+      commitSha: lease.fact.afterSha,
+      error: String(error),
+    });
+    throw error;
+  }
+}
+
+async function putSnapshotManifest(
+  lease: SnapshotLease,
+  manifest: SnapshotManifest
+): Promise<void> {
+  await renewSnapshotLease(lease);
+  count(lease.cacheCtx, lease.log, "r2:put-snapshot-manifest");
+  await lease.limiter.run("r2:put-snapshot-manifest", () =>
+    lease.env.REPO_BUCKET.put(`${lease.root}/manifest.json`, JSON.stringify(manifest), {
+      httpMetadata: { contentType: "application/json" },
+    })
+  );
+}
+
+export async function stageSnapshotBundle(args: {
+  env: Env;
+  repoId: string;
+  fact: SnapshotMaterializationTarget;
+  request: Request;
+  ctx: ExecutionContext;
+  limiter: Limiter;
+  log: Logger;
+  source: { treeSha: string; files: IngestionFile[] };
+}): Promise<StagedSnapshotBundle | null> {
+  const lease = await beginSnapshotLease(args);
+  if (!lease) return null;
+  try {
+    const files = await filesFromSource(args.source);
+    const prepared = await prepareBundle(files);
+    await putSnapshotBundle(lease, prepared);
+    return {
+      lease,
+      manifest: {
+        version: 1,
+        repositoryId: args.fact.repositoryId,
+        commitSha: args.fact.afterSha,
+        treeSha: args.source.treeSha,
+        files: prepared.files,
+        bundle: {
+          bytes: prepared.bundleBytes.byteLength,
+          sha256: prepared.bundleSha256,
+        },
+      },
+    };
+  } catch (error) {
+    await finishSnapshotLeaseSafely(lease, "staging-failed");
+    throw error;
+  }
+}
+
+export async function publishStagedSnapshot(
+  staged: StagedSnapshotBundle
+): Promise<SnapshotManifest> {
+  const { lease, manifest } = staged;
+  try {
+    await putSnapshotManifest(lease, manifest);
+  } catch (error) {
+    await finishSnapshotLeaseSafely(lease, "manifest-publication-failed");
+    throw error;
+  }
+  lease.log.info("snapshot:materialized", {
+    repositoryId: lease.fact.repositoryId,
+    commitSha: lease.fact.afterSha,
+    fileCount: manifest.files.length,
+    totalBytes: manifest.bundle?.bytes ?? 0,
+    sourceSurface: lease.fact.sourceSurface,
+    stagedBeforeCommit: true,
+  });
+  await finishSnapshotLeaseSafely(lease, "publication-complete");
+  return manifest;
+}
+
+export async function releaseStagedSnapshot(staged: StagedSnapshotBundle): Promise<void> {
+  // The final bundle key is content-addressed by the candidate commit. Keep an
+  // unpublished bundle on failure: deleting it can race a replay that has
+  // already overwritten the same key and published its manifest.
+  await finishSnapshotLease(staged.lease);
+}
+
+export async function materializeAcceptedWrite(args: {
+  env: Env;
+  repoId: string;
+  fact: SnapshotMaterializationTarget;
+  request: Request;
+  ctx: ExecutionContext;
+  limiter: Limiter;
+  log: Logger;
+  source?: { treeSha: string; files: IngestionFile[] };
+}): Promise<SnapshotManifest | null> {
+  const lease = await beginSnapshotLease(args);
+  if (!lease) return null;
 
   try {
-    const renewLease = async (): Promise<void> => {
-      count(cacheCtx, args.log, "do:renew-snapshot-materialization");
-      const renewed = await args.limiter.run("do:renew-snapshot-materialization", () =>
-        stub.renewSnapshotMaterialization(lease.token)
-      );
-      if (!renewed) throw new Error("Snapshot materialization lease is no longer active");
-    };
-    const commit = await readCommit(args.env, args.repoId, args.fact.afterSha, cacheCtx);
-    const files: Array<{ path: string; bytes: Uint8Array; sha256: string }> = [];
+    const commit = await readCommit(args.env, args.repoId, args.fact.afterSha, lease.cacheCtx);
+    let files: SnapshotFile[] = [];
     let totalBytes = 0;
     let maxPathBytes = 0;
     let maxSegments = 0;
 
     const visitTree = async (treeOid: string, basePath: string): Promise<void> => {
-      const entries = await readTree(args.env, args.repoId, treeOid, cacheCtx);
+      const entries = await readTree(args.env, args.repoId, treeOid, lease.cacheCtx);
       for (const entry of entries) {
         const path = joinTreePath(basePath, entry.name);
         const pathBytes = new TextEncoder().encode(path).byteLength;
@@ -211,7 +447,7 @@ export async function materializeAcceptedWrite(args: {
         if (isSymlinkMode(entry.mode) || !entry.mode.startsWith("100")) {
           throw new Error("Snapshot contains an unsupported Git entry");
         }
-        const blob = await readBlob(args.env, args.repoId, entry.oid, cacheCtx);
+        const blob = await readBlob(args.env, args.repoId, entry.oid, lease.cacheCtx);
         if (blob.type !== "blob" || !blob.content) throw new Error("Snapshot blob is unavailable");
         totalBytes += blob.content.byteLength;
         if (files.length >= MAX_FILES) {
@@ -230,84 +466,22 @@ export async function materializeAcceptedWrite(args: {
       if (commit.tree !== args.source.treeSha) {
         throw new Error("Snapshot source does not match the committed tree");
       }
-      const sourceFiles = [...args.source.files].sort((left, right) =>
-        compareSnapshotPaths(left.path, right.path)
-      );
-      for (const file of sourceFiles) {
-        validateSnapshotPath(file.path);
-        const pathBytes = new TextEncoder().encode(file.path).byteLength;
-        const pathSegments = file.path.split("/").length;
-        maxPathBytes = Math.max(maxPathBytes, pathBytes);
-        maxSegments = Math.max(maxSegments, pathSegments);
-        totalBytes += file.bytes.byteLength;
-        const observed: SnapshotLimitObservation = {
-          fileCount: files.length + 1,
-          totalBytes,
-          maxPathBytes,
-          maxSegments,
-        };
-        if (files.length >= MAX_FILES) {
-          throw new SnapshotLimitError("snapshot-file-count-limit", observed);
-        }
-        if (totalBytes > MAX_TOTAL_BYTES) {
-          throw new SnapshotLimitError("snapshot-total-bytes-limit", observed);
-        }
-        files.push({ path: file.path, bytes: file.bytes, sha256: await digest(file.bytes) });
-      }
+      files = await filesFromSource(args.source);
+      totalBytes = files.reduce((sum, file) => sum + file.bytes.byteLength, 0);
     } else {
       await visitTree(commit.tree, "");
     }
-    const root = snapshotRoot(prefix, args.fact.repositoryId, args.fact.afterSha);
-    let offset = 0;
-    const manifestFiles = files.map((file) => {
-      const entry = {
-        path: file.path,
-        bytes: file.bytes.byteLength,
-        sha256: file.sha256,
-        offset,
-      };
-      offset += file.bytes.byteLength;
-      return entry;
-    });
-    const bundleBytes = new Uint8Array(totalBytes);
-    for (const [index, file] of files.entries()) {
-      bundleBytes.set(file.bytes, manifestFiles[index]!.offset);
-    }
-    const bundleSha256 = await digest(bundleBytes);
-    if (bundleBytes.byteLength > 0) {
-      await renewLease();
-      count(cacheCtx, args.log, "r2:put-snapshot-bundle");
-      try {
-        await args.limiter.run("r2:put-snapshot-bundle", () =>
-          args.env.REPO_BUCKET.put(`${root}/bundle.bin`, bundleBytes, {
-            httpMetadata: { contentType: "application/octet-stream" },
-            customMetadata: { sha256: bundleSha256 },
-          })
-        );
-      } catch (error) {
-        args.log.warn("snapshot:bundle-write-failed", {
-          repositoryId: args.fact.repositoryId,
-          commitSha: args.fact.afterSha,
-          error: String(error),
-        });
-        throw error;
-      }
-    }
+    const prepared = await prepareBundle(files);
+    await putSnapshotBundle(lease, prepared);
     const manifest: SnapshotManifest = {
       version: 1,
       repositoryId: args.fact.repositoryId,
       commitSha: args.fact.afterSha,
       treeSha: commit.tree,
-      files: manifestFiles,
-      bundle: { bytes: bundleBytes.byteLength, sha256: bundleSha256 },
+      files: prepared.files,
+      bundle: { bytes: prepared.bundleBytes.byteLength, sha256: prepared.bundleSha256 },
     };
-    await renewLease();
-    count(cacheCtx, args.log, "r2:put-snapshot-manifest");
-    await args.limiter.run("r2:put-snapshot-manifest", () =>
-      args.env.REPO_BUCKET.put(`${root}/manifest.json`, JSON.stringify(manifest), {
-        httpMetadata: { contentType: "application/json" },
-      })
-    );
+    await putSnapshotManifest(lease, manifest);
     args.log.info("snapshot:materialized", {
       repositoryId: args.fact.repositoryId,
       commitSha: args.fact.afterSha,
@@ -317,15 +491,7 @@ export async function materializeAcceptedWrite(args: {
     });
     return manifest;
   } finally {
-    count(cacheCtx, args.log, "do:finish-snapshot-materialization");
-    const finished = await args.limiter.run("do:finish-snapshot-materialization", () =>
-      stub.finishSnapshotMaterialization(lease.token)
-    );
-    if (!finished) {
-      args.log.warn("snapshot:materialization-lease-missing", {
-        repositoryId: args.fact.repositoryId,
-      });
-    }
+    await finishSnapshotLease(lease);
   }
 }
 

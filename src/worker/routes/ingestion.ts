@@ -1,4 +1,5 @@
 import { asBodyInit, asBufferSource, bytesToHex, getRepoStub, zeroOid } from "@/worker/common";
+import type { Logger } from "@/worker/common/logger";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
 import type { BeginReceiveResult } from "@/worker/do/repo/catalog/shared";
 import { acceptedWriteFactsForCommands, emitAcceptedWriteFacts } from "@/worker/git/acceptedWrite";
@@ -6,7 +7,13 @@ import { buildIngestionCommit, type IngestionFile } from "@/worker/git/ingestion
 import { countSubrequest } from "@/worker/git/operations/limits";
 import type { ReceiveCommand } from "@/worker/git/operations/validation";
 import { executeReceivePipeline } from "@/worker/git/receive/pipeline";
-import { materializeAcceptedWrite } from "@/worker/git/snapshot/materialize";
+import {
+  materializeAcceptedWrite,
+  publishStagedSnapshot,
+  releaseStagedSnapshot,
+  stageSnapshotBundle,
+  type StagedSnapshotBundle,
+} from "@/worker/git/snapshot/materialize";
 import { snapshotEventProbeEnabled } from "@/worker/git/snapshot/config";
 import { resolveRepositoryRoute } from "@/worker/repositories/route";
 import { isValidOwnerRepo, MAX_PATH_LEN } from "@/shared/web";
@@ -32,6 +39,10 @@ type ParsedIngestionRequest = {
   message: string;
   historyMode: "append" | "epoch";
 };
+
+type StagedSnapshotOutcome =
+  | { ok: true; staged: StagedSnapshotBundle | null }
+  | { ok: false; error: unknown };
 
 class IngestionRequestError extends Error {
   readonly status: number;
@@ -191,6 +202,20 @@ async function sha256(value: string): Promise<string> {
   return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", asBufferSource(bytes))));
 }
 
+async function releaseStagedSnapshotSafely(
+  staged: StagedSnapshotBundle | null,
+  log: Logger
+): Promise<void> {
+  if (!staged) return;
+  try {
+    await releaseStagedSnapshot(staged);
+  } catch (error) {
+    // Snapshot state is a disposable projection and must not replace the
+    // authoritative Git outcome or its original error.
+    log.warn("ingestion:staged-snapshot-release-failed", { error: String(error) });
+  }
+}
+
 async function handleIngestion(c: AppContext): Promise<Response> {
   const authResult = await authorizeInternalRequest(c);
   if (authResult) return authResult;
@@ -284,6 +309,7 @@ async function handleIngestion(c: AppContext): Promise<Response> {
     }
 
     let pipelineStarted = false;
+    let stagedSnapshotOutcome: Promise<StagedSnapshotOutcome> | undefined;
     try {
       const currentOid = begin.refs.find((ref) => ref.name === INGESTION_REF)?.oid ?? zeroOid();
 
@@ -317,6 +343,23 @@ async function handleIngestion(c: AppContext): Promise<Response> {
       });
       if (!packRequest.body) throw new Error("Failed to create ingestion pack stream");
 
+      if (!snapshotEventProbeEnabled(c.env)) {
+        // Start the independent immutable bundle upload before the accepted
+        // pack pipeline; only the manifest is held behind authoritative commit.
+        stagedSnapshotOutcome = stageSnapshotBundle({
+          env: c.env,
+          repoId: route.doName,
+          fact: acceptedWrite,
+          request: c.req.raw,
+          ctx,
+          limiter,
+          log,
+          source: { treeSha: built.treeOid, files: input.files },
+        }).then(
+          (staged) => ({ ok: true as const, staged }),
+          (error: unknown) => ({ ok: false as const, error })
+        );
+      }
       pipelineStarted = true;
       const result = await executeReceivePipeline({
         env: c.env,
@@ -343,22 +386,15 @@ async function handleIngestion(c: AppContext): Promise<Response> {
         countSubrequest: count,
       });
       if (!result.changed) {
+        const staged = await stagedSnapshotOutcome;
+        if (staged?.ok) await releaseStagedSnapshotSafely(staged.staged, log);
+        if (staged && !staged.ok) {
+          log.warn("ingestion:staged-snapshot-failed", { error: String(staged.error) });
+        }
         return jsonResponse({ error: "Ref conflict" }, 409);
       }
 
       emitAcceptedWriteFacts(log, [acceptedWrite]);
-      if (!snapshotEventProbeEnabled(c.env)) {
-        await materializeAcceptedWrite({
-          env: c.env,
-          repoId: route.doName,
-          fact: acceptedWrite,
-          request: c.req.raw,
-          ctx,
-          limiter,
-          log,
-          source: { treeSha: built.treeOid, files: input.files },
-        });
-      }
       try {
         await touchRepositoryUpdatedAt(c.var.db, route.repositoryId, Date.now());
       } catch (error) {
@@ -378,8 +414,35 @@ async function handleIngestion(c: AppContext): Promise<Response> {
         objectCount: built.objectCount,
         packBytes: built.pack.byteLength,
       });
+      const staged = await stagedSnapshotOutcome;
+      if (staged && !staged.ok) {
+        log.warn("ingestion:staged-snapshot-failed", {
+          committed: true,
+          error: String(staged.error),
+        });
+        throw staged.error;
+      }
+      if (staged?.staged) {
+        // executeReceivePipeline has verified the pack graph and committed the
+        // ref CAS to built.commitOid, which cryptographically binds treeOid.
+        try {
+          await publishStagedSnapshot(staged.staged);
+        } catch (error) {
+          log.warn("ingestion:staged-snapshot-failed", {
+            committed: true,
+            stage: "publish",
+            error: String(error),
+          });
+          throw error;
+        }
+      }
       return jsonResponse({ acceptedWrite, treeSha: built.treeOid, replayed: false }, 201);
     } catch (error) {
+      const staged = await stagedSnapshotOutcome;
+      if (staged?.ok) await releaseStagedSnapshotSafely(staged.staged, log);
+      if (staged && !staged.ok && staged.error !== error) {
+        log.warn("ingestion:staged-snapshot-failed", { error: String(staged.error) });
+      }
       if (!pipelineStarted) {
         count("do:abort-receive");
         await limiter
