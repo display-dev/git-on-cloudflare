@@ -328,6 +328,14 @@ credentials, fixture OIDs, alternating provider order, and predeclared latency
 thresholds. Enabling the flag without a commit-pinned Worker version is not
 evidence.
 
+Direct-pack planning phase timings are I/O-anchored wall-clock windows. Workers
+may freeze wall-clock time during synchronous work, so synchronous advertised
+closure and boundary validation can appear near zero and their CPU cost can be
+observed in the next window. Interpret the windows with the same invocation's
+Worker CPU time. `postManifestCleanupAndOverheadMs` is the explicit residual
+between the reported planning total and the named windows; the windows are not
+standalone CPU profiles.
+
 Publication atomically replaces only the exact snapshotted source rows, merging
 all later receive packs and any conservatively retained sources. Current refs and
 HEAD are not overwritten. Accounted versions, source-row identity, live claim,

@@ -130,6 +130,19 @@ const stockTimingMsSchema = z
 const nativeReceiveStockTimingSchema = z
   .object({
     planningMs: stockTimingMsSchema,
+    planningPhases: z
+      .object({
+        activeMetadataMs: stockTimingMsSchema,
+        advertisedClosureMs: stockTimingMsSchema,
+        inputStagingMs: stockTimingMsSchema,
+        incomingAnalysisMs: stockTimingMsSchema,
+        boundaryValidationMs: stockTimingMsSchema,
+        physicalPlanMs: stockTimingMsSchema,
+        manifestPublishMs: stockTimingMsSchema,
+        postManifestCleanupAndOverheadMs: stockTimingMsSchema,
+      })
+      .strict()
+      .optional(),
     bundleReadMs: stockTimingMsSchema,
     containerRpcMs: stockTimingMsSchema,
     containerProcessMs: stockTimingMsSchema,

@@ -49,8 +49,20 @@ export type NativeReceiveAuthorityPublication = {
 
 export type NativeReceiveStockTraceEvent = { sequence: number; event: string };
 
+export type NativeReceiveStockPlanningPhases = {
+  activeMetadataMs: number;
+  advertisedClosureMs: number;
+  inputStagingMs: number;
+  incomingAnalysisMs: number;
+  boundaryValidationMs: number;
+  physicalPlanMs: number;
+  manifestPublishMs: number;
+  postManifestCleanupAndOverheadMs: number;
+};
+
 export type NativeReceiveStockTiming = {
   planningMs: number;
+  planningPhases?: NativeReceiveStockPlanningPhases | undefined;
   bundleReadMs: number;
   containerRpcMs: number;
   containerProcessMs: number;

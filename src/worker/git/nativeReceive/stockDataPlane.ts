@@ -970,6 +970,10 @@ function directPackResult(args: {
   planningMs: number;
 }): NativeReceiveProcessResult {
   const plan = args.plan;
+  const planningMs = Math.max(0, args.planningMs - (plan.directOutputUploadMs ?? 0));
+  const measuredPlanningMs = plan.directPlanningPhases
+    ? Object.values(plan.directPlanningPhases).reduce((total, value) => total + value, 0)
+    : 0;
   if (
     plan.executionMode !== "direct-pack" ||
     !plan.directPackBytes ||
@@ -1004,7 +1008,13 @@ function directPackResult(args: {
     elapsedMs: args.elapsedMs,
     processorStartedAt: args.processorStartedAt,
     stockTiming: {
-      planningMs: Math.max(0, args.planningMs - (plan.directOutputUploadMs ?? 0)),
+      planningMs,
+      planningPhases: plan.directPlanningPhases
+        ? {
+            ...plan.directPlanningPhases,
+            postManifestCleanupAndOverheadMs: Math.max(0, planningMs - measuredPlanningMs),
+          }
+        : undefined,
       bundleReadMs: 0,
       containerRpcMs: 0,
       containerProcessMs: 0,

@@ -8,6 +8,7 @@ import type {
 } from "@/worker/git/object-store/candidates";
 import type { IdxView, PackCatalogRow } from "@/worker/git/object-store/types";
 import type { PackRefView } from "@/worker/git/pack/refIndex";
+import type { NativeReceiveStockPlanningPhases } from "@/worker/git/nativeReceive/types";
 import type {
   StockPhysicalDependencyEdge,
   StockPhysicalDependencyPlan,
@@ -379,6 +380,9 @@ export type StockReceivePlan = {
   directRefsBytes?: number | undefined;
   directRefsSha256?: string | undefined;
   directOutputUploadMs?: number | undefined;
+  directPlanningPhases?:
+    | Omit<NativeReceiveStockPlanningPhases, "postManifestCleanupAndOverheadMs">
+    | undefined;
   incomingOids?: string[] | undefined;
   prerequisitePackKey: string;
   prerequisitePackBytes: number;
@@ -1544,6 +1548,7 @@ async function planStockReceiveImpl(
   // and the same operation can be retried against the unchanged authority.
   throwTransientR2ReadFault(args.operationId, counters, args.activePacks.length);
   const active = await loadBoundActivePacks(args, counters);
+  const activeMetadataCompleteAt = Date.now();
   if (unexpectedWholePackReadOperationForTesting === args.operationId) {
     unexpectedWholePackReadOperationForTesting = undefined;
     args.countSubrequest();
@@ -1555,6 +1560,7 @@ async function planStockReceiveImpl(
   }
   const advertisedReachableOids = deriveAdvertisedClosure(active, args.advertisedRefs);
   const advertisedReachable = new Set(advertisedReachableOids);
+  const advertisedClosureCompleteAt = Date.now();
   const inputPack = await readExactRange({
     env: args.env,
     key: args.inputRequestKey,
@@ -1581,6 +1587,7 @@ async function planStockReceiveImpl(
     countSubrequest: args.countSubrequest,
   });
   if (temporaryPut.created) ownedImmutableKeys.push(keys.temporaryPackKey);
+  const inputStagingCompleteAt = Date.now();
 
   const thinDeltaBaseOids = new Set<string>();
   const activeByChecksum = new Map(active.map((pack) => [pack.packChecksum, pack]));
@@ -1743,6 +1750,7 @@ async function planStockReceiveImpl(
       startedAt,
     });
   }
+  const incomingAnalysisCompleteAt = Date.now();
 
   const boundary = deriveIncomingBoundary({
     commands: args.commands,
@@ -1761,6 +1769,7 @@ async function planStockReceiveImpl(
   const directThinBasesEligible = [...thinDeltaBaseOids].every(
     (oid) => advertisedReachable.has(oid) && !directSemanticExternal.has(oid)
   );
+  const boundaryValidationCompleteAt = Date.now();
 
   // Qualification-only fast path: the incoming pack has already passed the
   // bounded scanner, delta resolver, object-graph closure proof, and exact
@@ -1809,6 +1818,7 @@ async function planStockReceiveImpl(
       active,
       ranges: plannedRanges,
     });
+    const physicalPlanCompleteAt = Date.now();
     const idxObject = await getBoundedObject({
       env: args.env,
       key: packIndexKey(keys.temporaryPackKey),
@@ -1888,6 +1898,7 @@ async function planStockReceiveImpl(
       countSubrequest: args.countSubrequest,
     });
     if (closureManifestPut.created) ownedImmutableKeys.push(keys.closureManifestKey);
+    const manifestPublishCompleteAt = Date.now();
 
     const directOutputUploadStartedAt = Date.now();
     const directArtifacts = [
@@ -1944,6 +1955,15 @@ async function planStockReceiveImpl(
       directRefsBytes: refsBytes.byteLength,
       directRefsSha256: refsSha256,
       directOutputUploadMs,
+      directPlanningPhases: {
+        activeMetadataMs: activeMetadataCompleteAt - startedAt,
+        advertisedClosureMs: advertisedClosureCompleteAt - activeMetadataCompleteAt,
+        inputStagingMs: inputStagingCompleteAt - advertisedClosureCompleteAt,
+        incomingAnalysisMs: incomingAnalysisCompleteAt - inputStagingCompleteAt,
+        boundaryValidationMs: boundaryValidationCompleteAt - incomingAnalysisCompleteAt,
+        physicalPlanMs: physicalPlanCompleteAt - boundaryValidationCompleteAt,
+        manifestPublishMs: manifestPublishCompleteAt - physicalPlanCompleteAt,
+      },
       incomingOids: boundary.visitedIncomingOids,
       prerequisitePackKey: "",
       prerequisitePackBytes: 0,

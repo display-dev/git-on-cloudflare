@@ -1948,6 +1948,18 @@ describe("stock Smart HTTP receive spike", () => {
         activePackWholeRequests: 0,
         activePackRangeRequests: 1,
         outputValidationRequests: 3,
+        stockTiming: {
+          planningPhases: {
+            activeMetadataMs: expect.any(Number),
+            advertisedClosureMs: expect.any(Number),
+            inputStagingMs: expect.any(Number),
+            incomingAnalysisMs: expect.any(Number),
+            boundaryValidationMs: expect.any(Number),
+            physicalPlanMs: expect.any(Number),
+            manifestPublishMs: expect.any(Number),
+            postManifestCleanupAndOverheadMs: expect.any(Number),
+          },
+        },
       },
     });
     const loaded = await readObject(env, seeded.doName, next.oid, {
