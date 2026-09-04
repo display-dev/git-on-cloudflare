@@ -1,11 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
+import { createExecutionContext } from "cloudflare:test";
 import { env, exports as workerExports } from "cloudflare:workers";
 
-import { zeroOid } from "@/worker/common";
+import { asBufferSource, bytesToHex, createLogger, zeroOid } from "@/worker/common";
 import { encodeGitObject, parseCommitRefs } from "@/worker/git/core";
 import { readObject } from "@/worker/git/object-store";
 import { parseTree } from "@/worker/git/operations/read/objects";
-import { snapshotObjectKey } from "@/worker/git/snapshot/materialize";
+import { getLimiter } from "@/worker/git/operations/limits";
+import {
+  materializeAcceptedWrite,
+  snapshotBundleObjectKey,
+  snapshotObjectKey,
+} from "@/worker/git/snapshot/materialize";
 import { __test as receivePipelineTest } from "@/worker/git/receive/pipeline";
 import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
 import { __test as readBenchmarkTest } from "@/worker/routes/readBenchmark";
@@ -28,7 +34,7 @@ type IngestionResponse = {
     beforeSha: string;
     afterSha: string;
     actor: string;
-    sourceSurface: string;
+    sourceSurface: "ingestion";
     idempotencyKey: string | null;
   };
   treeSha: string;
@@ -40,7 +46,8 @@ type SnapshotManifest = {
   repositoryId: string;
   commitSha: string;
   treeSha: string;
-  files: Array<{ path: string; bytes: number; sha256: string }>;
+  files: Array<{ path: string; bytes: number; sha256: string; offset?: number }>;
+  bundle?: { bytes: number; sha256: string };
 };
 
 type ReadBenchmarkResponse = {
@@ -120,7 +127,7 @@ async function postIngestion(
 }
 
 describe("internal ingestion", () => {
-  it("writes a 20-file snapshot in bounded concurrent batches before publishing its manifest", async () => {
+  it("publishes a 20-file snapshot as one indexed bundle before its manifest", async () => {
     const owner = "ingest";
     const repo = uniqueRepoId("snapshot-write-batches");
     const seeded = await setupRepoForTests(env, owner, repo, {
@@ -128,29 +135,12 @@ describe("internal ingestion", () => {
     });
     const snapshotPrefix = `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/`;
     const put = env.REPO_BUCKET.put.bind(env.REPO_BUCKET);
-    let activeFileWrites = 0;
-    let maximumFileWrites = 0;
-    let fileWriteCount = 0;
-    let releaseFirstBatch!: () => void;
-    const firstBatchStarted = new Promise<void>((resolve) => {
-      releaseFirstBatch = resolve;
-    });
+    const snapshotWrites: string[] = [];
     const putSpy = vi
       .spyOn(env.REPO_BUCKET, "put")
       .mockImplementation(async (...args: Parameters<typeof put>) => {
         const key = String(args[0]);
-        if (key.startsWith(snapshotPrefix) && key.includes("/files/")) {
-          fileWriteCount += 1;
-          activeFileWrites += 1;
-          maximumFileWrites = Math.max(maximumFileWrites, activeFileWrites);
-          if (activeFileWrites === 5) releaseFirstBatch();
-          await firstBatchStarted;
-          try {
-            return await put(...args);
-          } finally {
-            activeFileWrites -= 1;
-          }
-        }
+        if (key.startsWith(snapshotPrefix)) snapshotWrites.push(key);
         return await put(...args);
       });
 
@@ -159,8 +149,10 @@ describe("internal ingestion", () => {
     );
     expect(response.status).toBe(201);
     const body = (await response.json()) as IngestionResponse;
-    expect(fileWriteCount).toBe(20);
-    expect(maximumFileWrites).toBe(5);
+    expect(snapshotWrites.map((key) => key.slice(snapshotPrefix.length))).toEqual([
+      `${body.acceptedWrite.afterSha}/bundle.bin`,
+      `${body.acceptedWrite.afterSha}/manifest.json`,
+    ]);
     const manifestKey = snapshotObjectKey({
       env,
       repositoryId: seeded.repositoryId,
@@ -168,10 +160,157 @@ describe("internal ingestion", () => {
     });
     expect(manifestKey).not.toBeNull();
     const manifest = await env.REPO_BUCKET.get(manifestKey!);
-    expect(((await manifest!.json()) as SnapshotManifest).files).toHaveLength(20);
+    const parsedManifest = (await manifest!.json()) as SnapshotManifest;
+    expect(parsedManifest.files).toHaveLength(20);
+    expect(parsedManifest.bundle?.bytes).toBe(330);
+    expect(parsedManifest.files.map((file) => file.offset)).toEqual(
+      parsedManifest.files.map((_, index) => index * 16 + Math.max(0, index - 10))
+    );
+    const served = await workerExports.default.fetch(
+      `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}/file?path=file-19.txt`,
+      { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+    );
+    expect(await served.text()).toBe("snapshot file 19\n");
   });
 
-  it("keeps the snapshot lease until every started file write settles after a sibling fails", async () => {
+  it("serves an all-empty bundled snapshot without an invalid R2 range", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("empty-snapshot-bundle");
+    await setupRepoForTests(env, owner, repo, { doName: `repo:${owner}-${repo}` });
+    const form = new FormData();
+    form.set("expectedOid", zeroOid());
+    form.set("actor", "snapshot-empty-test");
+    form.set("idempotencyKey", "snapshot-empty");
+    form.set("committedAtSeconds", "1700000000");
+    form.set("message", "Publish empty snapshot");
+    form.append("files", new Blob([]), "empty.txt");
+
+    const response = await postIngestion(owner, repo, form);
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as IngestionResponse;
+    const headers = { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` };
+    const snapshotBase = `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}`;
+    const served = await workerExports.default.fetch(`${snapshotBase}/file?path=empty.txt`, {
+      headers,
+    });
+    expect(served.status).toBe(200);
+    expect(served.headers.get("Content-Length")).toBe("0");
+    expect(new Uint8Array(await served.arrayBuffer())).toHaveLength(0);
+
+    const benchmark = await workerExports.default.fetch(
+      `https://example.com/_internal/read-benchmark/${owner}/${repo}/${body.acceptedWrite.afterSha}/snapshot-blob?path=empty.txt`,
+      { headers }
+    );
+    expect(benchmark.status).toBe(200);
+    expect(await benchmark.json()).toMatchObject({
+      operation: "snapshot-blob",
+      bytes: 0,
+      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    });
+  });
+
+  it("keeps legacy per-file snapshots readable through both consumers", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("legacy-snapshot-layout");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const commitSha = "a".repeat(40);
+    const treeSha = "b".repeat(40);
+    const path = "legacy.txt";
+    const bytes = new TextEncoder().encode("legacy snapshot\n");
+    const sha256 = bytesToHex(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", asBufferSource(bytes)))
+    );
+    const manifestKey = snapshotObjectKey({
+      env,
+      repositoryId: seeded.repositoryId,
+      commitSha,
+    })!;
+    const fileKey = snapshotObjectKey({
+      env,
+      repositoryId: seeded.repositoryId,
+      commitSha,
+      path,
+    })!;
+    await env.REPO_BUCKET.put(fileKey, bytes);
+    await env.REPO_BUCKET.put(
+      manifestKey,
+      JSON.stringify({
+        version: 1,
+        repositoryId: seeded.repositoryId,
+        commitSha,
+        treeSha,
+        files: [{ path, bytes: bytes.byteLength, sha256 }],
+      })
+    );
+    const headers = { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` };
+    const snapshotBase = `https://example.com/_internal/snapshots/${owner}/${repo}/${commitSha}`;
+    const served = await workerExports.default.fetch(`${snapshotBase}/file?path=${path}`, {
+      headers,
+    });
+    expect(served.status).toBe(200);
+    expect(await served.text()).toBe("legacy snapshot\n");
+
+    const benchmark = await workerExports.default.fetch(
+      `https://example.com/_internal/read-benchmark/${owner}/${repo}/${commitSha}/snapshot-blob?path=${path}`,
+      { headers }
+    );
+    expect(benchmark.status).toBe(200);
+    expect(await benchmark.json()).toMatchObject({
+      operation: "snapshot-blob",
+      bytes: bytes.byteLength,
+      sha256,
+    });
+  });
+
+  it("binds the ingestion source fast path to the committed tree", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-source-binding");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const response = await postIngestion(owner, repo, ingestionForm());
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as IngestionResponse;
+    const prefix = `source-binding-${repo}-snapshots`;
+    const source = {
+      treeSha: body.treeSha,
+      files: [
+        { path: "nested/hello.txt", bytes: new TextEncoder().encode("hello from ingestion\n") },
+        { path: "index.html", bytes: new TextEncoder().encode("<h1>index</h1>\n") },
+      ],
+    };
+    const materialize = async (treeSha: string) =>
+      await materializeAcceptedWrite({
+        env,
+        repoId: seeded.doName,
+        fact: body.acceptedWrite,
+        request: new Request("https://example.com/source-binding"),
+        ctx: createExecutionContext(),
+        limiter: getLimiter(),
+        log: createLogger(env.LOG_LEVEL, { service: "SnapshotSourceBindingTest" }),
+        source: { ...source, treeSha },
+      });
+
+    await withEnvOverrides(env, { SNAPSHOT_BENCHMARK_PREFIX: prefix }, async () => {
+      await expect(materialize("f".repeat(40))).rejects.toThrow(
+        "Snapshot source does not match the committed tree"
+      );
+      expect((await env.REPO_BUCKET.list({ prefix: `${prefix}/` })).objects).toHaveLength(0);
+
+      await expect(materialize(source.treeSha)).resolves.toMatchObject({ treeSha: source.treeSha });
+      const bundleKey = snapshotBundleObjectKey({
+        env,
+        repositoryId: seeded.repositoryId,
+        commitSha: body.acceptedWrite.afterSha,
+      })!;
+      const bundle = await env.REPO_BUCKET.get(bundleKey);
+      expect(await bundle!.text()).toBe("<h1>index</h1>\nhello from ingestion\n");
+    });
+  });
+
+  it("keeps the snapshot lease until a started bundle write settles", async () => {
     const owner = "ingest";
     const repo = uniqueRepoId("snapshot-write-failure");
     const seeded = await setupRepoForTests(env, owner, repo, {
@@ -179,34 +318,33 @@ describe("internal ingestion", () => {
     });
     const snapshotPrefix = `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/`;
     const put = env.REPO_BUCKET.put.bind(env.REPO_BUCKET);
-    let resolveHeldWrite!: () => void;
-    const heldWrite = new Promise<void>((resolve) => {
-      resolveHeldWrite = resolve;
+    let releaseBundleWrite!: () => void;
+    const heldBundleWrite = new Promise<void>((resolve) => {
+      releaseBundleWrite = resolve;
     });
-    let resolveBatchStarted!: () => void;
-    const batchStarted = new Promise<void>((resolve) => {
-      resolveBatchStarted = resolve;
+    let signalBundleStarted!: () => void;
+    const bundleStarted = new Promise<void>((resolve) => {
+      signalBundleStarted = resolve;
     });
-    let startedFileWrites = 0;
     const putSpy = vi
       .spyOn(env.REPO_BUCKET, "put")
       .mockImplementation(async (...args: Parameters<typeof put>) => {
         const key = String(args[0]);
-        if (!key.startsWith(snapshotPrefix) || !key.includes("/files/")) return await put(...args);
-        startedFileWrites += 1;
-        if (startedFileWrites === 2) resolveBatchStarted();
-        if (key.endsWith("/file-00.txt")) throw new Error("injected snapshot write failure");
-        if (key.endsWith("/file-01.txt")) await heldWrite;
-        return await put(...args);
+        if (!key.startsWith(snapshotPrefix) || !key.endsWith("/bundle.bin")) {
+          return await put(...args);
+        }
+        signalBundleStarted();
+        await heldBundleWrite;
+        throw new Error("injected snapshot bundle failure");
       });
 
     const responsePromise = postIngestion(owner, repo, multiFileIngestionForm(5));
-    await batchStarted;
+    await bundleStarted;
     const deletion = await env.REPO_DO.get(
       env.REPO_DO.idFromName(seeded.doName)
     ).beginRepositoryDeletion();
     expect(deletion.ready).toBe(false);
-    resolveHeldWrite();
+    releaseBundleWrite();
     const response = await responsePromise.finally(() => putSpy.mockRestore());
     expect(response.status).toBe(500);
     const objects = await env.REPO_BUCKET.list({ prefix: snapshotPrefix });

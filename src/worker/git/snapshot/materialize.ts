@@ -2,9 +2,10 @@ import type { CacheContext } from "@/worker/cache";
 import { asBufferSource, bytesToHex, getRepoStub } from "@/worker/common";
 import type { Logger } from "@/worker/common/logger";
 import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
+import type { IngestionFile } from "@/worker/git/ingestion/pack";
 import type { Limiter } from "@/worker/git/operations/limits";
 import type { BeginSnapshotMaterializationResult } from "@/worker/do/repo/repositoryLifecycle";
-import { countSubrequest, MAX_SIMULTANEOUS_CONNECTIONS } from "@/worker/git/operations/limits";
+import { countSubrequest } from "@/worker/git/operations/limits";
 import { readCommit } from "@/worker/git/operations/read/commits";
 import { readBlob } from "@/worker/git/operations/read/objects";
 import {
@@ -18,9 +19,6 @@ const MAX_FILES = 100;
 const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 const MAX_PATH_BYTES = 4096;
 const MAX_PATH_SEGMENTS = 128;
-// The shared limiter enforces Cloudflare's connection ceiling. Use one fewer
-// file per lease-renewal batch so this path does not try to occupy every slot.
-const SNAPSHOT_WRITE_CONCURRENCY = Math.max(1, MAX_SIMULTANEOUS_CONNECTIONS - 1);
 
 export type SnapshotLimitReason =
   | "snapshot-file-count-limit"
@@ -58,7 +56,8 @@ export type SnapshotManifest = {
   repositoryId: string;
   commitSha: string;
   treeSha: string;
-  files: Array<{ path: string; bytes: number; sha256: string }>;
+  files: Array<{ path: string; bytes: number; sha256: string; offset?: number }>;
+  bundle?: { bytes: number; sha256: string };
 };
 
 export type SnapshotMaterializationTarget =
@@ -119,6 +118,20 @@ async function digest(bytes: Uint8Array): Promise<string> {
   return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", asBufferSource(bytes))));
 }
 
+function compareSnapshotPaths(left: string, right: string): number {
+  // Match Git's UTF-8 tree traversal order so every materialization path emits
+  // identical bundle offsets for the same committed tree.
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const sharedLength = Math.min(leftBytes.byteLength, rightBytes.byteLength);
+  for (let index = 0; index < sharedLength; index += 1) {
+    const difference = leftBytes[index]! - rightBytes[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.byteLength - rightBytes.byteLength;
+}
+
 function count(cacheCtx: CacheContext, log: Logger, op: string): void {
   if (!countSubrequest(cacheCtx)) log.warn("snapshot:soft-budget-exhausted", { op });
 }
@@ -131,6 +144,7 @@ export async function materializeAcceptedWrite(args: {
   ctx: ExecutionContext;
   limiter: Limiter;
   log: Logger;
+  source?: { treeSha: string; files: IngestionFile[] };
 }): Promise<SnapshotManifest | null> {
   const prefix = configuredPrefix(args.env);
   if (!prefix) return null;
@@ -210,50 +224,82 @@ export async function materializeAcceptedWrite(args: {
       }
     };
 
-    await visitTree(commit.tree, "");
+    if (args.source) {
+      // The synchronous ingestion caller built this committed tree from these
+      // exact bytes. Still verify its tree identity against authoritative Git.
+      if (commit.tree !== args.source.treeSha) {
+        throw new Error("Snapshot source does not match the committed tree");
+      }
+      const sourceFiles = [...args.source.files].sort((left, right) =>
+        compareSnapshotPaths(left.path, right.path)
+      );
+      for (const file of sourceFiles) {
+        validateSnapshotPath(file.path);
+        const pathBytes = new TextEncoder().encode(file.path).byteLength;
+        const pathSegments = file.path.split("/").length;
+        maxPathBytes = Math.max(maxPathBytes, pathBytes);
+        maxSegments = Math.max(maxSegments, pathSegments);
+        totalBytes += file.bytes.byteLength;
+        const observed: SnapshotLimitObservation = {
+          fileCount: files.length + 1,
+          totalBytes,
+          maxPathBytes,
+          maxSegments,
+        };
+        if (files.length >= MAX_FILES) {
+          throw new SnapshotLimitError("snapshot-file-count-limit", observed);
+        }
+        if (totalBytes > MAX_TOTAL_BYTES) {
+          throw new SnapshotLimitError("snapshot-total-bytes-limit", observed);
+        }
+        files.push({ path: file.path, bytes: file.bytes, sha256: await digest(file.bytes) });
+      }
+    } else {
+      await visitTree(commit.tree, "");
+    }
     const root = snapshotRoot(prefix, args.fact.repositoryId, args.fact.afterSha);
-    // Renew before each bounded batch and await every started write, including
-    // failures, before the lease can be released. This preserves the original
-    // no-write-after-release guarantee without serializing independent R2 puts.
-    // Manifest-last ordering remains the readiness boundary.
-    for (let offset = 0; offset < files.length; offset += SNAPSHOT_WRITE_CONCURRENCY) {
+    let offset = 0;
+    const manifestFiles = files.map((file) => {
+      const entry = {
+        path: file.path,
+        bytes: file.bytes.byteLength,
+        sha256: file.sha256,
+        offset,
+      };
+      offset += file.bytes.byteLength;
+      return entry;
+    });
+    const bundleBytes = new Uint8Array(totalBytes);
+    for (const [index, file] of files.entries()) {
+      bundleBytes.set(file.bytes, manifestFiles[index]!.offset);
+    }
+    const bundleSha256 = await digest(bundleBytes);
+    if (bundleBytes.byteLength > 0) {
       await renewLease();
-      const batch = files.slice(offset, offset + SNAPSHOT_WRITE_CONCURRENCY);
-      const writes = await Promise.allSettled(
-        batch.map((file) => {
-          count(cacheCtx, args.log, "r2:put-snapshot-file");
-          return args.limiter.run("r2:put-snapshot-file", () =>
-            args.env.REPO_BUCKET.put(`${root}/files/${file.path}`, file.bytes, {
-              httpMetadata: { contentType: "application/octet-stream" },
-              customMetadata: { sha256: file.sha256 },
-            })
-          );
-        })
-      );
-      const failedWrite = writes.find(
-        (result): result is PromiseRejectedResult => result.status === "rejected"
-      );
-      for (const [index, result] of writes.entries()) {
-        if (result.status !== "rejected") continue;
-        args.log.warn("snapshot:file-write-failed", {
+      count(cacheCtx, args.log, "r2:put-snapshot-bundle");
+      try {
+        await args.limiter.run("r2:put-snapshot-bundle", () =>
+          args.env.REPO_BUCKET.put(`${root}/bundle.bin`, bundleBytes, {
+            httpMetadata: { contentType: "application/octet-stream" },
+            customMetadata: { sha256: bundleSha256 },
+          })
+        );
+      } catch (error) {
+        args.log.warn("snapshot:bundle-write-failed", {
           repositoryId: args.fact.repositoryId,
           commitSha: args.fact.afterSha,
-          path: batch[index]!.path,
-          error: String(result.reason),
+          error: String(error),
         });
+        throw error;
       }
-      if (failedWrite) throw failedWrite.reason;
     }
     const manifest: SnapshotManifest = {
       version: 1,
       repositoryId: args.fact.repositoryId,
       commitSha: args.fact.afterSha,
       treeSha: commit.tree,
-      files: files.map(({ path, bytes, sha256 }) => ({
-        path,
-        bytes: bytes.byteLength,
-        sha256,
-      })),
+      files: manifestFiles,
+      bundle: { bytes: bundleBytes.byteLength, sha256: bundleSha256 },
     };
     await renewLease();
     count(cacheCtx, args.log, "r2:put-snapshot-manifest");
@@ -295,4 +341,14 @@ export function snapshotObjectKey(args: {
   if (args.path === undefined) return `${root}/manifest.json`;
   validateSnapshotPath(args.path);
   return `${root}/files/${args.path}`;
+}
+
+export function snapshotBundleObjectKey(args: {
+  env: Env;
+  repositoryId: string;
+  commitSha: string;
+}): string | null {
+  const prefix = configuredPrefix(args.env);
+  if (!prefix || !/^[0-9a-f]{40}$/.test(args.commitSha)) return null;
+  return `${snapshotRoot(prefix, args.repositoryId, args.commitSha)}/bundle.bin`;
 }

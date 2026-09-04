@@ -262,6 +262,7 @@ async function handleIngestion(c: AppContext): Promise<Response> {
           ctx,
           limiter,
           log,
+          source: { treeSha: built.treeOid, files: input.files },
         });
       }
       return jsonResponse(
@@ -355,6 +356,7 @@ async function handleIngestion(c: AppContext): Promise<Response> {
           ctx,
           limiter,
           log,
+          source: { treeSha: built.treeOid, files: input.files },
         });
       }
       try {

@@ -18,6 +18,7 @@ import {
   readTree,
 } from "@/worker/git/operations/read/tree";
 import {
+  snapshotBundleObjectKey,
   snapshotObjectKey,
   type SnapshotManifest,
   validateSnapshotPath,
@@ -226,9 +227,32 @@ function countBenchmarkSubrequest(c: AppContext, operation: string): void {
   }
 }
 
-async function getSnapshotObject(c: AppContext, key: string, operation: string) {
+async function getSnapshotObject(
+  c: AppContext,
+  key: string,
+  operation: string,
+  options?: R2GetOptions
+) {
   countBenchmarkSubrequest(c, operation);
-  return await c.var.limiter.run(`r2:${operation}`, () => c.env.REPO_BUCKET.get(key));
+  return await c.var.limiter.run(`r2:${operation}`, () => c.env.REPO_BUCKET.get(key, options));
+}
+
+function bundledSnapshotFile(
+  manifest: SnapshotManifest,
+  file: SnapshotManifest["files"][number]
+): { offset: number; bytes: number } | null {
+  if (!manifest.bundle || file.offset === undefined) return null;
+  if (
+    !Number.isSafeInteger(manifest.bundle.bytes) ||
+    manifest.bundle.bytes < 0 ||
+    !/^[0-9a-f]{64}$/.test(manifest.bundle.sha256) ||
+    !Number.isSafeInteger(file.offset) ||
+    file.offset < 0 ||
+    file.offset + file.bytes > manifest.bundle.bytes
+  ) {
+    throw new Error("Invalid snapshot bundle index");
+  }
+  return { offset: file.offset, bytes: file.bytes };
 }
 
 function isSnapshotManifestFile(value: unknown): value is SnapshotManifest["files"][number] {
@@ -514,21 +538,42 @@ async function runSnapshotOperation(
     throw new Error("Invalid search needle");
   }
   for (const file of selected) {
-    const key = snapshotObjectKey({
-      env: c.env,
-      repositoryId: route.repositoryId,
-      commitSha,
-      path: file.path,
-    });
-    if (!key) throw new Error("Snapshot benchmark is disabled");
-    const object = await getSnapshotObject(c, key, "get-benchmark-file");
-    if (!object) throw new Error("Snapshot file not found");
-    if (object.size > MAX_BENCHMARK_FILE_BYTES) {
+    const bundled = bundledSnapshotFile(manifest, file);
+    let bytes: Uint8Array;
+    // R2 rejects zero-length ranges; the empty payload is fully described and
+    // still verified by the per-file digest below.
+    if (bundled && bundled.bytes === 0) {
+      bytes = new Uint8Array();
+    } else {
+      const key = bundled
+        ? snapshotBundleObjectKey({
+            env: c.env,
+            repositoryId: route.repositoryId,
+            commitSha,
+          })
+        : snapshotObjectKey({
+            env: c.env,
+            repositoryId: route.repositoryId,
+            commitSha,
+            path: file.path,
+          });
+      if (!key) throw new Error("Snapshot benchmark is disabled");
+      const object = await getSnapshotObject(
+        c,
+        key,
+        "get-benchmark-file",
+        bundled ? { range: { offset: bundled.offset, length: bundled.bytes } } : undefined
+      );
+      if (!object) throw new Error("Snapshot file not found");
+      if (!bundled && object.size > MAX_BENCHMARK_FILE_BYTES) {
+        throw new BenchmarkLimitError("Benchmark snapshot file exceeds the bounded corpus shape");
+      }
+      bytes = new Uint8Array(await object.arrayBuffer());
+    }
+    if (bytes.byteLength > MAX_BENCHMARK_FILE_BYTES) {
       throw new BenchmarkLimitError("Benchmark snapshot file exceeds the bounded corpus shape");
     }
-    totalBytes = addBenchmarkBytes(totalBytes, object.size);
-    if (object.size !== file.bytes) throw new Error("Snapshot file integrity mismatch");
-    const bytes = new Uint8Array(await object.arrayBuffer());
+    totalBytes = addBenchmarkBytes(totalBytes, bytes.byteLength);
     const digest = await sha256(bytes);
     if (bytes.byteLength !== file.bytes || digest !== file.sha256) {
       throw new Error("Snapshot file integrity mismatch");
