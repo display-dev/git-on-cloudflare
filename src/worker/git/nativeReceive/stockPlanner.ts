@@ -138,8 +138,6 @@ type CachedActiveMetadata = {
   packKey: string;
   packBytes: number;
   idxBytes: number;
-  idx: IdxView;
-  refs: PackRefView;
   packChecksum: string;
   idxSha256: string;
   refsSha256: string;
@@ -173,22 +171,7 @@ function cacheActiveMetadata(value: Omit<CachedActiveMetadata, "bytes">): {
     activeMetadataCache.delete(value.packKey);
     activeMetadataCacheBytes -= existing.bytes;
   }
-  const bytes =
-    value.idxBytesRaw.byteLength +
-    value.refsBytesRaw.byteLength +
-    value.idx.fanout.byteLength +
-    value.idx.rawNames.byteLength +
-    value.idx.offsets.byteLength +
-    value.idx.nextOffsetByIndex.byteLength +
-    value.idx.sortedOffsets.byteLength +
-    value.idx.sortedOffsetIndices.byteLength +
-    value.idx.packChecksum.byteLength +
-    value.idx.idxChecksum.byteLength +
-    value.refs.typeCodes.byteLength +
-    value.refs.refStartsBytes.byteLength +
-    value.refs.rawRefs.byteLength +
-    value.refs.packChecksum.byteLength +
-    value.refs.idxChecksum.byteLength;
+  const bytes = value.idxBytesRaw.byteLength + value.refsBytesRaw.byteLength;
   if (bytes > activeMetadataCacheMaxBytes) return { stored: false, evicted: [] };
   activeMetadataCache.set(value.packKey, { ...value, bytes });
   activeMetadataCacheBytes += bytes;
@@ -1449,8 +1432,6 @@ async function loadBoundActivePacks(
         packKey: pack.packKey,
         packBytes: pack.packBytes,
         idxBytes: pack.idxBytes,
-        idx,
-        refs: parsedRefs.view,
         packChecksum: bound.packChecksum,
         idxSha256,
         refsSha256,
@@ -1490,28 +1471,19 @@ async function loadBoundActivePacks(
           kind: "metadata",
           counters,
         });
-        if (!bytesEqual(trailer, entry.idx.packChecksum)) {
+        try {
+          return await bind(entry, entry.idxBytesRaw, entry.refsBytesRaw, trailer);
+        } catch (error) {
           if (activeMetadataCache.get(entry.packKey) === entry) {
             activeMetadataCache.delete(entry.packKey);
             activeMetadataCacheBytes -= entry.bytes;
           }
-          args.log.warn("stock-plan:active-metadata-cache-trailer-mismatch", {
+          args.log.warn("stock-plan:active-metadata-cache-validation-failed", {
             packKey: entry.packKey,
+            reason: error instanceof Error ? error.message : "unknown",
           });
-          throw new Error("stock-plan:cached-pack-trailer-mismatch");
+          throw error;
         }
-        idxViews.set(entry.packKey, entry.idx);
-        return {
-          source: { packKey: entry.packKey, packBytes: entry.packBytes, idx: entry.idx },
-          idxBytes: entry.idxBytes,
-          refs: entry.refs,
-          packChecksum: entry.packChecksum,
-          idxSha256: entry.idxSha256,
-          refsSha256: entry.refsSha256,
-          ...(bundleEnabled
-            ? { idxBytesRaw: entry.idxBytesRaw, refsBytesRaw: entry.refsBytesRaw }
-            : {}),
-        };
       })
     );
     return { packs };
@@ -2178,8 +2150,6 @@ async function planStockReceiveImpl(
         packKey: args.outputPackKey,
         packBytes: canonicalPack.byteLength,
         idxBytes: canonicalIdxBytes.byteLength,
-        idx: canonicalIdx,
-        refs: canonicalRefs.view,
         packChecksum: bytesToHex(canonicalIdx.packChecksum),
         idxSha256: canonicalIdxSha256,
         refsSha256: canonicalRefsSha256,

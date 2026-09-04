@@ -2086,7 +2086,7 @@ describe("stock Smart HTTP receive spike", () => {
         countSubrequest() {},
         logger: createLogger(env.LOG_LEVEL, { service: "StockDirectPackStableCacheMismatchTest" }),
       })
-    ).rejects.toThrow("stock-plan:cached-pack-trailer-mismatch");
+    ).rejects.toThrow("stock-plan:pack-trailer-mismatch");
     await env.REPO_BUCKET.put(catalog.packKey, cachedPackBytes, {
       customMetadata: cachedPackObject.customMetadata,
     });
