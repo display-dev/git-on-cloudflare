@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { zeroOid } from "@/worker/common";
 import { encodeGitObject, parseCommitRefs } from "@/worker/git/core";
 import { readObject } from "@/worker/git/object-store";
 import { parseTree } from "@/worker/git/operations/read/objects";
+import { snapshotObjectKey } from "@/worker/git/snapshot/materialize";
 import { __test as receivePipelineTest } from "@/worker/git/receive/pipeline";
 import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
 import { __test as readBenchmarkTest } from "@/worker/routes/readBenchmark";
@@ -85,6 +86,23 @@ function ingestionForm(args?: {
   return form;
 }
 
+function multiFileIngestionForm(fileCount: number): FormData {
+  const form = new FormData();
+  form.set("expectedOid", zeroOid());
+  form.set("actor", "snapshot-batch-test");
+  form.set("idempotencyKey", `snapshot-batch-${fileCount}`);
+  form.set("committedAtSeconds", "1700000000");
+  form.set("message", "Publish batched snapshot");
+  for (let index = 0; index < fileCount; index += 1) {
+    form.append(
+      "files",
+      new Blob([`snapshot file ${index}\n`]),
+      `file-${String(index).padStart(2, "0")}.txt`
+    );
+  }
+  return form;
+}
+
 async function postIngestion(
   owner: string,
   repo: string,
@@ -102,6 +120,99 @@ async function postIngestion(
 }
 
 describe("internal ingestion", () => {
+  it("writes a 20-file snapshot in bounded concurrent batches before publishing its manifest", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-write-batches");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const snapshotPrefix = `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/`;
+    const put = env.REPO_BUCKET.put.bind(env.REPO_BUCKET);
+    let activeFileWrites = 0;
+    let maximumFileWrites = 0;
+    let fileWriteCount = 0;
+    let releaseFirstBatch!: () => void;
+    const firstBatchStarted = new Promise<void>((resolve) => {
+      releaseFirstBatch = resolve;
+    });
+    const putSpy = vi
+      .spyOn(env.REPO_BUCKET, "put")
+      .mockImplementation(async (...args: Parameters<typeof put>) => {
+        const key = String(args[0]);
+        if (key.startsWith(snapshotPrefix) && key.includes("/files/")) {
+          fileWriteCount += 1;
+          activeFileWrites += 1;
+          maximumFileWrites = Math.max(maximumFileWrites, activeFileWrites);
+          if (activeFileWrites === 5) releaseFirstBatch();
+          await firstBatchStarted;
+          try {
+            return await put(...args);
+          } finally {
+            activeFileWrites -= 1;
+          }
+        }
+        return await put(...args);
+      });
+
+    const response = await postIngestion(owner, repo, multiFileIngestionForm(20)).finally(() =>
+      putSpy.mockRestore()
+    );
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as IngestionResponse;
+    expect(fileWriteCount).toBe(20);
+    expect(maximumFileWrites).toBe(5);
+    const manifestKey = snapshotObjectKey({
+      env,
+      repositoryId: seeded.repositoryId,
+      commitSha: body.acceptedWrite.afterSha,
+    });
+    expect(manifestKey).not.toBeNull();
+    const manifest = await env.REPO_BUCKET.get(manifestKey!);
+    expect(((await manifest!.json()) as SnapshotManifest).files).toHaveLength(20);
+  });
+
+  it("keeps the snapshot lease until every started file write settles after a sibling fails", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-write-failure");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const snapshotPrefix = `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/`;
+    const put = env.REPO_BUCKET.put.bind(env.REPO_BUCKET);
+    let resolveHeldWrite!: () => void;
+    const heldWrite = new Promise<void>((resolve) => {
+      resolveHeldWrite = resolve;
+    });
+    let resolveBatchStarted!: () => void;
+    const batchStarted = new Promise<void>((resolve) => {
+      resolveBatchStarted = resolve;
+    });
+    let startedFileWrites = 0;
+    const putSpy = vi
+      .spyOn(env.REPO_BUCKET, "put")
+      .mockImplementation(async (...args: Parameters<typeof put>) => {
+        const key = String(args[0]);
+        if (!key.startsWith(snapshotPrefix) || !key.includes("/files/")) return await put(...args);
+        startedFileWrites += 1;
+        if (startedFileWrites === 2) resolveBatchStarted();
+        if (key.endsWith("/file-00.txt")) throw new Error("injected snapshot write failure");
+        if (key.endsWith("/file-01.txt")) await heldWrite;
+        return await put(...args);
+      });
+
+    const responsePromise = postIngestion(owner, repo, multiFileIngestionForm(5));
+    await batchStarted;
+    const deletion = await env.REPO_DO.get(
+      env.REPO_DO.idFromName(seeded.doName)
+    ).beginRepositoryDeletion();
+    expect(deletion.ready).toBe(false);
+    resolveHeldWrite();
+    const response = await responsePromise.finally(() => putSpy.mockRestore());
+    expect(response.status).toBe(500);
+    const objects = await env.REPO_BUCKET.list({ prefix: snapshotPrefix });
+    expect(objects.objects.some((object) => object.key.endsWith("/manifest.json"))).toBe(false);
+  });
+
   it("builds a nested Git commit, commits main through ref CAS, and replays without a new pack", async () => {
     const owner = "ingest";
     const repo = uniqueRepoId("round-trip");

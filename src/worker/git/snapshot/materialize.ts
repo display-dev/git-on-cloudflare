@@ -4,7 +4,7 @@ import type { Logger } from "@/worker/common/logger";
 import type { AcceptedWriteFact } from "@/worker/git/acceptedWrite";
 import type { Limiter } from "@/worker/git/operations/limits";
 import type { BeginSnapshotMaterializationResult } from "@/worker/do/repo/repositoryLifecycle";
-import { countSubrequest } from "@/worker/git/operations/limits";
+import { countSubrequest, MAX_SIMULTANEOUS_CONNECTIONS } from "@/worker/git/operations/limits";
 import { readCommit } from "@/worker/git/operations/read/commits";
 import { readBlob } from "@/worker/git/operations/read/objects";
 import {
@@ -18,6 +18,9 @@ const MAX_FILES = 100;
 const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 const MAX_PATH_BYTES = 4096;
 const MAX_PATH_SEGMENTS = 128;
+// The shared limiter enforces Cloudflare's connection ceiling. Use one fewer
+// file per lease-renewal batch so this path does not try to occupy every slot.
+const SNAPSHOT_WRITE_CONCURRENCY = Math.max(1, MAX_SIMULTANEOUS_CONNECTIONS - 1);
 
 export type SnapshotLimitReason =
   | "snapshot-file-count-limit"
@@ -209,18 +212,37 @@ export async function materializeAcceptedWrite(args: {
 
     await visitTree(commit.tree, "");
     const root = snapshotRoot(prefix, args.fact.repositoryId, args.fact.afterSha);
-    // Keep file writes sequential so a failed renewal cannot release the lease
-    // while an earlier R2 put remains in flight. Manifest-last ordering remains
-    // the readiness boundary.
-    for (const file of files) {
+    // Renew before each bounded batch and await every started write, including
+    // failures, before the lease can be released. This preserves the original
+    // no-write-after-release guarantee without serializing independent R2 puts.
+    // Manifest-last ordering remains the readiness boundary.
+    for (let offset = 0; offset < files.length; offset += SNAPSHOT_WRITE_CONCURRENCY) {
       await renewLease();
-      count(cacheCtx, args.log, "r2:put-snapshot-file");
-      await args.limiter.run("r2:put-snapshot-file", () =>
-        args.env.REPO_BUCKET.put(`${root}/files/${file.path}`, file.bytes, {
-          httpMetadata: { contentType: "application/octet-stream" },
-          customMetadata: { sha256: file.sha256 },
+      const batch = files.slice(offset, offset + SNAPSHOT_WRITE_CONCURRENCY);
+      const writes = await Promise.allSettled(
+        batch.map((file) => {
+          count(cacheCtx, args.log, "r2:put-snapshot-file");
+          return args.limiter.run("r2:put-snapshot-file", () =>
+            args.env.REPO_BUCKET.put(`${root}/files/${file.path}`, file.bytes, {
+              httpMetadata: { contentType: "application/octet-stream" },
+              customMetadata: { sha256: file.sha256 },
+            })
+          );
         })
       );
+      const failedWrite = writes.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected"
+      );
+      for (const [index, result] of writes.entries()) {
+        if (result.status !== "rejected") continue;
+        args.log.warn("snapshot:file-write-failed", {
+          repositoryId: args.fact.repositoryId,
+          commitSha: args.fact.afterSha,
+          path: batch[index]!.path,
+          error: String(result.reason),
+        });
+      }
+      if (failedWrite) throw failedWrite.reason;
     }
     const manifest: SnapshotManifest = {
       version: 1,
