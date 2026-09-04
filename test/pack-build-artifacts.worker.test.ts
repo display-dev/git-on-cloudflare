@@ -13,6 +13,41 @@ import { buildTreePayload } from "./util/packed-repo";
 import { uniqueRepoId } from "./util/test-helpers";
 
 describe("buildPackV2Artifacts", () => {
+  it("resolves an empty in-memory pack without invoking an object callback", async () => {
+    const pack = await buildPack([]);
+    const packKey = `test/memory-empty-${uniqueRepoId()}.pack`;
+    const scan = await scanPack({
+      env,
+      packKey,
+      packSize: pack.byteLength,
+      packData: pack,
+      limiter: makeLimiter(),
+      countSubrequest: () => {},
+      log,
+    });
+    const resolved = await resolveDeltasAndWriteIdx({
+      env,
+      packKey,
+      packSize: pack.byteLength,
+      packData: pack,
+      persistArtifacts: false,
+      limiter: makeLimiter(),
+      countSubrequest: () => {},
+      log,
+      scanResult: scan,
+      repoId: uniqueRepoId(),
+      onResolvedObject: () => {
+        throw new Error("empty pack invoked object callback");
+      },
+    });
+
+    expect(resolved.objectCount).toBe(0);
+    expect(resolved.idxView.count).toBe(0);
+    expect(resolved.idxData).toBeDefined();
+    expect(resolved.refIndexData).toBeDefined();
+    expect(await env.REPO_BUCKET.head(packKey)).toBeNull();
+  });
+
   it("scans and resolves an in-memory OFS delta across one-byte chunks", async () => {
     const basePayload = new TextEncoder().encode("base payload\n");
     const suffix = new TextEncoder().encode("cross-chunk suffix\n");

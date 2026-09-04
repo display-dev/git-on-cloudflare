@@ -1705,12 +1705,33 @@ describe("stock Smart HTTP receive spike", () => {
       inputRequestBytes: emptyPack.byteLength,
       inputRequestSha256: emptySha256,
       packBytes: emptyPack.byteLength,
-      commands: [{ oldOid: active.commitOid, newOid: active.commitOid, ref: "refs/heads/main" }],
+      commands: [{ oldOid: "0".repeat(40), newOid: active.commitOid, ref: "refs/heads/new" }],
     });
     expect(emptyPlan.incomingObjectCount).toBe(0);
     expect(emptyPlan.visitedIncomingObjectCount).toBe(0);
     expect(emptyPlan.semanticExternalOids).toEqual([active.commitOid]);
     expect(emptyPlan.requiredRootOids).toEqual([active.commitOid]);
+    cacheCtx.memo = {};
+    const directEmptyRequestKey = `${prefix}/native-receive/input-stock-direct-empty.request`;
+    const directEnv = { ...env, STOCK_RECEIVE_DIRECT_PACK: "1" } as Env & {
+      STOCK_RECEIVE_DIRECT_PACK: string;
+    };
+    const directEmptyPlan = await planStockReceive({
+      ...planArgs,
+      env: directEnv,
+      operationId: "stock-direct-empty-plan-operation",
+      inputRequestKey: directEmptyRequestKey,
+      inputRequestBytes: emptyPack.byteLength,
+      inputRequestSha256: emptySha256,
+      inputPackBytes: emptyPack,
+      packBytes: emptyPack.byteLength,
+      commands: [{ oldOid: active.commitOid, newOid: active.commitOid, ref: "refs/heads/main" }],
+    });
+    expect(directEmptyPlan.executionMode).toBe("stock-container");
+    expect(directEmptyPlan.incomingObjectCount).toBe(0);
+    expect(directEmptyPlan.visitedIncomingObjectCount).toBe(0);
+    expect(directEmptyPlan.semanticExternalOids).toEqual([active.commitOid]);
+    expect(directEmptyPlan.requiredRootOids).toEqual([active.commitOid]);
     await env.REPO_BUCKET.delete([
       inputRequestKey,
       plan.prerequisitePackKey,
@@ -1718,6 +1739,9 @@ describe("stock Smart HTTP receive spike", () => {
       emptyRequestKey,
       emptyPlan.prerequisitePackKey,
       emptyPlan.closureManifestKey,
+      directEmptyRequestKey,
+      directEmptyPlan.prerequisitePackKey,
+      directEmptyPlan.closureManifestKey,
     ]);
   });
 

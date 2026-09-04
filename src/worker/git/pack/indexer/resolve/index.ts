@@ -96,7 +96,9 @@ export async function resolveDeltasAndWriteIdx(opts: ResolveOptions): Promise<Re
 
   log.info("resolve:start", { objectCount, unresolvedCount });
   throwIfAborted(opts.signal, log, "resolve:start");
-  if (unresolvedCount === 0 && !opts.onResolvedObject) {
+  // An empty pack cannot invoke the resolved-object callback. Return its valid
+  // empty IDX/PREF artifacts before readers try to preload entry zero.
+  if (objectCount === 0 || (unresolvedCount === 0 && !opts.onResolvedObject)) {
     return await writeAndParseIdx(resolveOpts, packKey, packSize, table, objectCount, packChecksum);
   }
   opts.onProgress?.(`Resolving deltas: 0% (0/${unresolvedCount})\r`);
