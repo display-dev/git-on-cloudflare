@@ -1,7 +1,7 @@
 import { assert, test } from "vitest";
 import type { PktItem } from "@/worker/git/core";
 import { concatChunks, decodePktLines, flushPkt } from "@/worker/git";
-import { buildAckSection } from "@/worker/git/operations/fetch/protocol";
+import { buildAckOnlyResponse, buildAckSection } from "@/worker/git/operations/fetch/protocol";
 import { createSidebandPacketChunks } from "@/worker/git/operations/fetch/sideband";
 
 function findLine(items: PktItem[], text: string): number {
@@ -42,7 +42,7 @@ test("packetized response emits NAK when no common haves and done=false", () => 
   assert.strictEqual(bandLine.raw?.[0], 0x01);
 });
 
-test("packetized response emits ACK common lines and the final ready line", () => {
+test("packetized response emits protocol-v2 ACK lines followed by ready", () => {
   const firstOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
   const secondOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
   const items = decodePktLines(
@@ -51,13 +51,24 @@ test("packetized response emits ACK common lines and the final ready line", () =
 
   const ackIndex = findLine(items, "acknowledgments\n");
   assert.isTrue(ackIndex >= 0);
-  assert.strictEqual(expectLine(items[ackIndex + 1]).text, `ACK ${firstOid} common\n`);
-  assert.strictEqual(expectLine(items[ackIndex + 2]).text, `ACK ${secondOid} ready\n`);
-  assert.strictEqual(items[ackIndex + 3]?.type, "delim");
+  assert.strictEqual(expectLine(items[ackIndex + 1]).text, `ACK ${firstOid}\n`);
+  assert.strictEqual(expectLine(items[ackIndex + 2]).text, `ACK ${secondOid}\n`);
+  assert.strictEqual(expectLine(items[ackIndex + 3]).text, "ready\n");
+  assert.strictEqual(items[ackIndex + 4]?.type, "delim");
 });
 
 test("packetized response omits acknowledgments when done=true", () => {
   const items = decodePktLines(buildPacketizedResponse(new Uint8Array([0xff, 0x00]), true, []));
   assert.isTrue(findLine(items, "packfile\n") >= 0);
   assert.strictEqual(findLine(items, "acknowledgments\n"), -1);
+});
+
+test("acknowledgment-only response does not claim readiness without a packfile", async () => {
+  const oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const response = buildAckOnlyResponse([oid]);
+  const items = decodePktLines(new Uint8Array(await response.arrayBuffer()));
+
+  assert.isTrue(findLine(items, `ACK ${oid}\n`) >= 0);
+  assert.strictEqual(findLine(items, "ready\n"), -1);
+  assert.strictEqual(findLine(items, "packfile\n"), -1);
 });

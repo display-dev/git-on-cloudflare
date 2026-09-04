@@ -631,25 +631,29 @@ describe("git fetch streaming (default)", () => {
     const negotiateBytes = new Uint8Array(await negotiateRes.arrayBuffer());
     const negotiateLines = decodePktLines(negotiateBytes);
     let hasAcknowledgments = false;
+    let hasReady = false;
     let hasPackfile = false;
     let hasParentAck = false;
 
     for (const line of negotiateLines) {
       if (line.type === "line") {
         if (line.text === "acknowledgments\n") hasAcknowledgments = true;
+        if (line.text === "ready\n") hasReady = true;
         if (line.text === "packfile\n") hasPackfile = true;
         if (line.text && line.text.includes(`ACK ${parentOid}`)) hasParentAck = true;
       }
     }
 
-    // Should only have acknowledgments, no packfile
+    // A common base lets the server declare readiness and return the packfile
+    // immediately, without another stateless HTTP negotiation round.
     expect(
       hasAcknowledgments,
       "Negotiation response should contain 'acknowledgments\\n' pkt-line"
     ).toBe(true);
-    expect(hasPackfile, "Negotiation response should NOT contain 'packfile\\n' pkt-line").toBe(
-      false
+    expect(hasReady, "Negotiation response should contain a standalone 'ready\\n' pkt-line").toBe(
+      true
     );
+    expect(hasPackfile, "Ready response should contain 'packfile\\n' pkt-line").toBe(true);
     expect(hasParentAck, `Negotiation should ACK parent ${parentOid}`).toBe(true);
 
     // Now fetch with done

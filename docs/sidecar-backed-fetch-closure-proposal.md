@@ -103,7 +103,8 @@ The pressure test changed the plan in four important ways: sidecar readiness is 
 | State                                       | Behavior                                                    |
 | ------------------------------------------- | ----------------------------------------------------------- |
 | Initial clone, no haves                     | Existing idx-only path; sidecar not required                |
-| Negotiation request, `done=false`           | Existing ACK-only behavior; sidecar not required            |
+| Negotiation request, no common base         | ACK-only `NAK`; sidecar not required                        |
+| Negotiation request, common base found      | Sidecar closure, `ready`, then stream pack                  |
 | Final fetch, all sidecars valid             | Sidecar closure, then stream pack                           |
 | Final fetch with duplicate wants            | Queue and send each canonical active object once            |
 | Final fetch reaches duplicate OID in packs  | Newest snapshot-order pack is canonical                     |

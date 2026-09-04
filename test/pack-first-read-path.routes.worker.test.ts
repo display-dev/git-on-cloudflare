@@ -51,7 +51,9 @@ describe("pack-first read path routes", () => {
     );
     expect(ackResponse.status).toBe(200);
     const ackLines = decodePktTextLines(new Uint8Array(await ackResponse.arrayBuffer()));
-    expect(ackLines).toContain(`ACK ${seeded.baseCommit.oid} ready`);
+    expect(ackLines).toContain(`ACK ${seeded.baseCommit.oid}`);
+    expect(ackLines).toContain("ready");
+    expect(ackLines).toContain("packfile");
 
     const fetchResponse = await workerExports.default.fetch(
       `https://example.com/${owner}/${repo}/git-upload-pack`,

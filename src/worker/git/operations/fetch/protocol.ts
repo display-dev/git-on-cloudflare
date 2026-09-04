@@ -13,11 +13,12 @@ export function buildAckSection(ackOids: string[], done: boolean): Uint8Array[] 
   if (!done) {
     chunks.push(pktLine("acknowledgments\n"));
     if (ackOids && ackOids.length > 0) {
-      for (let i = 0; i < ackOids.length; i++) {
-        const oid = ackOids[i];
-        const suffix = i === ackOids.length - 1 ? "ready" : "common";
-        chunks.push(pktLine(`ACK ${oid} ${suffix}\n`));
+      for (const oid of ackOids) {
+        chunks.push(pktLine(`ACK ${oid}\n`));
       }
+      // Protocol v2 represents readiness as its own packet. The v0/v1
+      // "ACK <oid> ready" spelling is not valid in a v2 response.
+      chunks.push(pktLine("ready\n"));
     } else {
       chunks.push(pktLine("NAK\n"));
     }
@@ -35,10 +36,8 @@ export function buildAckOnlyResponse(ackOids: string[], cacheCtx?: CacheContext)
   const chunks: Uint8Array[] = [pktLine("acknowledgments\n")];
 
   if (ackOids && ackOids.length > 0) {
-    for (let i = 0; i < ackOids.length; i++) {
-      const oid = ackOids[i];
-      const suffix = i === ackOids.length - 1 ? "ready" : "common";
-      chunks.push(pktLine(`ACK ${oid} ${suffix}\n`));
+    for (const oid of ackOids) {
+      chunks.push(pktLine(`ACK ${oid}\n`));
     }
   } else {
     chunks.push(pktLine("NAK\n"));

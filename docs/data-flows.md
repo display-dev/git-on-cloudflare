@@ -29,7 +29,7 @@ This document describes the primary data flows of the server: pushing (receive-p
 2. For `POST /:owner/:repo/git-upload-pack` with a v2 body:
    - `ls-refs` command: reads the DO via RPC (`getHead()` and `listRefs()`) and responds with HEAD + refs
    - `fetch` command:
-     - Negotiation phase (`done=false`): server returns an acknowledgments block only (ACK/NAK), no `packfile` section
+     - Negotiation phase (`done=false`): with no common base, server returns an acknowledgments-only `NAK`; with a common base, server returns protocol-v2 `ACK` lines, a standalone `ready` packet, and the `packfile` section in the same response
      - Parses wants/haves and computes minimal closure using frontier-subtract approach with stop sets
      - Loads the active pack catalog via `src/git/object-store/catalog.ts#loadActivePackCatalog()`, memoized per request with limiter + soft budget
      - **Streaming pack assembly** (no buffering):

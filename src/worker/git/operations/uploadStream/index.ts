@@ -2,13 +2,12 @@ import type { CacheContext } from "@/worker/cache";
 import type { ServeUploadPackPlan } from "../fetch/types";
 import type { BeginRepositoryReadResult } from "@/worker/do/repo/repositoryLifecycle";
 
-import { pktLine } from "@/worker/git/core";
 import { responseCacheControl } from "@/worker/cache/policy";
 import { createLogger, getRepoStub } from "@/worker/common";
 import { getLimiter, countSubrequest } from "../limits";
 import { parseFetchArgs } from "../args";
 import { findCommonHaves } from "../closure";
-import { buildAckOnlyResponse } from "../fetch/protocol";
+import { buildAckOnlyResponse, buildAckSection } from "../fetch/protocol";
 import { repositoryNotReadyResponse } from "../fetch/responses";
 import {
   buildServeUploadPackPlan,
@@ -75,13 +74,15 @@ export async function handleFetchV2Streaming(
     return buildAckOnlyResponse([], cacheCtx);
   }
 
+  let ackOids: string[] = [];
   if (!done) {
-    let ackOids: string[] = [];
     if (haves.length > 0) {
       ackOids = await findCommonHaves(env, repoId, haves, cacheCtx);
       log.debug("stream:fetch:negotiation", { haves: haves.length, acks: ackOids.length });
     }
-    return buildAckOnlyResponse(ackOids, cacheCtx);
+    if (ackOids.length === 0) {
+      return buildAckOnlyResponse(ackOids, cacheCtx);
+    }
   }
 
   const limiter = getLimiter(cacheCtx);
@@ -238,7 +239,11 @@ export async function handleFetchV2Streaming(
         }
       };
       try {
-        controller.enqueue(pktLine("packfile\n"));
+        // A v2 `ready` response must carry the packfile in the same response.
+        // When the client has already sent `done`, acknowledgments are omitted.
+        for (const chunk of buildAckSection(ackOids, done)) {
+          controller.enqueue(chunk);
+        }
         // Once the response body has started, later failures must travel over
         // Git sideband because the HTTP status line is already committed.
         emitProgress(controller, "Preparing pack...\n");

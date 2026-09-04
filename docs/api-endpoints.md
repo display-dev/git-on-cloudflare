@@ -38,7 +38,7 @@ git pull https://your-domain.com/owner/repo
 
   Notes:
   - Streaming with side-band-64k progress.
-  - During negotiation (`done=false`), the server returns an acknowledgments section only (no `packfile` section).
+  - During negotiation (`done=false`), a request with no common base receives an acknowledgments-only `NAK`. When a common base is found, the server sends protocol-v2 `ACK` lines, a standalone `ready` packet, and the `packfile` section in the same response.
   - If the repository has no packs yet, the server returns `503 Service Unavailable` with headers `Retry-After: 5` and `X-Git-Error: repository-not-ready`.
 
 ### Push Operations

@@ -46,15 +46,9 @@ function buildFetchBody({
   return out;
 }
 
-function parseAckLines(respBytes: Uint8Array): string[] {
+function parseResponseLines(respBytes: Uint8Array): string[] {
   const items = decodePktLines(respBytes);
-  const acks: string[] = [];
-  for (const it of items) {
-    if (it.type === "line" && (it as any).text.startsWith("ACK ")) {
-      acks.push((it as any).text.trim());
-    }
-  }
-  return acks;
+  return items.filter((item) => item.type === "line").map((item) => item.text.trim());
 }
 
 function randomOid(seed: string) {
@@ -91,16 +85,10 @@ it("findCommonHaves batches and ACKs present haves preserving order and de-dup",
   expect(res.status).toBe(200);
 
   const bytes = new Uint8Array(await res.arrayBuffer());
-  const ackLines = parseAckLines(bytes);
+  const responseLines = parseResponseLines(bytes);
+  const ackLines = responseLines.filter((line) => line.startsWith("ACK "));
   // Expect two ACKs for commitOid and treeOid, de-duplicated, preserving first-order appearance
-  expect(ackLines.length).toBeGreaterThanOrEqual(1);
-  expect(ackLines[0]).toBe(`ACK ${commitOid} common`);
-  // Last ACK should end with ready when there is at least one ACK
-  const last = ackLines[ackLines.length - 1];
-  expect(last.startsWith("ACK ")).toBe(true);
-  expect(last.endsWith("ready")).toBe(true);
-  // Ensure treeOid is acknowledged somewhere (order after commitOid, before final ready suffix check)
-  expect(ackLines.some((l) => l === `ACK ${treeOid} common` || l === `ACK ${treeOid} ready`)).toBe(
-    true
-  );
+  expect(ackLines).toEqual([`ACK ${commitOid}`, `ACK ${treeOid}`]);
+  expect(responseLines).toContain("ready");
+  expect(responseLines).toContain("packfile");
 });
