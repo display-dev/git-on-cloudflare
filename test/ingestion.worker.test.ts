@@ -403,6 +403,34 @@ describe("internal ingestion", () => {
     expect(objects.objects[0]!.key).toMatch(/\/bundle\.bin$/);
   });
 
+  it("waits for concurrent prebuilt sidecar writes before failed-receive cleanup", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("prebuilt-sidecar-cleanup");
+    const doName = `repo:${owner}-${repo}`;
+    await setupRepoForTests(env, owner, repo, { doName });
+    const packPrefix = `do/${env.REPO_DO.idFromName(doName).toString()}/objects/pack/`;
+    const put = env.REPO_BUCKET.put.bind(env.REPO_BUCKET);
+    const putSpy = vi
+      .spyOn(env.REPO_BUCKET, "put")
+      .mockImplementation(async (...args: Parameters<typeof put>) => {
+        const key = String(args[0]);
+        if (key.startsWith(packPrefix) && key.endsWith(".idx")) {
+          throw new Error("injected prebuilt idx write failure");
+        }
+        if (key.startsWith(packPrefix) && key.endsWith(".refs")) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        return await put(...args);
+      });
+
+    const response = await postIngestion(owner, repo, multiFileIngestionForm(5)).finally(() =>
+      putSpy.mockRestore()
+    );
+    expect(response.status).toBe(500);
+    const objects = await env.REPO_BUCKET.list({ prefix: packPrefix });
+    expect(objects.objects.filter((object) => object.key.includes("pack-rx-"))).toHaveLength(0);
+  });
+
   it("repairs a post-commit manifest failure through the durable receipt replay", async () => {
     const owner = "ingest";
     const repo = uniqueRepoId("snapshot-replay-repair");

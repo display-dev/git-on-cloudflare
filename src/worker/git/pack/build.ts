@@ -13,6 +13,12 @@ export type BuildPackV2Options = {
   compressionLevel?: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | undefined;
 };
 
+export type PackV2Artifacts = {
+  pack: Uint8Array;
+  idx: Uint8Array;
+  refs: Uint8Array;
+};
+
 /**
  * Builds a PACKv2 file from a list of thick objects (no deltas expected here).
  * Shared between upload-pack assembly and DO hydration segment builder.
@@ -59,7 +65,7 @@ export async function buildPackV2(
 export async function buildPackV2Artifacts(
   objs: { type: GitObjectType; payload: Uint8Array }[],
   options: BuildPackV2Options = {}
-): Promise<{ pack: Uint8Array; idx: Uint8Array; refs: Uint8Array }> {
+): Promise<PackV2Artifacts> {
   if (
     options.compressionLevel !== undefined &&
     (!Number.isInteger(options.compressionLevel) ||

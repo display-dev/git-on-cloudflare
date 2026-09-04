@@ -1,17 +1,16 @@
 import { hexToBytes } from "@/worker/common";
 import { concatChunks } from "@/worker/git/core/pktline";
 import { computeOid, type GitObjectType } from "@/worker/git/core/objects";
-import { buildPackV2 } from "@/worker/git/pack/build";
+import { buildPackV2Artifacts, type PackV2Artifacts } from "@/worker/git/pack/build";
 
 export type IngestionFile = {
   path: string;
   bytes: Uint8Array;
 };
 
-export type BuiltIngestionCommit = {
+export type BuiltIngestionCommit = PackV2Artifacts & {
   commitOid: string;
   treeOid: string;
-  pack: Uint8Array;
   objectCount: number;
 };
 
@@ -137,10 +136,11 @@ export async function buildIngestionCommit(args: {
   objects.set(commitOid, { type: "commit", oid: commitOid, payload: commitPayload });
   const packObjects = Array.from(objects.values());
 
+  const artifacts = await buildPackV2Artifacts(packObjects);
   return {
     commitOid,
     treeOid: tree.oid,
-    pack: await buildPackV2(packObjects),
+    ...artifacts,
     objectCount: packObjects.length,
   };
 }

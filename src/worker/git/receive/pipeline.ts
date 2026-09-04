@@ -1,4 +1,5 @@
 import type { CacheContext } from "@/worker/cache";
+import { bytesToHex } from "@/worker/common";
 import type { Logger } from "@/worker/common/logger";
 import type { RepoDurableObject } from "@/worker/do";
 import type { IngestionReceipt } from "@/worker/do/repo/repoState";
@@ -16,12 +17,18 @@ import {
   runPackConnectivityCheck,
   scanPack,
 } from "@/worker/git/pack/indexer";
-import { doPrefix, r2PackKey } from "@/worker/keys";
+import { parseIdxView } from "@/worker/git/object-store";
+import type { IdxView } from "@/worker/git/object-store/types";
+import type { PackV2Artifacts } from "@/worker/git/pack/build";
+import { doPrefix, packIndexKey, packRefsKey, r2PackKey } from "@/worker/keys";
 import { deleteStagedPack, stagePackToR2, type StagedPackUpload } from "./r2Upload";
 import { buildReceiveReportStatus, isReceiveAbort, throwIfReceiveAborted } from "./support";
 import { ReceivePipelineHttpError, type ReceivePipelineResult } from "./pipelineTypes";
 
 type RepoStub = DurableObjectStub<RepoDurableObject>;
+type PrebuiltPackArtifacts = Pick<PackV2Artifacts, "idx" | "refs"> & {
+  objectCount: number;
+};
 
 let afterFinalizeResponseForTesting: (() => void) | undefined;
 
@@ -180,6 +187,8 @@ type ExecuteReceivePipelineArgs = {
   commands: ReceiveCommand[];
   ingestionReceipt?: IngestionReceipt | undefined;
   acceptedWrites?: AcceptedWriteFact[] | undefined;
+  /** Exact artifacts built from trusted in-process objects, never client input. */
+  prebuiltPackArtifacts?: PrebuiltPackArtifacts | undefined;
   log: Logger;
   cacheCtx: CacheContext;
   limiter: Limiter;
@@ -245,33 +254,78 @@ export async function executeReceivePipeline(
       });
       throwIfReceiveAborted(args.request, args.log, "stage-pack");
 
-      const scanResult = await scanPack({
-        env: args.env,
-        packKey: stagedUpload.packKey,
-        packSize: stagedUpload.packBytes,
-        limiter: args.limiter,
-        countSubrequest: (n = 1) => args.countSubrequest("r2:scan-pack", n),
-        log: args.log,
-        signal: args.request.signal,
-        onProgress: args.onProgress,
-      });
-      throwIfReceiveAborted(args.request, args.log, "scan-pack");
+      let idxView: IdxView;
+      let idxBytes: number;
+      let objectCount: number;
+      if (args.prebuiltPackArtifacts) {
+        const artifacts = args.prebuiltPackArtifacts;
+        const parsedIdxView = parseIdxView(
+          stagedUpload.packKey,
+          artifacts.idx,
+          stagedUpload.packBytes
+        );
+        if (!parsedIdxView || parsedIdxView.count !== artifacts.objectCount) {
+          throw new Error("receive: invalid prebuilt pack artifacts");
+        }
+        idxView = parsedIdxView;
+        if (bytesToHex(idxView.packChecksum) !== stagedUpload.packSha1) {
+          throw new Error("receive: prebuilt artifacts do not match staged pack");
+        }
+        args.countSubrequest("r2:put-pack-idx");
+        args.countSubrequest("r2:put-pack-refs");
+        const packKey = stagedUpload.packKey;
+        const writes = await Promise.allSettled([
+          args.limiter.run("r2:put-pack-idx", () =>
+            args.env.REPO_BUCKET.put(packIndexKey(packKey), artifacts.idx)
+          ),
+          args.limiter.run("r2:put-pack-refs", () =>
+            args.env.REPO_BUCKET.put(packRefsKey(packKey), artifacts.refs)
+          ),
+        ]);
+        const failedWrite = writes.find(
+          (write): write is PromiseRejectedResult => write.status === "rejected"
+        );
+        if (failedWrite) throw failedWrite.reason;
+        throwIfReceiveAborted(args.request, args.log, "persist-prebuilt-pack-artifacts");
+        idxBytes = artifacts.idx.byteLength;
+        objectCount = artifacts.objectCount;
+        args.log.info("receive:prebuilt-pack-artifacts-persisted", {
+          objectCount,
+          idxBytes,
+          refsBytes: artifacts.refs.byteLength,
+        });
+      } else {
+        const scanResult = await scanPack({
+          env: args.env,
+          packKey: stagedUpload.packKey,
+          packSize: stagedUpload.packBytes,
+          limiter: args.limiter,
+          countSubrequest: (n = 1) => args.countSubrequest("r2:scan-pack", n),
+          log: args.log,
+          signal: args.request.signal,
+          onProgress: args.onProgress,
+        });
+        throwIfReceiveAborted(args.request, args.log, "scan-pack");
 
-      const resolveResult = await resolveDeltasAndWriteIdx({
-        env: args.env,
-        packKey: stagedUpload.packKey,
-        packSize: stagedUpload.packBytes,
-        limiter: args.limiter,
-        countSubrequest: (n = 1) => args.countSubrequest("r2:resolve-pack", n),
-        log: args.log,
-        scanResult,
-        activeCatalog: args.activeCatalog,
-        cacheCtx: args.cacheCtx,
-        repoId: args.repoId,
-        signal: args.request.signal,
-        onProgress: args.onProgress,
-      });
-      throwIfReceiveAborted(args.request, args.log, "resolve-pack");
+        const resolveResult = await resolveDeltasAndWriteIdx({
+          env: args.env,
+          packKey: stagedUpload.packKey,
+          packSize: stagedUpload.packBytes,
+          limiter: args.limiter,
+          countSubrequest: (n = 1) => args.countSubrequest("r2:resolve-pack", n),
+          log: args.log,
+          scanResult,
+          activeCatalog: args.activeCatalog,
+          cacheCtx: args.cacheCtx,
+          repoId: args.repoId,
+          signal: args.request.signal,
+          onProgress: args.onProgress,
+        });
+        throwIfReceiveAborted(args.request, args.log, "resolve-pack");
+        idxView = resolveResult.idxView;
+        idxBytes = resolveResult.idxBytes;
+        objectCount = resolveResult.objectCount;
+      }
 
       const connectivityStatuses = args.commands.map((command) => ({
         ref: command.ref,
@@ -282,7 +336,7 @@ export async function executeReceivePipeline(
         env: args.env,
         repoId: args.repoId,
         newPackKey: stagedUpload.packKey,
-        newIdxView: resolveResult.idxView,
+        newIdxView: idxView,
         newPackSize: stagedUpload.packBytes,
         activeCatalog: args.activeCatalog,
         commands: args.commands,
@@ -318,8 +372,8 @@ export async function executeReceivePipeline(
       stagedPack = {
         packKey: stagedUpload.packKey,
         packBytes: stagedUpload.packBytes,
-        idxBytes: resolveResult.idxBytes,
-        objectCount: resolveResult.objectCount,
+        idxBytes,
+        objectCount,
       };
     }
 

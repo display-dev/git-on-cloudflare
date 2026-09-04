@@ -380,6 +380,11 @@ async function handleIngestion(c: AppContext): Promise<Response> {
           createdAt: Date.now(),
         },
         acceptedWrites: [acceptedWrite],
+        prebuiltPackArtifacts: {
+          idx: built.idx,
+          refs: built.refs,
+          objectCount: built.objectCount,
+        },
         log,
         cacheCtx: c.var.cacheCtx,
         limiter,

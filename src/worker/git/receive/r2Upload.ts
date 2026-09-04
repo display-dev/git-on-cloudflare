@@ -11,6 +11,7 @@ const UPLOAD_PROGRESS_STEPS = 20;
 export type StagedPackUpload = {
   packKey: string;
   packBytes: number;
+  packSha1: string;
   cleanup(): Promise<void>;
 };
 
@@ -232,6 +233,7 @@ async function stageKnownLengthPack(args: {
     return {
       packKey: args.packKey,
       packBytes: totalBytes,
+      packSha1: bytesToHex(computedDigest),
       async cleanup() {
         await deleteStagedPackArtifacts({
           env: args.env,
@@ -375,6 +377,7 @@ async function stageMultipartPack(args: {
     return {
       packKey: args.packKey,
       packBytes: totalBytes,
+      packSha1: bytesToHex(computedDigest),
       async cleanup() {
         await deleteStagedPackArtifacts({
           env: args.env,
