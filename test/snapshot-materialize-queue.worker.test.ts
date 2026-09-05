@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createMessageBatch } from "cloudflare:test";
+import { createMessageBatch, runInDurableObject } from "cloudflare:test";
 import { env, exports as workerExports } from "cloudflare:workers";
 
 import { createLogger, zeroOid } from "@/worker/common";
 import { concatChunks, encodeGitObject, flushPkt, pktLine } from "@/worker/git/core";
-import { snapshotObjectKey } from "@/worker/git/snapshot/materialize";
+import { snapshotBundleObjectKey, snapshotObjectKey } from "@/worker/git/snapshot/materialize";
 import {
   SNAPSHOT_MAX_DELIVERY_ATTEMPTS,
   __test as snapshotTaskTest,
@@ -139,6 +139,8 @@ async function pushOversizedSnapshot(args: {
 }
 
 afterEach(() => {
+  snapshotTaskTest.setBeforeSnapshotProjectionObserver(undefined);
+  snapshotTaskTest.setTerminalSnapshotObserver(undefined);
   vi.restoreAllMocks();
 });
 
@@ -174,7 +176,7 @@ describe("snapshot materialization queue", () => {
     ).toBe(false);
   });
 
-  it("enqueues after an accepted push, materializes once, and converges on replay and deletion", async () => {
+  it("enqueues after an accepted push, pins without copied bytes, and converges on replay and deletion", async () => {
     const owner = "snapshot-queue";
     const repo = uniqueRepoId("delivery");
     const route = await setupRepoForTests(env, owner, repo);
@@ -203,12 +205,28 @@ describe("snapshot materialization queue", () => {
       commitSha: pushed.commitOid,
     });
     expect(manifestKey).not.toBeNull();
+    const bundleKey = snapshotBundleObjectKey({
+      env,
+      repositoryId: route.repositoryId,
+      commitSha: pushed.commitOid,
+    });
+    expect(bundleKey).not.toBeNull();
     await expect(env.REPO_BUCKET.head(manifestKey!)).resolves.toBeNull();
+    await expect(env.REPO_BUCKET.head(bundleKey!)).resolves.toBeNull();
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(route.doName));
+    const projectionProtection: boolean[] = [];
+    snapshotTaskTest.setBeforeSnapshotProjectionObserver(async () => {
+      projectionProtection.push(!(await stub.canDeleteSupersededGeneration()).safe);
+    });
+    const cacheOpen = vi.spyOn(caches, "open");
     await expect(runQueueMessage(message)).resolves.toEqual({ acked: true, retried: false });
-    await expect(env.REPO_BUCKET.head(manifestKey!)).resolves.toBeTruthy();
+    expect(cacheOpen).not.toHaveBeenCalled();
+    expect(projectionProtection).toEqual([true]);
+    await expect(stub.canDeleteSupersededGeneration()).resolves.toEqual({ safe: true });
+    await expect(env.REPO_BUCKET.head(manifestKey!)).resolves.toBeNull();
+    await expect(env.REPO_BUCKET.head(bundleKey!)).resolves.toBeNull();
     await expect(runQueueMessage(message)).resolves.toEqual({ acked: true, retried: false });
 
-    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(route.doName));
     await expect(stub.getSnapshotProjection(REF)).resolves.toMatchObject({
       snapshotCount: 1,
       current: { commitSha: pushed.commitOid },
@@ -256,6 +274,32 @@ describe("snapshot materialization queue", () => {
     });
   });
 
+  it("retries without pinning when the projection lease expires before the authority transaction", async () => {
+    const owner = "snapshot-queue";
+    const repo = uniqueRepoId("expired-projection-lease");
+    const route = await setupRepoForTests(env, owner, repo);
+    const seeded = await seedPackFirstRepo(route.doName);
+    const send = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockResolvedValue(createQueueSendResponse());
+    const pushed = await pushStreamingUpdate(owner, repo, seeded.nextCommit.oid, "expired\n");
+    const message = findSnapshotMessage(send.mock.calls);
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(route.doName));
+    snapshotTaskTest.setBeforeSnapshotProjectionObserver(async () => {
+      await runInDurableObject(stub, async (_instance, state) => {
+        const leases =
+          (await state.storage.get<Array<{ expiresAt: number }>>("repositoryReadLeases")) ?? [];
+        await state.storage.put(
+          "repositoryReadLeases",
+          leases.map((lease) => ({ ...lease, expiresAt: Date.now() - 1 }))
+        );
+      });
+    });
+
+    await expect(runQueueMessage(message)).resolves.toEqual({ acked: false, retried: true });
+    await expect(stub.getSnapshotPin(pushed.commitOid)).resolves.toBeNull();
+  });
+
   it("terminally acknowledges an oversized snapshot without advancing projection", async () => {
     const owner = "snapshot-queue";
     const repo = uniqueRepoId("oversized");
@@ -282,6 +326,13 @@ describe("snapshot materialization queue", () => {
     });
     expect(manifestKey).not.toBeNull();
     await expect(env.REPO_BUCKET.head(manifestKey!)).resolves.toBeNull();
+    const bundleKey = snapshotBundleObjectKey({
+      env,
+      repositoryId: route.repositoryId,
+      commitSha,
+    });
+    expect(bundleKey).not.toBeNull();
+    await expect(env.REPO_BUCKET.head(bundleKey!)).resolves.toBeNull();
     const stub = env.REPO_DO.get(env.REPO_DO.idFromName(route.doName));
     await expect(stub.getSnapshotProjection(REF)).resolves.toEqual({ snapshotCount: 0 });
   });

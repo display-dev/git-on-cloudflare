@@ -390,17 +390,21 @@ export async function runReachabilityGc(args: {
       }
       return retryResult(args.log, "missing-ref-index");
     }
+    const wants = Array.from(
+      new Set([...begin.refs.map((ref) => ref.oid), ...begin.snapshotPinOids])
+    );
     const closure = await computeNeededFromPackRefs({
       logLevel: args.env.LOG_LEVEL,
       repoId: args.repoId,
       packs: refSnapshot.packs,
-      wants: begin.refs.map((ref) => ref.oid),
+      wants,
       haves: [],
     });
     if (closure.type !== "Ready") return retryResult(args.log, closure.reason);
     args.log.info("reachability-gc:closure", {
       reachableObjects: closure.neededOids.length,
       sourcePacks: snapshotLoad.snapshot.packs.length,
+      snapshotPins: begin.snapshotPinOids.length,
     });
 
     // An immutable source that already contains exactly the closure needs no
@@ -481,6 +485,7 @@ export async function runReachabilityGc(args: {
       token: begin.lease.token,
       refsVersion: begin.refsVersion,
       packsetVersion: begin.packsetVersion,
+      snapshotPinVersion: begin.snapshotPinVersion,
       sourcePacks: begin.activeCatalog,
       retainedPackKey: retainedPack?.packKey,
       stagedPack: stagedUpload

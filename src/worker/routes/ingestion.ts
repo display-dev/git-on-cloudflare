@@ -1,5 +1,4 @@
 import { asBodyInit, asBufferSource, bytesToHex, getRepoStub, zeroOid } from "@/worker/common";
-import type { Logger } from "@/worker/common/logger";
 import { touchRepositoryUpdatedAt } from "@/worker/db/d1/dal/repositories";
 import type { BeginReceiveResult } from "@/worker/do/repo/catalog/shared";
 import { acceptedWriteFactsForCommands, emitAcceptedWriteFacts } from "@/worker/git/acceptedWrite";
@@ -8,27 +7,21 @@ import { countSubrequest } from "@/worker/git/operations/limits";
 import type { ReceiveCommand } from "@/worker/git/operations/validation";
 import { executeReceivePipeline } from "@/worker/git/receive/pipeline";
 import {
-  materializeAcceptedWrite,
-  publishStagedSnapshot,
-  releaseStagedSnapshot,
-  stageSnapshotBundle,
-  type StagedSnapshotBundle,
+  SNAPSHOT_MAX_FILES,
+  SNAPSHOT_MAX_PATH_SEGMENTS,
+  SNAPSHOT_MAX_TOTAL_BYTES,
 } from "@/worker/git/snapshot/materialize";
-import { snapshotEventProbeEnabled } from "@/worker/git/snapshot/config";
 import { resolveRepositoryRoute } from "@/worker/repositories/route";
 import { isValidOwnerRepo, MAX_PATH_LEN } from "@/shared/web";
 import { workerExecutionContext, type AppContext, type AppRouter } from "./hono";
 import { authorizeInternalRequest } from "./internalAuth";
 
 const INGESTION_REF = "refs/heads/main";
-const MAX_FILES = 100;
-const MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 // Bounded multipart framing/field overhead above the accepted file bytes.
-const MAX_MULTIPART_BYTES = MAX_TOTAL_BYTES + 1024 * 1024;
+const MAX_MULTIPART_BYTES = SNAPSHOT_MAX_TOTAL_BYTES + 1024 * 1024;
 const MAX_ACTOR_LENGTH = 200;
 const MAX_IDEMPOTENCY_KEY_LENGTH = 200;
 const MAX_MESSAGE_LENGTH = 500;
-const MAX_PATH_SEGMENTS = 128;
 
 type ParsedIngestionRequest = {
   files: IngestionFile[];
@@ -39,10 +32,6 @@ type ParsedIngestionRequest = {
   message: string;
   historyMode: "append" | "epoch";
 };
-
-type StagedSnapshotOutcome =
-  | { ok: true; staged: StagedSnapshotBundle | null }
-  | { ok: false; error: unknown };
 
 class IngestionRequestError extends Error {
   readonly status: number;
@@ -74,7 +63,7 @@ function validatePath(path: string): void {
   }
   const segments = path.split("/");
   if (
-    segments.length > MAX_PATH_SEGMENTS ||
+    segments.length > SNAPSHOT_MAX_PATH_SEGMENTS ||
     segments.some(
       (segment) =>
         !segment ||
@@ -152,8 +141,12 @@ async function parseIngestionRequest(request: Request): Promise<ParsedIngestionR
   const historyMode = historyModeValue ?? "append";
 
   const fileParts = form.getAll("files");
-  if (fileParts.length === 0 || fileParts.length > MAX_FILES) {
-    throw new IngestionRequestError(400, "invalid_file_count", `Expected 1-${MAX_FILES} files`);
+  if (fileParts.length === 0 || fileParts.length > SNAPSHOT_MAX_FILES) {
+    throw new IngestionRequestError(
+      400,
+      "invalid_file_count",
+      `Expected 1-${SNAPSHOT_MAX_FILES} files`
+    );
   }
   const seenPaths = new Set<string>();
   const files: IngestionFile[] = [];
@@ -168,11 +161,11 @@ async function parseIngestionRequest(request: Request): Promise<ParsedIngestionR
     }
     seenPaths.add(part.name);
     totalBytes += part.size;
-    if (totalBytes > MAX_TOTAL_BYTES) {
+    if (totalBytes > SNAPSHOT_MAX_TOTAL_BYTES) {
       throw new IngestionRequestError(
         413,
         "folder_too_large",
-        `Folder exceeds ${MAX_TOTAL_BYTES} bytes`
+        `Folder exceeds ${SNAPSHOT_MAX_TOTAL_BYTES} bytes`
       );
     }
     files.push({ path: part.name, bytes: new Uint8Array(await part.arrayBuffer()) });
@@ -202,21 +195,8 @@ async function sha256(value: string): Promise<string> {
   return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", asBufferSource(bytes))));
 }
 
-async function releaseStagedSnapshotSafely(
-  staged: StagedSnapshotBundle | null,
-  log: Logger
-): Promise<void> {
-  if (!staged) return;
-  try {
-    await releaseStagedSnapshot(staged);
-  } catch (error) {
-    // Snapshot state is a disposable projection and must not replace the
-    // authoritative Git outcome or its original error.
-    log.warn("ingestion:staged-snapshot-release-failed", { error: String(error) });
-  }
-}
-
 async function handleIngestion(c: AppContext): Promise<Response> {
+  const requestStartedAt = performance.now();
   const authResult = await authorizeInternalRequest(c);
   if (authResult) return authResult;
 
@@ -227,8 +207,14 @@ async function handleIngestion(c: AppContext): Promise<Response> {
   }
 
   const log = c.var.logFor({ service: "Ingestion" });
+  const phases: Record<string, number> = {};
+  const recordPhase = (phase: string, startedAt: number): void => {
+    phases[phase] = performance.now() - startedAt;
+  };
   try {
+    const multipartStartedAt = performance.now();
     const input = await parseIngestionRequest(c.req.raw);
+    recordPhase("multipartParseMs", multipartStartedAt);
     const route = await resolveRepositoryRoute(c.env, owner, repo, {
       mode: "allow-d1-fallback",
       db: c.var.db,
@@ -249,12 +235,14 @@ async function handleIngestion(c: AppContext): Promise<Response> {
     // history boundary that reachability GC can make physically effective.
     const parentOid =
       input.historyMode === "epoch" || input.expectedOid === zeroOid() ? null : input.expectedOid;
+    const packBuildStartedAt = performance.now();
     const built = await buildIngestionCommit({
       files: input.files,
       parentOid,
       committedAtSeconds: input.committedAtSeconds,
       message: input.message,
     });
+    recordPhase("gitObjectPackBuildMs", packBuildStartedAt);
     const keyHash = await sha256(input.idempotencyKey);
     // Preserve the original append-mode fingerprint exactly so a retry of a
     // request accepted before historyMode existed still returns its durable
@@ -271,24 +259,14 @@ async function handleIngestion(c: AppContext): Promise<Response> {
     const fingerprint = await sha256(JSON.stringify(fingerprintFields));
 
     count("do:get-ingestion-receipt");
+    const receiptStartedAt = performance.now();
     const priorReceipt = await limiter.run("do:get-ingestion-receipt", () =>
       stub.getIngestionReceipt(keyHash)
     );
+    recordPhase("receiptRpcMs", receiptStartedAt);
     if (priorReceipt) {
       if (priorReceipt.fingerprint !== fingerprint) {
         return jsonResponse({ error: "Idempotency key conflict" }, 409);
-      }
-      if (!snapshotEventProbeEnabled(c.env)) {
-        await materializeAcceptedWrite({
-          env: c.env,
-          repoId: route.doName,
-          fact: priorReceipt.acceptedWrite,
-          request: c.req.raw,
-          ctx,
-          limiter,
-          log,
-          source: { treeSha: built.treeOid, files: input.files },
-        });
       }
       return jsonResponse(
         {
@@ -301,15 +279,16 @@ async function handleIngestion(c: AppContext): Promise<Response> {
     }
 
     count("do:begin-receive");
+    const beginStartedAt = performance.now();
     const begin = await limiter.run<BeginReceiveResult>("do:begin-receive", async () => {
       return await stub.beginReceive();
     });
+    recordPhase("beginRpcMs", beginStartedAt);
     if (!begin.ok) {
       return jsonResponse({ error: "Repository is busy", retryAfter: begin.retryAfter }, 503);
     }
 
     let pipelineStarted = false;
-    let stagedSnapshotOutcome: Promise<StagedSnapshotOutcome> | undefined;
     try {
       const currentOid = begin.refs.find((ref) => ref.name === INGESTION_REF)?.oid ?? zeroOid();
 
@@ -343,23 +322,6 @@ async function handleIngestion(c: AppContext): Promise<Response> {
       });
       if (!packRequest.body) throw new Error("Failed to create ingestion pack stream");
 
-      if (!snapshotEventProbeEnabled(c.env)) {
-        // Start the independent immutable bundle upload before the accepted
-        // pack pipeline; only the manifest is held behind authoritative commit.
-        stagedSnapshotOutcome = stageSnapshotBundle({
-          env: c.env,
-          repoId: route.doName,
-          fact: acceptedWrite,
-          request: c.req.raw,
-          ctx,
-          limiter,
-          log,
-          source: { treeSha: built.treeOid, files: input.files },
-        }).then(
-          (staged) => ({ ok: true as const, staged }),
-          (error: unknown) => ({ ok: false as const, error })
-        );
-      }
       pipelineStarted = true;
       const result = await executeReceivePipeline({
         env: c.env,
@@ -389,13 +351,17 @@ async function handleIngestion(c: AppContext): Promise<Response> {
         cacheCtx: c.var.cacheCtx,
         limiter,
         countSubrequest: count,
+        onPhase: (phase, durationMs) => {
+          const key =
+            phase === "pack-idx-pref-persistence"
+              ? "packIdxPrefPersistenceMs"
+              : phase === "connectivity"
+                ? "connectivityMs"
+                : "repoFinalizePinCurrentMs";
+          phases[key] = durationMs;
+        },
       });
       if (!result.changed) {
-        const staged = await stagedSnapshotOutcome;
-        if (staged?.ok) await releaseStagedSnapshotSafely(staged.staged, log);
-        if (staged && !staged.ok) {
-          log.warn("ingestion:staged-snapshot-failed", { error: String(staged.error) });
-        }
         return jsonResponse({ error: "Ref conflict" }, 409);
       }
 
@@ -421,35 +387,22 @@ async function handleIngestion(c: AppContext): Promise<Response> {
         objectCount: built.objectCount,
         packBytes: built.pack.byteLength,
       });
-      const staged = await stagedSnapshotOutcome;
-      if (staged && !staged.ok) {
-        log.warn("ingestion:staged-snapshot-failed", {
-          committed: true,
-          error: String(staged.error),
-        });
-        throw staged.error;
-      }
-      if (staged?.staged) {
-        // executeReceivePipeline has verified the pack graph and committed the
-        // ref CAS to built.commitOid, which cryptographically binds treeOid.
-        try {
-          await publishStagedSnapshot(staged.staged);
-        } catch (error) {
-          log.warn("ingestion:staged-snapshot-failed", {
-            committed: true,
-            stage: "publish",
-            error: String(error),
-          });
-          throw error;
-        }
-      }
-      return jsonResponse({ acceptedWrite, treeSha: built.treeOid, replayed: false }, 201);
+      phases.requestToResponseMs = performance.now() - requestStartedAt;
+      log.info("ingestion:phase-attribution", {
+        repositoryId: route.repositoryId,
+        commitOid: built.commitOid,
+        ...phases,
+      });
+      return jsonResponse(
+        {
+          acceptedWrite,
+          treeSha: built.treeOid,
+          replayed: false,
+          ...(c.env.QUALIFICATION_MODE === "1" ? { qualificationTimings: phases } : {}),
+        },
+        201
+      );
     } catch (error) {
-      const staged = await stagedSnapshotOutcome;
-      if (staged?.ok) await releaseStagedSnapshotSafely(staged.staged, log);
-      if (staged && !staged.ok && staged.error !== error) {
-        log.warn("ingestion:staged-snapshot-failed", { error: String(staged.error) });
-      }
       if (!pipelineStarted) {
         count("do:abort-receive");
         await limiter

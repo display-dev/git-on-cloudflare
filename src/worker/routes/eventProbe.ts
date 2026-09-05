@@ -4,6 +4,7 @@ import type {
   ReconciledHeadProjectionResult,
   SnapshotReconcilePlan,
 } from "@/worker/do/repo/acceptedWrites";
+import type { BeginRepositoryReadResult } from "@/worker/do/repo/repositoryLifecycle";
 import { countSubrequest } from "@/worker/git/operations/limits";
 import { isValidRefName } from "@/worker/git/operations/validation";
 import { materializeAcceptedWrite } from "@/worker/git/snapshot/materialize";
@@ -46,6 +47,38 @@ function count(c: AppContext, op: string): void {
     c.var.logFor({ service: "SnapshotEventProbe" }).warn("event-probe:soft-budget-exhausted", {
       op,
     });
+  }
+}
+
+async function withSnapshotProjectionLease(
+  c: AppContext,
+  stub: ReturnType<typeof getRepoStub>,
+  required: boolean,
+  run: (readerToken: string | undefined) => Promise<Response>
+): Promise<Response> {
+  if (!required) return await run(undefined);
+  count(c, "do:begin-repository-read");
+  const reader = await c.var.limiter.run<BeginRepositoryReadResult>(
+    "do:begin-repository-read",
+    () => stub.beginRepositoryRead("snapshot-projection")
+  );
+  if (!reader.ok) {
+    return Response.json(
+      { error: reader.reason === "repository-deleting" ? "Repository is being deleted" : "Busy" },
+      { status: reader.reason === "repository-deleting" ? 409 : 503 }
+    );
+  }
+  try {
+    return await run(reader.token);
+  } finally {
+    count(c, "do:finish-repository-read");
+    await c.var.limiter
+      .run("do:finish-repository-read", () => stub.finishRepositoryRead(reader.token))
+      .catch((error) =>
+        c.var
+          .logFor({ service: "SnapshotEventProbe" })
+          .warn("event-probe:lease-release-failed", { error: String(error) })
+      );
   }
 }
 
@@ -110,44 +143,63 @@ async function materializeEntry(
     log.warn("event-probe:crash-before-snapshot", { entryId });
     return Response.json({ error: "Injected crash before snapshot" }, { status: 503 });
   }
-  const startedAt = performance.now();
-  if (entry.fact.afterSha !== zeroOid()) {
-    await materializeAcceptedWrite({
-      env: c.env,
-      repoId: route.doName,
-      fact: entry.fact,
-      request: c.req.raw,
-      ctx: workerExecutionContext(c),
-      limiter: c.var.limiter,
-      log,
-    });
-  }
-  if (crash === "after_snapshot") {
-    log.warn("event-probe:crash-after-snapshot", { entryId });
-    return Response.json({ error: "Injected crash after snapshot" }, { status: 503 });
-  }
-  count(c, "do:project-accepted-write");
-  const projection = await c.var.limiter.run<AcceptedWriteProjectionResult>(
-    "do:project-accepted-write",
-    () =>
-      stub.projectAcceptedWrite({
+  return await withSnapshotProjectionLease(
+    c,
+    stub,
+    entry.fact.afterSha !== zeroOid(),
+    async (readerToken) => {
+      const startedAt = performance.now();
+      let materializedTreeSha = zeroOid();
+      if (entry.fact.afterSha !== zeroOid()) {
+        const manifest = await materializeAcceptedWrite({
+          env: c.env,
+          repoId: route.doName,
+          fact: entry.fact,
+          request: c.req.raw,
+          ctx: workerExecutionContext(c),
+          limiter: c.var.limiter,
+          log,
+        });
+        if (!manifest)
+          return Response.json({ error: "Repository is being deleted" }, { status: 409 });
+        materializedTreeSha = manifest.treeSha;
+      }
+      if (crash === "after_snapshot") {
+        log.warn("event-probe:crash-after-snapshot", { entryId });
+        return Response.json({ error: "Injected crash after snapshot" }, { status: 503 });
+      }
+      count(c, "do:project-accepted-write");
+      const projection = await c.var.limiter.run<AcceptedWriteProjectionResult>(
+        "do:project-accepted-write",
+        () =>
+          stub.projectAcceptedWrite({
+            entryId,
+            commitSha: entry.fact.afterSha,
+            treeSha: materializedTreeSha,
+            materializedAt: Date.now(),
+            readerToken,
+          })
+      );
+      if ("status" in projection) {
+        if (projection.status === "invalid-snapshot") {
+          return Response.json({ error: "Invalid snapshot identity" }, { status: 422 });
+        }
+        if (projection.status === "projection-lease-expired") {
+          return Response.json({ error: "Snapshot projection lease expired" }, { status: 503 });
+        }
+        return Response.json({ error: "Repository is being deleted" }, { status: 409 });
+      }
+      const elapsedMs = performance.now() - startedAt;
+      log.info("event-probe:delivered", {
         entryId,
         commitSha: entry.fact.afterSha,
-        materializedAt: Date.now(),
-      })
+        elapsedMs,
+        snapshotCreated: projection.snapshotCreated,
+        pointerAdvanced: projection.pointerAdvanced,
+      });
+      return Response.json({ entry, projection, elapsedMs });
+    }
   );
-  if ("status" in projection) {
-    return Response.json({ error: "Repository is being deleted" }, { status: 409 });
-  }
-  const elapsedMs = performance.now() - startedAt;
-  log.info("event-probe:delivered", {
-    entryId,
-    commitSha: entry.fact.afterSha,
-    elapsedMs,
-    snapshotCreated: projection.snapshotCreated,
-    pointerAdvanced: projection.pointerAdvanced,
-  });
-  return Response.json({ entry, projection, elapsedMs });
 }
 
 async function reconcile(c: AppContext, route: RepositoryRoute, ref: string): Promise<Response> {
@@ -160,42 +212,61 @@ async function reconcile(c: AppContext, route: RepositoryRoute, ref: string): Pr
   );
   if (plan.status === "deliver") return await materializeEntry(c, route, plan.entry.id);
   if (plan.status !== "head_only") return Response.json({ plan });
-  if (plan.afterSha !== zeroOid()) {
-    await materializeAcceptedWrite({
-      env: c.env,
-      repoId: route.doName,
-      fact: {
-        repositoryId: route.repositoryId,
-        afterSha: plan.afterSha,
-        sourceSurface: "reconcile",
-      },
-      request: c.req.raw,
-      ctx: workerExecutionContext(c),
-      limiter: c.var.limiter,
-      log,
-    });
-  }
-  count(c, "do:project-reconciled-head");
-  const projection = await c.var.limiter.run<ReconciledHeadProjectionResult>(
-    "do:project-reconciled-head",
-    () =>
-      stub.projectReconciledHead({
+  return await withSnapshotProjectionLease(
+    c,
+    stub,
+    plan.afterSha !== zeroOid(),
+    async (readerToken) => {
+      let materializedTreeSha = zeroOid();
+      if (plan.afterSha !== zeroOid()) {
+        const manifest = await materializeAcceptedWrite({
+          env: c.env,
+          repoId: route.doName,
+          fact: {
+            repositoryId: route.repositoryId,
+            afterSha: plan.afterSha,
+            sourceSurface: "reconcile",
+          },
+          request: c.req.raw,
+          ctx: workerExecutionContext(c),
+          limiter: c.var.limiter,
+          log,
+        });
+        if (!manifest)
+          return Response.json({ error: "Repository is being deleted" }, { status: 409 });
+        materializedTreeSha = manifest.treeSha;
+      }
+      count(c, "do:project-reconciled-head");
+      const projection = await c.var.limiter.run<ReconciledHeadProjectionResult>(
+        "do:project-reconciled-head",
+        () =>
+          stub.projectReconciledHead({
+            ref: plan.ref,
+            commitSha: plan.afterSha,
+            treeSha: materializedTreeSha,
+            sequence: plan.sequence,
+            materializedAt: Date.now(),
+            readerToken,
+          })
+      );
+      if (projection.status === "invalid-snapshot") {
+        return Response.json({ error: "Invalid snapshot identity" }, { status: 422 });
+      }
+      if (projection.status === "projection-lease-expired") {
+        return Response.json({ error: "Snapshot projection lease expired" }, { status: 503 });
+      }
+      if (projection.status === "stale" || projection.status === "repository-deleting") {
+        log.info("event-probe:reconcile-stale", { ref: plan.ref, sequence: plan.sequence });
+        return Response.json({ plan, status: "stale" }, { status: 409 });
+      }
+      log.warn("event-probe:head-only-reconciled", {
         ref: plan.ref,
         commitSha: plan.afterSha,
-        sequence: plan.sequence,
-        materializedAt: Date.now(),
-      })
+        historyComplete: false,
+      });
+      return Response.json({ plan, projection, historyComplete: false });
+    }
   );
-  if (projection.status === "stale" || projection.status === "repository-deleting") {
-    log.info("event-probe:reconcile-stale", { ref: plan.ref, sequence: plan.sequence });
-    return Response.json({ plan, status: "stale" }, { status: 409 });
-  }
-  log.warn("event-probe:head-only-reconciled", {
-    ref: plan.ref,
-    commitSha: plan.afterSha,
-    historyComplete: false,
-  });
-  return Response.json({ plan, projection, historyComplete: false });
 }
 
 async function handleGet(c: AppContext): Promise<Response> {

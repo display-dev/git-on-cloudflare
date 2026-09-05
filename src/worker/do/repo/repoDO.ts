@@ -123,9 +123,13 @@ import {
   dropAcceptedWriteJournalEntry,
   getSnapshotReconcilePlanState,
   getSnapshotProjectionState,
+  getSnapshotPinState,
+  getSnapshotResolutionState,
+  listSnapshotPinsState,
   listAcceptedWriteJournalState,
   projectAcceptedWriteState,
   projectReconciledHeadState,
+  releaseSnapshotPinState,
 } from "./acceptedWrites";
 import {
   beginRepositoryDeletionState,
@@ -532,7 +536,9 @@ export class RepoDurableObject extends DurableObject {
   public async projectAcceptedWrite(args: {
     entryId: string;
     commitSha: string;
+    treeSha: string;
     materializedAt: number;
+    readerToken?: string;
   }) {
     await this.ensureAccessAndAlarm();
     return await projectAcceptedWriteState(this.ctx, args);
@@ -548,6 +554,29 @@ export class RepoDurableObject extends DurableObject {
     return await getSnapshotProjectionState(this.ctx, ref);
   }
 
+  public async getSnapshotPin(commitSha: string) {
+    await this.ensureAccessAndAlarm();
+    return await getSnapshotPinState(this.ctx, commitSha);
+  }
+
+  public async getSnapshotResolution(commitSha: string) {
+    await this.ensureAccessAndAlarm();
+    return await getSnapshotResolutionState(this.ctx, commitSha);
+  }
+
+  public async listSnapshotPins() {
+    await this.ensureAccessAndAlarm();
+    return await listSnapshotPinsState(this.ctx);
+  }
+
+  public async releaseSnapshotPin(
+    commitSha: string,
+    options?: { legacySnapshotExists?: boolean; qualificationOwned?: boolean }
+  ) {
+    await this.ensureAccessAndAlarm();
+    return await releaseSnapshotPinState(this.ctx, commitSha, options);
+  }
+
   public async dropAcceptedWriteForProbe(entryId: string) {
     await this.ensureAccessAndAlarm();
     return await dropAcceptedWriteJournalEntry(this.ctx, entryId);
@@ -556,8 +585,10 @@ export class RepoDurableObject extends DurableObject {
   public async projectReconciledHead(args: {
     ref: string;
     commitSha: string;
+    treeSha: string;
     sequence: number;
     materializedAt: number;
+    readerToken?: string;
   }) {
     await this.ensureAccessAndAlarm();
     return await projectReconciledHeadState(this.ctx, args);
@@ -744,6 +775,7 @@ export class RepoDurableObject extends DurableObject {
     token: string;
     refsVersion: number;
     packsetVersion: number;
+    snapshotPinVersion: number;
     sourcePacks: PackCatalogRow[];
     retainedPackKey?: string;
     stagedPack?: {
@@ -758,6 +790,7 @@ export class RepoDurableObject extends DurableObject {
       token: args.token,
       refsVersion: args.refsVersion,
       packsetVersion: args.packsetVersion,
+      snapshotPinVersion: args.snapshotPinVersion,
       sourcePacks: args.sourcePacks,
       retainedPackKey: args.retainedPackKey,
       stagedPack: args.stagedPack,
@@ -965,8 +998,10 @@ export class RepoDurableObject extends DurableObject {
     return await finishRepositoryMaintenanceState(this.ctx, token);
   }
 
-  public async beginRepositoryRead(): Promise<BeginRepositoryReadResult> {
-    return await beginRepositoryReadState(this.ctx);
+  public async beginRepositoryRead(
+    operation?: "git-fetch" | "snapshot-read" | "snapshot-projection"
+  ): Promise<BeginRepositoryReadResult> {
+    return await beginRepositoryReadState(this.ctx, operation);
   }
 
   public async renewRepositoryRead(token: string): Promise<boolean> {

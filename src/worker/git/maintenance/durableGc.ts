@@ -1,7 +1,7 @@
 import type { CacheContext } from "@/worker/cache";
 import type { Logger } from "@/worker/common/logger";
 import type { Limiter } from "@/worker/git/operations/limits";
-import type { GcOperation, GcProgress, GcOperationResult } from "./gcOperation";
+import type { GcOperation, GcProgress, GcOperationResult, GcSnapshot } from "./gcOperation";
 import type {
   BeginReachabilityGcResult,
   CommitReachabilityGcResult,
@@ -36,11 +36,21 @@ export type DurableGcArguments = {
   countSubrequest(op: string, n?: number): void;
 };
 
+let beforeSnapshotRegistrationObserver:
+  | ((begin: Extract<BeginReachabilityGcResult, { ok: true }>) => Promise<void>)
+  | undefined;
+
 // This bounds each artifact's bytes, not total validation memory: both sidecars
 // and derived object sets coexist. Large-object-count memory capacity remains
 // unqualified. A rejected immutable artifact cannot improve through retries.
 const MAX_GC_SIDECAR_BYTES = 64 * 1024 * 1024;
 class InvalidGcArtifact extends Error {}
+
+function snapshotWants(snapshot: GcSnapshot): string[] {
+  return Array.from(
+    new Set([...snapshot.refs.map((ref) => ref.oid), ...(snapshot.snapshotPinOids ?? [])])
+  );
+}
 
 export async function gcObjectSetDigest(oids: string[]): Promise<string> {
   const bytes = new TextEncoder().encode(
@@ -137,7 +147,7 @@ async function validateNativeArtifacts(
     packs: [
       { packKey: operation.outputPackKey, packBytes: result.packBytes, idx, refs: refs.view },
     ],
-    wants: operation.snapshot!.refs.map((ref) => ref.oid),
+    wants: snapshotWants(operation.snapshot!),
     haves: [],
   });
   if (
@@ -218,16 +228,32 @@ export async function runDurableReachabilityGc(
       async () => await stub.beginReachabilityGc()
     );
     if (!begin.ok) return yieldOperation(begin.reason);
-    await progress({
+    await beforeSnapshotRegistrationObserver?.(begin);
+    const snapshotProgress: GcProgress = {
       kind: "snapshot",
       snapshot: {
         token: begin.lease.token,
         refs: begin.refs,
+        snapshotPinOids: begin.snapshotPinOids,
+        snapshotPinVersion: begin.snapshotPinVersion,
         refsVersion: begin.refsVersion,
         packsetVersion: begin.packsetVersion,
         sourcePacks: begin.activeCatalog,
       },
-    });
+    };
+    args.countSubrequest("do:gc-progress");
+    const registered = await args.limiter.run<GcOperationResult>(
+      "do:gc-progress",
+      async () => await stub.recordGcProgress(operation.id, claimId, snapshotProgress)
+    );
+    if (registered.status !== "ready") {
+      args.countSubrequest("do:abort-reachability-gc");
+      await args.limiter.run("do:abort-reachability-gc", () =>
+        stub.abortCompaction(begin.lease.token)
+      );
+      return await yieldOperation("source-changed");
+    }
+    operation = registered.operation;
   }
   if (operation.phase === "rewrite") {
     args.countSubrequest("r2:gc-input-head");
@@ -258,8 +284,9 @@ export async function runDurableReachabilityGc(
     }
     const source = operation.snapshot!;
     const planningStarted = Date.now();
+    const wants = snapshotWants(source);
     if (source.sourcePacks.length === 0) {
-      if (source.refs.length > 0) {
+      if (wants.length > 0) {
         await progress({ kind: "blocked", reason: "refs-without-active-packs" });
         return { status: "blocked", reason: "refs-without-active-packs" };
       }
@@ -303,7 +330,7 @@ export async function runDurableReachabilityGc(
       logLevel: args.env.LOG_LEVEL,
       repoId: args.repoId,
       packs: refSnapshot.packs,
-      wants: source.refs.map((ref) => ref.oid),
+      wants,
       haves: [],
     });
     if (closure.type !== "Ready") return yieldOperation(closure.reason);
@@ -447,7 +474,11 @@ export async function runDurableReachabilityGc(
       async () => await stub.commitGcOperation(operation.id, claimId)
     );
     if (commit.status !== "committed") {
-      if (["refs-changed", "packset-changed", "source-changed"].includes(commit.reason))
+      if (
+        ["refs-changed", "pins-changed", "packset-changed", "source-changed"].includes(
+          commit.reason
+        )
+      )
         await progress({ kind: "discard", reason: "source-changed" });
       return { status: "retry", reason: commit.reason };
     }
@@ -533,3 +564,13 @@ export async function runDurableReachabilityGc(
   }
   return { status: "retry", reason: "gc-stage-pending" };
 }
+
+export const __test = {
+  setBeforeSnapshotRegistrationObserver(
+    observer:
+      | ((begin: Extract<BeginReachabilityGcResult, { ok: true }>) => Promise<void>)
+      | undefined
+  ): void {
+    beforeSnapshotRegistrationObserver = observer;
+  },
+};

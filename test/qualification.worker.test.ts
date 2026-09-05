@@ -1098,6 +1098,8 @@ describe("qualification repository controls", () => {
     await env.REPO_BUCKET.put(`${r2Prefix}/generations/7.json`, new Uint8Array(11));
     await env.REPO_BUCKET.put(`${r2Prefix}/generations/not-a-generation.json`, new Uint8Array(13));
     const projectedOid = "3".repeat(40);
+    const unrelatedPinnedOid = "4".repeat(40);
+    const mainQualificationOid = "8".repeat(40);
     await runDOWithRetry(
       () => stub,
       async (_instance, state) => {
@@ -1124,6 +1126,57 @@ describe("qualification repository controls", () => {
           commitSha: projectedOid,
           firstSequence: 2,
           materializedAt: Date.now(),
+        });
+        await state.storage.put(`snapshotPin:${projectedOid}`, {
+          commitSha: projectedOid,
+          treeSha: "5".repeat(40),
+          ref: "refs/heads/qual-snapshot",
+          beforeSha: "0".repeat(40),
+          firstSequence: 2,
+          acceptedAt: Date.now(),
+          actor: "qualification",
+          sourceSurface: "ingestion",
+          idempotencyKey: "qualification-snapshot",
+          qualificationOwned: true,
+        });
+        await state.storage.put(`releasedSnapshot:${"7".repeat(40)}`, {
+          commitSha: "7".repeat(40),
+          releasedAt: Date.now(),
+          qualificationOwned: true,
+        });
+        await state.storage.put(`snapshotPin:${unrelatedPinnedOid}`, {
+          commitSha: unrelatedPinnedOid,
+          treeSha: "6".repeat(40),
+          ref: "refs/heads/main",
+          beforeSha: "0".repeat(40),
+          firstSequence: 1,
+          acceptedAt: Date.now(),
+          actor: "unrelated",
+          sourceSurface: "ingestion",
+          idempotencyKey: "unrelated",
+        });
+        await state.storage.put("snapshotCurrent:refs%2Fheads%2Fmain", {
+          ref: "refs/heads/main",
+          commitSha: mainQualificationOid,
+          sequence: 3,
+          updatedAt: Date.now(),
+        });
+        await state.storage.put(`materializedSnapshot:${mainQualificationOid}`, {
+          commitSha: mainQualificationOid,
+          firstSequence: 3,
+          materializedAt: Date.now(),
+        });
+        await state.storage.put(`snapshotPin:${mainQualificationOid}`, {
+          commitSha: mainQualificationOid,
+          treeSha: "9".repeat(40),
+          ref: "refs/heads/main",
+          beforeSha: projectedOid,
+          firstSequence: 3,
+          acceptedAt: Date.now(),
+          actor: "qualification",
+          sourceSurface: "ingestion",
+          idempotencyKey: "qualification-main-snapshot",
+          qualificationOwned: true,
         });
         await state.storage.put("receiveLease", {
           token: "drained-qualification-lease",
@@ -1162,6 +1215,13 @@ describe("qualification repository controls", () => {
       expect(inventory.repository.transientStateCount).toBe(3);
       expect(inventory.repository.refStateDigest).toMatch(/^[a-f0-9]{64}$/);
       expect(inventory.storage.complete).toBe(true);
+      const pinResponse = await qualificationRequest(`/snapshot-pin/${projectedOid}`);
+      expect(pinResponse.status).toBe(200);
+      expect(await pinResponse.json()).toMatchObject({
+        schemaVersion: 1,
+        status: "pinned",
+        pin: { commitSha: projectedOid, treeSha: "5".repeat(40) },
+      });
       expect(inventory.storage.durableGenerationMetadata).toEqual({
         objectCount: 2,
         objectBytes: 18,
@@ -1208,7 +1268,7 @@ describe("qualification repository controls", () => {
       expect(await reset.json()).toMatchObject({
         schemaVersion: 1,
         status: "reset",
-        deletedStateCount: 4,
+        deletedStateCount: 9,
         reachabilityGc: "queued",
       });
 
@@ -1219,6 +1279,16 @@ describe("qualification repository controls", () => {
             await state.storage.get("snapshotCurrent:refs%2Fheads%2Fqual-snapshot")
           ).toBeUndefined();
           expect(await state.storage.get(`materializedSnapshot:${projectedOid}`)).toBeUndefined();
+          expect(await state.storage.get(`snapshotPin:${projectedOid}`)).toBeUndefined();
+          expect(await state.storage.get("snapshotCurrent:refs%2Fheads%2Fmain")).toBeUndefined();
+          expect(
+            await state.storage.get(`materializedSnapshot:${mainQualificationOid}`)
+          ).toBeUndefined();
+          expect(await state.storage.get(`snapshotPin:${mainQualificationOid}`)).toBeUndefined();
+          expect(await state.storage.get(`releasedSnapshot:${"7".repeat(40)}`)).toBeUndefined();
+          expect(await state.storage.get(`snapshotPin:${unrelatedPinnedOid}`)).toMatchObject({
+            ref: "refs/heads/main",
+          });
           expect(await state.storage.get("compactionWantedAt")).toBeUndefined();
         }
       );

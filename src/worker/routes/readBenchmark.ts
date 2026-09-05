@@ -1,4 +1,6 @@
 import type { CacheContext } from "@/worker/cache";
+import type { SnapshotResolution } from "@/worker/do/repo/acceptedWrites";
+import type { BeginRepositoryReadResult } from "@/worker/do/repo/repositoryLifecycle";
 import { asBufferSource, bytesToHex, getRepoStub } from "@/worker/common";
 import { loadActivePackCatalog } from "@/worker/git/object-store/catalog";
 import { findObject } from "@/worker/git/object-store/lookup";
@@ -48,6 +50,10 @@ function isSnapshotBenchmarkOperation(operation: string): boolean {
   return operation.startsWith("snapshot-") || operation.startsWith("scale-snapshot-");
 }
 
+function isScaleSnapshotBenchmarkOperation(operation: string): boolean {
+  return operation === "scale-snapshot-tree" || operation === "scale-snapshot-blob";
+}
+
 function addBenchmarkBytes(total: number, next: number): number {
   const result = total + next;
   if (!Number.isSafeInteger(result) || result > MAX_BENCHMARK_TOTAL_BYTES) {
@@ -65,6 +71,7 @@ function assertBenchmarkFileCapacity(fileCount: number, maxFiles: number): void 
 export const __test = {
   addBenchmarkBytes,
   assertBenchmarkFileCapacity,
+  isScaleSnapshotBenchmarkOperation,
   maxScaleBenchmarkFiles: MAX_SCALE_BENCHMARK_FILES,
 };
 
@@ -481,9 +488,46 @@ async function runSnapshotOperation(
   c: AppContext,
   route: RepositoryRoute,
   commitSha: string,
-  operation: string
+  operation: string,
+  cacheCtx: CacheContext
 ): Promise<Record<string, unknown>> {
-  const scaleOperation = operation === "scale-snapshot-tree" || operation === "scale-snapshot-blob";
+  const log = c.var.logFor({ service: "ReadBenchmark" });
+  const scaleOperation = isScaleSnapshotBenchmarkOperation(operation);
+  if (!scaleOperation) {
+    const stub = getRepoStub(c.env, route.doName);
+    countBenchmarkSubrequest(c, "snapshot-read-lease");
+    const lease = await c.var.limiter.run<BeginRepositoryReadResult>(
+      "do:begin-repository-read",
+      async () => await stub.beginRepositoryRead("snapshot-read")
+    );
+    if (!lease.ok) throw new Error(`Snapshot read unavailable: ${lease.reason}`);
+    try {
+      countBenchmarkSubrequest(c, "snapshot-pin");
+      const resolution = await c.var.limiter.run<SnapshotResolution>(
+        "do:get-snapshot-resolution",
+        async () => await stub.getSnapshotResolution(commitSha)
+      );
+      if (resolution.status === "released") throw new Error("Snapshot has been released");
+      if (resolution.status === "pinned") {
+        const commit = await readCommit(c.env, route.doName, commitSha, cacheCtx);
+        if (commit.tree !== resolution.pin.treeSha) {
+          throw new Error("Snapshot pin tree does not match commit");
+        }
+        const directOperation = operation.slice("snapshot-".length);
+        return {
+          source: "git-pack",
+          ...(await runDirectOperation(c, route, commitSha, directOperation, cacheCtx)),
+        };
+      }
+    } finally {
+      countBenchmarkSubrequest(c, "snapshot-read-release");
+      await c.var.limiter
+        .run("do:finish-repository-read", () => stub.finishRepositoryRead(lease.token))
+        .catch((error) =>
+          log.warn("read-benchmark:lease-release-failed", { error: String(error) })
+        );
+    }
+  }
   const manifest = await loadSnapshotManifest(
     c,
     route,
@@ -622,7 +666,7 @@ async function handleReadBenchmark(c: AppContext): Promise<Response> {
   }
   const log = c.var.logFor({ service: "ReadBenchmark" });
   const cacheCtx = benchmarkCacheContext(c, resolved);
-  if (c.req.query("cold") === "1" && !isSnapshotBenchmarkOperation(operation)) {
+  if (c.req.query("cold") === "1" && !isScaleSnapshotBenchmarkOperation(operation)) {
     cacheCtx.memo?.flags?.add("no-isolate-idx-cache");
   }
   const startedAt = performance.now();
@@ -653,14 +697,14 @@ async function handleReadBenchmark(c: AppContext): Promise<Response> {
         { headers: { "Cache-Control": "no-store" } }
       );
     }
-    if (!isSnapshotBenchmarkOperation(operation)) {
+    if (!isScaleSnapshotBenchmarkOperation(operation)) {
       const catalog = await loadActivePackCatalog(c.env, resolved.doName, cacheCtx);
       if (catalog.length > MAX_BENCHMARK_PACKS) {
         throw new BenchmarkLimitError("Benchmark pack limit exceeded");
       }
     }
     const result = isSnapshotBenchmarkOperation(operation)
-      ? await runSnapshotOperation(c, resolved, commitSha, operation)
+      ? await runSnapshotOperation(c, resolved, commitSha, operation, cacheCtx)
       : await runDirectOperation(c, resolved, commitSha, operation, cacheCtx);
     const operationMs = performance.now() - startedAt;
     log.info("read-benchmark:complete", {

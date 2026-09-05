@@ -194,6 +194,10 @@ type ExecuteReceivePipelineArgs = {
   limiter: Limiter;
   countSubrequest(op: string, n?: number): void;
   onProgress?: (message: string) => void;
+  onPhase?: (
+    phase: "pack-idx-pref-persistence" | "connectivity" | "repo-finalize-pin-current",
+    durationMs: number
+  ) => void;
 };
 
 function buildReceiveResult(args: {
@@ -238,6 +242,7 @@ export async function executeReceivePipeline(
       | undefined;
 
     if (hasNonDelete) {
+      const persistenceStartedAt = performance.now();
       const packKey = r2PackKey(
         doPrefix(args.stub.id.toString()),
         `pack-rx-${args.leaseToken}.pack`
@@ -326,12 +331,14 @@ export async function executeReceivePipeline(
         idxBytes = resolveResult.idxBytes;
         objectCount = resolveResult.objectCount;
       }
+      args.onPhase?.("pack-idx-pref-persistence", performance.now() - persistenceStartedAt);
 
       const connectivityStatuses = args.commands.map((command) => ({
         ref: command.ref,
         ok: true,
       }));
       args.onProgress?.("Checking received object connectivity\n");
+      const connectivityStartedAt = performance.now();
       await runPackConnectivityCheck({
         env: args.env,
         repoId: args.repoId,
@@ -344,6 +351,7 @@ export async function executeReceivePipeline(
         log: args.log,
         cacheCtx: args.cacheCtx,
       });
+      args.onPhase?.("connectivity", performance.now() - connectivityStartedAt);
       throwIfReceiveAborted(args.request, args.log, "connectivity-check");
 
       if (!connectivityStatuses.every((status) => status.ok)) {
@@ -381,6 +389,7 @@ export async function executeReceivePipeline(
     throwIfReceiveAborted(args.request, args.log, "finalize-receive");
     args.onProgress?.("Updating refs\n");
     finalizationAttempted = true;
+    const finalizeStartedAt = performance.now();
     let finalize: FinalizeReceiveResult;
     try {
       finalize = await args.limiter.run<FinalizeReceiveResult>("do:finalize-receive", async () => {
@@ -450,6 +459,7 @@ export async function executeReceivePipeline(
         throw finalizeError;
       }
     }
+    args.onPhase?.("repo-finalize-pin-current", performance.now() - finalizeStartedAt);
 
     if (finalize.status === "lease_mismatch") {
       // A missing lease without a retained outcome is not proof that the

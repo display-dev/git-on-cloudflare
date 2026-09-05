@@ -19,6 +19,8 @@ import {
   getQualificationRepositoryInventory,
   settleQualificationCompaction,
 } from "@/worker/do/repo/qualification";
+import { projectAcceptedWriteState, recordAcceptedWrites } from "@/worker/do/repo/acceptedWrites";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 
 const encode = (text: string) => new TextEncoder().encode(text);
 
@@ -33,6 +35,7 @@ async function checkpoint(label: string, parent?: string) {
   const commit = await encodeGitObject("commit", commitPayload);
   return {
     oid: commit.oid,
+    treeOid: tree.oid,
     payload,
     treePayload,
     commitPayload,
@@ -90,9 +93,10 @@ async function fixture(rewriteRequired = false) {
 }
 
 async function receive(
-  f: { stub: DurableObjectStub<RepoDurableObject> },
+  f: { stub: DurableObjectStub<RepoDurableObject>; repoId?: string },
   label: string,
-  parent: string
+  parent: string,
+  pinSnapshot = false
 ) {
   const next = await checkpoint(label, parent);
   const lease = await f.stub.beginReceive();
@@ -100,6 +104,15 @@ async function receive(
   const key = r2PackKey(doPrefix(f.stub.id.toString()), `${label}.pack`);
   await env.REPO_BUCKET.put(key, next.pack);
   const index = await indexTestPack(env, key, next.pack.byteLength);
+  const acceptedWrite = {
+    repositoryId: f.repoId ?? "gc-coordination-test",
+    ref: "refs/heads/main",
+    beforeSha: parent,
+    afterSha: next.oid,
+    actor: "gc-coordination-test",
+    sourceSurface: "ingestion" as const,
+    idempotencyKey: pinSnapshot ? `pin-${label}` : null,
+  };
   const result = await f.stub.finalizeReceive({
     token: lease.lease.token,
     commands: [{ ref: "refs/heads/main", oldOid: parent, newOid: next.oid }],
@@ -109,12 +122,236 @@ async function receive(
       idxBytes: index.idxBytes,
       objectCount: index.objectCount,
     },
+    ...(pinSnapshot
+      ? {
+          acceptedWrites: [acceptedWrite],
+          ingestionReceipt: {
+            keyHash: "c".repeat(64),
+            fingerprint: "d".repeat(64),
+            acceptedWrite,
+            treeSha: next.treeOid,
+            createdAt: Date.now(),
+          },
+        }
+      : {}),
   });
   expect(result.status).toBe("committed");
   return { ...next, key };
 }
 
 describe("GC source protection and foreground publication", () => {
+  it("accounts for a pin created by a coordinated ingestion receive", async () => {
+    const f = await fixture();
+    const next = await receive(f, "coordinated-pinned-receive", f.base.oid, true);
+    expect(await f.stub.getGcOperation()).toMatchObject({
+      phase: "publish",
+      coordination: { acceptedReceives: 1, snapshotPinVersion: 1 },
+    });
+    expect(await f.stub.listSnapshotPins()).toEqual([
+      expect.objectContaining({ commitSha: next.oid, treeSha: next.treeOid }),
+    ]);
+    const claim = await f.stub.claimGcOperation("concurrent");
+    if (claim.status !== "ready" || !claim.operation.claim) throw new Error("claim failed");
+    await expect(
+      f.stub.commitGcOperation("concurrent", claim.operation.claim.id)
+    ).resolves.toMatchObject({ status: "committed" });
+  });
+
+  it("pins only the receipt commit and rejects an invalid projected tree without mutation", async () => {
+    const repoId = uniqueRepoId("snapshot-pin-identity");
+    const stub = getRepoStub(env, repoId);
+    const first = await checkpoint("first pin identity");
+    const second = await checkpoint("second pin identity");
+    const facts = [
+      {
+        repositoryId: repoId,
+        ref: "refs/heads/main",
+        beforeSha: zeroOid(),
+        afterSha: first.oid,
+        actor: "pin-identity-test",
+        sourceSurface: "ingestion" as const,
+        idempotencyKey: "pin-identity-main",
+      },
+      {
+        repositoryId: repoId,
+        ref: "refs/heads/secondary",
+        beforeSha: zeroOid(),
+        afterSha: second.oid,
+        actor: "pin-identity-test",
+        sourceSurface: "ingestion" as const,
+        idempotencyKey: "pin-identity-secondary",
+      },
+    ];
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.transaction(async (transaction) => {
+        await recordAcceptedWrites(
+          asTypedStorage<RepoStateSchema>(transaction),
+          1,
+          facts,
+          Date.now(),
+          true,
+          {
+            commitSha: first.oid,
+            treeSha: first.treeOid,
+            materializedAt: Date.now(),
+            advanceCurrent: true,
+          }
+        );
+      });
+    });
+    expect(await stub.listSnapshotPins()).toEqual([
+      expect.objectContaining({ commitSha: first.oid, treeSha: first.treeOid }),
+    ]);
+    const firstEntry = (await stub.listAcceptedWrites()).find(
+      (entry) => entry.fact.afterSha === first.oid
+    )!;
+    const conflicting = await runInDurableObject(stub, async (_instance, state) =>
+      projectAcceptedWriteState(state, {
+        entryId: firstEntry.id,
+        commitSha: first.oid,
+        treeSha: "f".repeat(40),
+        materializedAt: Date.now(),
+      })
+    );
+    expect(conflicting).toEqual({ status: "invalid-snapshot" });
+    const secondaryEntry = (await stub.listAcceptedWrites()).find(
+      (entry) => entry.fact.afterSha === second.oid
+    )!;
+    const invalid = await runInDurableObject(stub, async (_instance, state) =>
+      projectAcceptedWriteState(state, {
+        entryId: secondaryEntry.id,
+        commitSha: second.oid,
+        treeSha: zeroOid(),
+        materializedAt: Date.now(),
+      })
+    );
+    expect(invalid).toEqual({ status: "invalid-snapshot" });
+    expect(await stub.listSnapshotPins()).toEqual([
+      expect.objectContaining({ commitSha: first.oid, treeSha: first.treeOid }),
+    ]);
+    expect(await stub.getSnapshotProjection("refs/heads/secondary")).toEqual({
+      snapshotCount: 1,
+      current: undefined,
+    });
+  });
+
+  it("rolls back ref, current, and pin together, then retries idempotently", async () => {
+    const repoId = uniqueRepoId("snapshot-pin-atomicity");
+    const stub = getRepoStub(env, repoId);
+    const next = await checkpoint("atomic snapshot pin");
+    const begin = await stub.beginReceive();
+    if (!begin.ok) throw new Error("receive lease unavailable");
+    const packKey = r2PackKey(doPrefix(stub.id.toString()), "atomic-snapshot-pin.pack");
+    await env.REPO_BUCKET.put(packKey, next.pack);
+    const index = await indexTestPack(env, packKey, next.pack.byteLength);
+    const acceptedWrite = {
+      repositoryId: repoId,
+      ref: "refs/heads/main",
+      beforeSha: zeroOid(),
+      afterSha: next.oid,
+      actor: "atomicity-test",
+      sourceSurface: "ingestion" as const,
+      idempotencyKey: "atomicity-test",
+    };
+    const request = {
+      token: begin.lease.token,
+      commands: [{ ref: "refs/heads/main", oldOid: zeroOid(), newOid: next.oid }],
+      stagedPack: {
+        packKey,
+        packBytes: next.pack.byteLength,
+        idxBytes: index.idxBytes,
+        objectCount: index.objectCount,
+      },
+      ingestionReceipt: {
+        keyHash: "a".repeat(64),
+        fingerprint: "b".repeat(64),
+        acceptedWrite,
+        treeSha: next.treeOid,
+        createdAt: Date.now(),
+      },
+      acceptedWrites: [acceptedWrite],
+    };
+    receiveTest.failNextAfterSnapshotPin();
+    await expect(
+      runInDurableObject(stub, async (_instance, state) =>
+        finalizeReceiveState({ ctx: state, env, ...request })
+      )
+    ).rejects.toThrow("injected snapshot pin transaction failure");
+    expect(await stub.listRefs()).toEqual([]);
+    expect(await stub.listSnapshotPins()).toEqual([]);
+    expect(await stub.getSnapshotProjection("refs/heads/main")).toEqual({
+      snapshotCount: 0,
+      current: undefined,
+    });
+
+    await expect(stub.finalizeReceive(request)).resolves.toMatchObject({ status: "committed" });
+    expect(await stub.listRefs()).toEqual([{ name: "refs/heads/main", oid: next.oid }]);
+    expect(await stub.listSnapshotPins()).toEqual([
+      expect.objectContaining({ commitSha: next.oid, treeSha: next.treeOid }),
+    ]);
+    expect(await stub.getSnapshotProjection("refs/heads/main")).toMatchObject({
+      current: { commitSha: next.oid, sequence: 1 },
+    });
+  });
+
+  it("does not let conflicting disposable pin metadata veto authoritative ref publication", async () => {
+    const repoId = uniqueRepoId("snapshot-pin-conflict-authority");
+    const stub = getRepoStub(env, repoId);
+    const next = await checkpoint("pin conflict authority");
+    const begin = await stub.beginReceive();
+    if (!begin.ok) throw new Error("receive lease unavailable");
+    const packKey = r2PackKey(doPrefix(stub.id.toString()), "pin-conflict-authority.pack");
+    await env.REPO_BUCKET.put(packKey, next.pack);
+    const index = await indexTestPack(env, packKey, next.pack.byteLength);
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(`snapshotPin:${next.oid}`, {
+        commitSha: next.oid,
+        treeSha: "f".repeat(40),
+        ref: "refs/heads/main",
+        beforeSha: zeroOid(),
+        firstSequence: 0,
+        acceptedAt: Date.now(),
+        actor: "stale-projection",
+        sourceSurface: "ingestion",
+        idempotencyKey: "stale-projection",
+      });
+    });
+    const acceptedWrite = {
+      repositoryId: repoId,
+      ref: "refs/heads/main",
+      beforeSha: zeroOid(),
+      afterSha: next.oid,
+      actor: "authority-test",
+      sourceSurface: "ingestion" as const,
+      idempotencyKey: "authority-test",
+    };
+    await expect(
+      stub.finalizeReceive({
+        token: begin.lease.token,
+        commands: [{ ref: "refs/heads/main", oldOid: zeroOid(), newOid: next.oid }],
+        stagedPack: {
+          packKey,
+          packBytes: next.pack.byteLength,
+          idxBytes: index.idxBytes,
+          objectCount: index.objectCount,
+        },
+        ingestionReceipt: {
+          keyHash: "c".repeat(64),
+          fingerprint: "d".repeat(64),
+          acceptedWrite,
+          treeSha: next.treeOid,
+          createdAt: Date.now(),
+        },
+        acceptedWrites: [acceptedWrite],
+      })
+    ).resolves.toMatchObject({ status: "committed" });
+    expect(await stub.listRefs()).toEqual([{ name: "refs/heads/main", oid: next.oid }]);
+    expect(await stub.getSnapshotPin(next.oid)).toMatchObject({ treeSha: "f".repeat(40) });
+    expect(await stub.getSnapshotProjection("refs/heads/main")).toMatchObject({
+      current: undefined,
+    });
+  });
+
   it("keeps a bounded candidate exclusive at a coordinated GC checkpoint", async () => {
     const f = await fixture();
 

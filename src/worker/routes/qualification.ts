@@ -301,6 +301,41 @@ export function registerQualificationRoutes(router: AppRouter): void {
     return json(await inventoryResponse(c, route), 200, { "Cache-Control": "no-store" });
   });
 
+  router.get("/_internal/qualification/:owner/:repo/snapshot-pin/:commit", async (c) => {
+    const denied = await authorizeQualification(c);
+    if (denied) return denied;
+    const route = await resolveQualificationTarget(c);
+    if (!route)
+      return new Response("Not found\n", { status: 404, headers: { "Cache-Control": "no-store" } });
+    const commitSha = (c.req.param("commit") ?? "").toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(commitSha)) {
+      return json({ schemaVersion: 1, status: "rejected", reason: "invalid_commit" }, 400, {
+        "Cache-Control": "no-store",
+      });
+    }
+    const log = c.var.logFor({ service: "QualificationSnapshotPin", repoId: route.doName });
+    if (!countSubrequest(c.var.cacheCtx)) {
+      log.warn("qualification-snapshot-pin:soft-budget-exhausted", {
+        repositoryId: route.repositoryId,
+      });
+    }
+    const pin = await c.var.limiter.run("do:qualification-snapshot-pin", () =>
+      getRepoStub(c.env, route.doName).getSnapshotPin(commitSha)
+    );
+    if (!pin)
+      return json({ schemaVersion: 1, status: "absent", commitSha }, 404, {
+        "Cache-Control": "no-store",
+      });
+    log.info("qualification-snapshot-pin:verified", {
+      repositoryId: route.repositoryId,
+      commitSha,
+      treeSha: pin.treeSha,
+    });
+    return json({ schemaVersion: 1, status: "pinned", pin }, 200, {
+      "Cache-Control": "no-store",
+    });
+  });
+
   router.post("/_internal/qualification/:owner/:repo/reset", async (c) => {
     const denied = await authorizeQualification(c);
     if (denied) return denied;

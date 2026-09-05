@@ -823,11 +823,14 @@ async function finalizeStockReceiveWithPublicationLease(args: {
     // previous protected receive. Container output includes its encoding bases;
     // direct-pack output instead binds any external encoding base to that same
     // advertised and protected closure.
+    const snapshotPinVersion = (await tx.get("snapshotPinVersion")) ?? 0;
     await advanceGcReceiveVersions(
       transaction,
       refsVersion,
       intent.nextRefsVersion,
-      stagedPack ? packsetVersion + 1 : undefined
+      stagedPack ? packsetVersion + 1 : undefined,
+      snapshotPinVersion,
+      snapshotPinVersion
     );
     await recordAcceptedWrites(
       tx,

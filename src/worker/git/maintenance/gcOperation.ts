@@ -46,6 +46,8 @@ export type GcQualificationState = {
 export type GcSnapshot = {
   token: string;
   refs: Ref[];
+  snapshotPinOids?: string[];
+  snapshotPinVersion: number;
   refsVersion: number;
   packsetVersion: number;
   sourcePacks: PackCatalogRow[];
@@ -91,6 +93,7 @@ export type GcOperation = {
   coordination?: {
     refsVersion: number;
     packsetVersion: number;
+    snapshotPinVersion: number;
     retainedSourcePackKeys: string[];
     conservativeRetentionReason?: "new-source-reachability" | "metadata-unavailable";
     publicationClaimId?: string;

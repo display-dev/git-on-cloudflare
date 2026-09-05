@@ -12,6 +12,8 @@ export type AcceptedWriteJournalKey = `acceptedWrite:${string}`;
 export type AcceptedWriteHeadKey = `acceptedWriteHead:${string}`;
 export type MaterializedSnapshotKey = `materializedSnapshot:${string}`;
 export type SnapshotCurrentKey = `snapshotCurrent:${string}`;
+export type SnapshotPinKey = `snapshotPin:${string}`;
+export type ReleasedSnapshotKey = `releasedSnapshot:${string}`;
 export type NativeReceiveOperationKey = `nativeReceiveOperation:${string}`;
 
 export type Ref = { name: string; oid: string };
@@ -52,7 +54,7 @@ export type RepositoryReadLease = {
   token: string;
   createdAt: number;
   expiresAt: number;
-  operation: "git-fetch";
+  operation: "git-fetch" | "snapshot-read" | "snapshot-projection";
 };
 
 export type ReachabilityGcPending = {
@@ -139,6 +141,26 @@ export type MaterializedSnapshot = {
   materializedAt: number;
 };
 
+/** Durable reachability root and provenance for one immutable served snapshot. */
+export type SnapshotPin = {
+  commitSha: string;
+  treeSha: string;
+  ref: string;
+  beforeSha: string;
+  firstSequence: number;
+  acceptedAt: number;
+  actor: string;
+  sourceSurface: AcceptedWriteFact["sourceSurface"] | "reconcile";
+  idempotencyKey: string | null;
+  qualificationOwned?: boolean;
+};
+
+export type ReleasedSnapshot = {
+  commitSha: string;
+  releasedAt: number;
+  qualificationOwned?: boolean;
+};
+
 export type SnapshotCurrent = {
   ref: string;
   commitSha: string;
@@ -157,6 +179,7 @@ export type RepoStateSchema = {
   head: Head;
   refsVersion: number;
   packsetVersion: number;
+  snapshotPinVersion: number;
   generationPublicationPending:
     | {
         generation: number;
@@ -191,6 +214,8 @@ export type RepoStateSchema = {
   Record<AcceptedWriteJournalKey, AcceptedWriteJournalEntry> &
   Record<AcceptedWriteHeadKey, AcceptedWriteHead> &
   Record<MaterializedSnapshotKey, MaterializedSnapshot> &
+  Record<SnapshotPinKey, SnapshotPin> &
+  Record<ReleasedSnapshotKey, ReleasedSnapshot> &
   Record<SnapshotCurrentKey, SnapshotCurrent>;
 
 export type TypedStorage<S> = {
@@ -249,4 +274,12 @@ export function materializedSnapshotKey(commitSha: string): MaterializedSnapshot
 
 export function snapshotCurrentKey(ref: string): SnapshotCurrentKey {
   return `snapshotCurrent:${encodeURIComponent(ref)}` as SnapshotCurrentKey;
+}
+
+export function snapshotPinKey(commitSha: string): SnapshotPinKey {
+  return `snapshotPin:${commitSha}` as SnapshotPinKey;
+}
+
+export function releasedSnapshotKey(commitSha: string): ReleasedSnapshotKey {
+  return `releasedSnapshot:${commitSha}` as ReleasedSnapshotKey;
 }

@@ -2508,6 +2508,7 @@ describe("stock Smart HTTP receive spike", () => {
       token: gc.lease.token,
       refsVersion: gc.refsVersion,
       packsetVersion: gc.packsetVersion,
+      snapshotPinVersion: gc.snapshotPinVersion,
       sourcePacks: gc.activeCatalog,
       stagedPack: {
         packKey: replacementPackKey,

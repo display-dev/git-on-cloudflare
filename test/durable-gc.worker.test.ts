@@ -11,6 +11,9 @@ import {
 import { __test as nativeReceiveTest } from "@/worker/do/repo/nativeReceive";
 import { NativeProcessorError } from "@/worker/do/repo/nativeReceive";
 import { getOidHexAt, loadIdxView } from "@/worker/git/object-store";
+import { __test as durableGcTest } from "@/worker/git/maintenance/durableGc";
+import { recordAcceptedWrites } from "@/worker/do/repo/acceptedWrites";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 import { packIndexKey, packRefsKey } from "@/worker/keys";
 import type { NativeReceiveProcessResult } from "@/worker/git/nativeReceive/types";
 import { buildPack, uniqueRepoId } from "./util/test-helpers";
@@ -33,6 +36,117 @@ async function verifiedPut(key: string, bytes: Uint8Array) {
 }
 
 describe("durable GC queue lifecycle", () => {
+  it("persists snapshot pins in the durable source and includes them in closure planning", async () => {
+    const repoId = uniqueRepoId("durable-pinned-root");
+    const stub = getRepoStub(env, repoId);
+    const refPayload = new TextEncoder().encode("ref root\n");
+    const pinPayload = new TextEncoder().encode("snapshot-only root\n");
+    const refObject = await encodeGitObject("blob", refPayload);
+    const pinObject = await encodeGitObject("blob", pinPayload);
+    const seeded = await seedPackedRepoState({
+      env,
+      repoId,
+      getStub: () => stub,
+      packs: [
+        {
+          name: "ref-and-pin.pack",
+          packBytes: await buildPack([
+            { type: "blob", payload: refPayload },
+            { type: "blob", payload: pinPayload },
+          ]),
+        },
+      ],
+      refs: [{ name: "refs/heads/main", oid: refObject.oid }],
+    });
+    await runInDurableObject(stub, async (_, state) => {
+      await state.storage.put(`snapshotPin:${pinObject.oid}`, {
+        commitSha: pinObject.oid,
+        treeSha: "a".repeat(40),
+        ref: "refs/heads/previous",
+        beforeSha: "0".repeat(40),
+        firstSequence: 1,
+        acceptedAt: Date.now(),
+        actor: "durable-gc-test",
+        sourceSurface: "ingestion",
+        idempotencyKey: "durable-gc-test",
+      });
+    });
+    await stub.registerGcOperation(repoId, "durable-pinned-root");
+    const message = {
+      kind: "reachability-gc" as const,
+      repoId,
+      doId: stub.id.toString(),
+      operationId: "durable-pinned-root",
+    };
+    await runQueueMessage(message);
+    expect(await stub.getGcOperation()).toMatchObject({
+      phase: "publish",
+      snapshot: {
+        snapshotPinOids: [pinObject.oid],
+      },
+      closure: { objectCount: 2 },
+      retainedPackKey: seeded.packKeys[0],
+    });
+  });
+
+  it("releases its new lease and claim when pin roots change before snapshot registration", async () => {
+    const repoId = uniqueRepoId("durable-pin-registration-race");
+    const stub = getRepoStub(env, repoId);
+    const payload = new TextEncoder().encode("retained\n");
+    const retained = await encodeGitObject("blob", payload);
+    await seedPackedRepoState({
+      env,
+      repoId,
+      getStub: () => stub,
+      packs: [{ name: "retained.pack", packBytes: await buildPack([{ type: "blob", payload }]) }],
+      refs: [{ name: "refs/tags/retained", oid: retained.oid }],
+    });
+    await stub.registerGcOperation(repoId, "pin-registration-race");
+    const commitSha = "d".repeat(40);
+    durableGcTest.setBeforeSnapshotRegistrationObserver(async () => {
+      await runInDurableObject(stub, async (_instance, state) => {
+        await state.storage.transaction(async (transaction) => {
+          await recordAcceptedWrites(
+            asTypedStorage<RepoStateSchema>(transaction),
+            2,
+            [
+              {
+                repositoryId: repoId,
+                ref: "refs/heads/archived",
+                beforeSha: "0".repeat(40),
+                afterSha: commitSha,
+                actor: "durable-pin-race-test",
+                sourceSurface: "git-push",
+                idempotencyKey: null,
+              },
+            ],
+            Date.now(),
+            true,
+            { commitSha, treeSha: "e".repeat(40), materializedAt: Date.now() }
+          );
+        });
+      });
+    });
+    try {
+      await expect(
+        runQueueMessage({
+          kind: "reachability-gc",
+          repoId,
+          doId: stub.id.toString(),
+          operationId: "pin-registration-race",
+        })
+      ).resolves.toEqual({ acked: false, retried: true });
+      await runInDurableObject(stub, async (_instance, state) => {
+        await expect(state.storage.get("compactLease")).resolves.toBeUndefined();
+      });
+      const operation = await stub.getGcOperation();
+      expect(operation).toMatchObject({ phase: "queued" });
+      expect(operation?.claim).toBeUndefined();
+    } finally {
+      durableGcTest.setBeforeSnapshotRegistrationObserver(undefined);
+    }
+  });
+
   it("bounds ordinary retryable native failure, drains its claim and restores the source write path", async () => {
     const repoId = uniqueRepoId("ordinary-gc-deadline");
     const stub = getRepoStub(env, repoId);
@@ -251,6 +365,7 @@ describe("durable GC queue lifecycle", () => {
       snapshot: {
         token: begin.lease.token,
         refs: begin.refs,
+        snapshotPinVersion: begin.snapshotPinVersion,
         refsVersion: begin.refsVersion,
         packsetVersion: begin.packsetVersion,
         sourcePacks: begin.activeCatalog,

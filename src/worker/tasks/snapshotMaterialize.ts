@@ -1,14 +1,16 @@
 import { getRepoStub, zeroOid } from "@/worker/common";
 import type { CacheContext } from "@/worker/cache";
+import { markRequestPrivate } from "@/worker/cache/policy";
 import type {
   AcceptedWriteProjectionResult,
   ReconciledHeadProjectionResult,
   SnapshotReconcilePlan,
 } from "@/worker/do/repo/acceptedWrites";
 import type { Logger } from "@/worker/common/logger";
+import type { BeginRepositoryReadResult } from "@/worker/do/repo/repositoryLifecycle";
 import { countSubrequest } from "@/worker/git/operations/limits";
 import {
-  materializeAcceptedWrite,
+  inspectSnapshotCommit,
   SnapshotLimitError,
   snapshotRepositoryPrefix,
   type SnapshotMaterializationTarget,
@@ -25,8 +27,10 @@ type TerminalSnapshotObserver = (
   body: SnapshotMaterializeQueueMessage,
   error: SnapshotLimitError
 ) => void;
+type BeforeSnapshotProjectionObserver = (body: SnapshotMaterializeQueueMessage) => Promise<void>;
 
 let terminalSnapshotObserver: TerminalSnapshotObserver | undefined;
+let beforeSnapshotProjectionObserver: BeforeSnapshotProjectionObserver | undefined;
 
 function count(cacheCtx: CacheContext, log: Logger, op: string): void {
   if (!countSubrequest(cacheCtx)) log.warn("snapshot:queue-soft-budget-exhausted", { op });
@@ -84,6 +88,8 @@ export async function handleSnapshotMaterializeMessage(
     operation: "snapshot-materialize",
     subrequestBudget: SNAPSHOT_SUBREQUEST_BUDGET,
   });
+  markRequestPrivate(task.cacheCtx);
+  task.cacheCtx.memo!.repoId = body.doName;
   const log = task.logFor({ service: "SnapshotMaterializeQueue" });
   let configuredPrefix: string | null;
   try {
@@ -127,80 +133,131 @@ export async function handleSnapshotMaterializeMessage(
             afterSha: plan.afterSha,
             sourceSurface: "reconcile",
           };
-    if (target.afterSha !== zeroOid()) {
-      const manifest = await materializeAcceptedWrite({
-        env,
-        repoId: body.doName,
-        fact: target,
-        request: task.cacheCtx.req,
-        ctx,
-        limiter: task.limiter,
-        log,
-      });
-      if (!manifest) {
-        // A configured prefix can return null only after the repository
-        // deletion fence rejects a new materialization lease. Deletion is a
-        // terminal outcome for this immutable queue fact.
-        log.info("snapshot:queue-repository-deleting", {
-          repositoryId: body.repositoryId,
-          ref: body.ref,
+    let materializedTreeSha = zeroOid();
+    let readerToken: string | undefined;
+    try {
+      if (target.afterSha !== zeroOid()) {
+        count(task.cacheCtx, log, "do:begin-repository-read");
+        const reader = await task.limiter.run<BeginRepositoryReadResult>(
+          "do:begin-repository-read",
+          () => stub.beginRepositoryRead("snapshot-projection")
+        );
+        if (!reader.ok) {
+          if (reader.reason === "repository-deleting") {
+            log.info("snapshot:queue-repository-deleting", {
+              repositoryId: body.repositoryId,
+              ref: body.ref,
+            });
+            message.ack();
+            return;
+          }
+          retryOrAck(message, log, body, "reader-capacity");
+          return;
+        }
+        readerToken = reader.token;
+        const inspected = await inspectSnapshotCommit({
+          env,
+          repoId: body.doName,
+          commitSha: target.afterSha,
+          cacheCtx: task.cacheCtx,
+          collectFiles: false,
         });
-        message.ack();
-        return;
+        materializedTreeSha = inspected.treeSha;
       }
-    }
+      await beforeSnapshotProjectionObserver?.(body);
 
-    if (plan.status === "deliver") {
-      count(task.cacheCtx, log, "do:project-accepted-write");
-      const projection = await task.limiter.run<AcceptedWriteProjectionResult>(
-        "do:project-accepted-write",
-        () =>
-          stub.projectAcceptedWrite({
-            entryId: plan.entry.id,
-            commitSha: plan.entry.fact.afterSha,
-            materializedAt: Date.now(),
-          })
-      );
-      if ("status" in projection) {
-        log.info("snapshot:queue-repository-deleting", {
-          repositoryId: body.repositoryId,
-          ref: body.ref,
-        });
-        message.ack();
-        return;
+      if (plan.status === "deliver") {
+        count(task.cacheCtx, log, "do:project-accepted-write");
+        const projection = await task.limiter.run<AcceptedWriteProjectionResult>(
+          "do:project-accepted-write",
+          () =>
+            stub.projectAcceptedWrite({
+              entryId: plan.entry.id,
+              commitSha: plan.entry.fact.afterSha,
+              treeSha: materializedTreeSha,
+              materializedAt: Date.now(),
+              readerToken,
+            })
+        );
+        if ("status" in projection) {
+          if (projection.status === "projection-lease-expired") {
+            retryOrAck(message, log, body, projection.status);
+            return;
+          }
+          if (projection.status === "invalid-snapshot") {
+            log.error("snapshot:queue-invalid-identity", {
+              repositoryId: body.repositoryId,
+              ref: body.ref,
+              commitSha: target.afterSha,
+            });
+            message.ack();
+            return;
+          }
+          log.info("snapshot:queue-repository-deleting", {
+            repositoryId: body.repositoryId,
+            ref: body.ref,
+          });
+          message.ack();
+          return;
+        }
+      } else {
+        count(task.cacheCtx, log, "do:project-reconciled-head");
+        const projection = await task.limiter.run<ReconciledHeadProjectionResult>(
+          "do:project-reconciled-head",
+          () =>
+            stub.projectReconciledHead({
+              ref: plan.ref,
+              commitSha: plan.afterSha,
+              treeSha: materializedTreeSha,
+              sequence: plan.sequence,
+              materializedAt: Date.now(),
+              readerToken,
+            })
+        );
+        if (projection.status === "stale") {
+          retryOrAck(message, log, body, "authoritative-head-changed");
+          return;
+        }
+        if (projection.status === "projection-lease-expired") {
+          retryOrAck(message, log, body, projection.status);
+          return;
+        }
+        if (projection.status === "repository-deleting") {
+          log.info("snapshot:queue-repository-deleting", {
+            repositoryId: body.repositoryId,
+            ref: body.ref,
+          });
+          message.ack();
+          return;
+        }
+        if (projection.status === "invalid-snapshot") {
+          log.error("snapshot:queue-invalid-identity", {
+            repositoryId: body.repositoryId,
+            ref: body.ref,
+            commitSha: target.afterSha,
+          });
+          message.ack();
+          return;
+        }
       }
-    } else {
-      count(task.cacheCtx, log, "do:project-reconciled-head");
-      const projection = await task.limiter.run<ReconciledHeadProjectionResult>(
-        "do:project-reconciled-head",
-        () =>
-          stub.projectReconciledHead({
-            ref: plan.ref,
-            commitSha: plan.afterSha,
-            sequence: plan.sequence,
-            materializedAt: Date.now(),
-          })
-      );
-      if (projection.status === "stale") {
-        retryOrAck(message, log, body, "authoritative-head-changed");
-        return;
-      }
-      if (projection.status === "repository-deleting") {
-        log.info("snapshot:queue-repository-deleting", {
-          repositoryId: body.repositoryId,
-          ref: body.ref,
-        });
-        message.ack();
-        return;
+      log.info("snapshot:queue-complete", {
+        repositoryId: body.repositoryId,
+        ref: body.ref,
+        commitSha: target.afterSha,
+        reconciliation: plan.status,
+      });
+      message.ack();
+    } finally {
+      if (readerToken) {
+        const token = readerToken;
+        count(task.cacheCtx, log, "do:finish-repository-read");
+        await task.limiter
+          .run("do:finish-repository-read", () => stub.finishRepositoryRead(token))
+          .catch((error) =>
+            log.warn("snapshot:queue-lease-release-failed", { error: String(error) })
+          );
       }
     }
-    log.info("snapshot:queue-complete", {
-      repositoryId: body.repositoryId,
-      ref: body.ref,
-      commitSha: target.afterSha,
-      reconciliation: plan.status,
-    });
-    message.ack();
   } catch (error) {
     if (isTerminalSnapshotError(error)) {
       if (error instanceof SnapshotLimitError) terminalSnapshotObserver?.(body, error);
@@ -223,5 +280,10 @@ export const __test = {
   retryOrAck,
   setTerminalSnapshotObserver(observer: TerminalSnapshotObserver | undefined): void {
     terminalSnapshotObserver = observer;
+  },
+  setBeforeSnapshotProjectionObserver(
+    observer: BeforeSnapshotProjectionObserver | undefined
+  ): void {
+    beforeSnapshotProjectionObserver = observer;
   },
 };

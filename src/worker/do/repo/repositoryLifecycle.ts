@@ -20,7 +20,7 @@ export const EXPIRED_WRITER_DRAIN_MS = 5 * 60_000;
 
 export type BeginSnapshotMaterializationResult =
   | { ok: true; token: string }
-  | { ok: false; reason: "repository-deleting" };
+  | { ok: false; reason: "repository-deleting" | "maintenance-active" };
 
 export type BeginRepositoryDeletionResult = {
   ready: boolean;
@@ -137,7 +137,8 @@ export async function pruneRepositoryActivityLeases(
 }
 
 export async function beginRepositoryReadState(
-  ctx: DurableObjectState
+  ctx: DurableObjectState,
+  operation: RepositoryReadLease["operation"] = "git-fetch"
 ): Promise<BeginRepositoryReadResult> {
   return await ctx.storage.transaction(async (transaction) => {
     const store = asTypedStorage<RepoStateSchema>(transaction);
@@ -152,7 +153,7 @@ export async function beginRepositoryReadState(
     const token = crypto.randomUUID();
     leases.push({
       token,
-      operation: "git-fetch",
+      operation,
       createdAt: now,
       expiresAt: now + REPOSITORY_READ_LEASE_TTL_MS,
     });
@@ -260,6 +261,9 @@ export async function beginSnapshotMaterializationState(
       return { ok: false, reason: "repository-deleting" };
     }
     const now = Date.now();
+    if (writerMayStillBeDraining(await store.get("compactLease"), now)) {
+      return { ok: false, reason: "maintenance-active" };
+    }
     const leases = activeSnapshotLeases(await store.get("snapshotMaterializationLeases"), now);
     const token = crypto.randomUUID();
     leases.push({

@@ -160,7 +160,9 @@ export async function advanceGcReceiveVersions(
   transaction: DurableObjectTransaction,
   expectedRefsVersion: number,
   nextRefsVersion: number,
-  nextPacksetVersion: number | undefined
+  nextPacksetVersion: number | undefined,
+  expectedSnapshotPinVersion: number,
+  nextSnapshotPinVersion: number
 ): Promise<void> {
   const operation = await transaction.get<GcOperation>(GC_OPERATION_KEY);
   if (!gcOwnsSource(operation) || !operation?.coordination) return;
@@ -173,6 +175,9 @@ export async function advanceGcReceiveVersions(
     throw new Error("GC receive versions diverged from the protected source");
   coordination.refsVersion = nextRefsVersion;
   if (nextPacksetVersion !== undefined) coordination.packsetVersion = nextPacksetVersion;
+  if (coordination.snapshotPinVersion === expectedSnapshotPinVersion) {
+    coordination.snapshotPinVersion = nextSnapshotPinVersion;
+  }
   coordination.acceptedReceives++;
   await transaction.put(GC_OPERATION_KEY, operation);
 }

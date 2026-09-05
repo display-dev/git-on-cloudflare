@@ -1,6 +1,6 @@
 import type { Logger } from "@/worker/common/logger";
 import type { PackCatalogRow } from "../db/schema";
-import type { Ref, RepoLease, RepoStateSchema } from "../repoState";
+import type { Ref, RepoLease, RepoStateSchema, SnapshotPin } from "../repoState";
 
 import { asTypedStorage } from "../repoState";
 import {
@@ -39,6 +39,8 @@ export type BeginReachabilityGcResult =
       ok: true;
       lease: RepoLease;
       refs: Ref[];
+      snapshotPinOids: string[];
+      snapshotPinVersion: number;
       refsVersion: number;
       packsetVersion: number;
       activeCatalog: PackCatalogRow[];
@@ -63,6 +65,7 @@ export type CommitReachabilityGcResult =
         | "lease-mismatch"
         | "receive-active"
         | "refs-changed"
+        | "pins-changed"
         | "packset-changed"
         | "source-changed"
         | "catalog-replacement-failed"
@@ -158,10 +161,22 @@ export async function beginReachabilityGcState(args: {
       return "receive-active";
     if ((await listActiveStockReceiveOperations(store)).length > 0) return "receive-active";
     if (activeLeaseOrUndefined(await store.get("compactLease"), now)) return "compact-active";
+    const snapshotLeases = (await store.get("snapshotMaterializationLeases")) ?? [];
+    if (snapshotLeases.some((lease) => lease.expiresAt + EXPIRED_WRITER_DRAIN_MS > now)) {
+      return "compact-active";
+    }
     await store.put("compactLease", lease);
-    return "acquired";
+    const snapshotPins = [
+      ...(await transaction.list<SnapshotPin>({ prefix: "snapshotPin:" })).values(),
+    ];
+    return {
+      refs: (await store.get("refs")) ?? [],
+      refsVersion: (await store.get("refsVersion")) ?? 0,
+      snapshotPinOids: snapshotPins.map((pin) => pin.commitSha),
+      snapshotPinVersion: (await store.get("snapshotPinVersion")) ?? 0,
+    };
   });
-  if (acquisition !== "acquired") {
+  if (typeof acquisition === "string") {
     return {
       ok: false,
       status: "busy",
@@ -173,17 +188,20 @@ export async function beginReachabilityGcState(args: {
   const store = asTypedStorage<RepoStateSchema>(args.ctx.storage);
   await ensureRepoMetadataDefaults(store);
   const activeCatalog = await getActivePackCatalogSnapshot(args.ctx);
-  const refs = (await store.get("refs")) ?? [];
   const result = {
     ok: true as const,
     lease,
-    refs,
-    refsVersion: (await store.get("refsVersion")) || 0,
+    refs: acquisition.refs,
+    snapshotPinOids: acquisition.snapshotPinOids,
+    snapshotPinVersion: acquisition.snapshotPinVersion,
+    refsVersion: acquisition.refsVersion,
     packsetVersion: (await store.get("packsetVersion")) || 0,
     activeCatalog,
   };
   args.logger?.info("reachability-gc:begin", {
-    refCount: refs.length,
+    refCount: acquisition.refs.length,
+    snapshotPinCount: acquisition.snapshotPinOids.length,
+    snapshotPinVersion: result.snapshotPinVersion,
     sourcePackCount: activeCatalog.length,
     refsVersion: result.refsVersion,
     packsetVersion: result.packsetVersion,
@@ -300,6 +318,7 @@ export async function commitReachabilityGcState(args: {
   token: string;
   refsVersion: number;
   packsetVersion: number;
+  snapshotPinVersion: number;
   sourcePacks: PackCatalogRow[];
   retainedPackKey?: string;
   stagedPack?: {
@@ -397,6 +416,8 @@ export async function commitReachabilityGcState(args: {
       // report the conclusive conflict rather than retrying a missing lease.
       if (((await transactionStore.get("refsVersion")) ?? 0) !== args.refsVersion)
         return "refs-changed";
+      if (((await transactionStore.get("snapshotPinVersion")) ?? 0) !== args.snapshotPinVersion)
+        return "pins-changed";
       if (((await transactionStore.get("packsetVersion")) ?? 0) !== args.packsetVersion)
         return "packset-changed";
     }
@@ -439,9 +460,20 @@ export async function commitReachabilityGcState(args: {
     await clearGcAttemptState(args.ctx, args.token);
     return { status: "retry", reason: "receive-active" };
   }
+  const activeReaders = ((await store.get("repositoryReadLeases")) ?? []).filter(
+    (reader) => reader.operation === "snapshot-projection" && reader.expiresAt > Date.now()
+  );
+  if (activeReaders.length > 0) {
+    await clearGcAttemptState(args.ctx, args.token);
+    return { status: "retry", reason: "receive-active" };
+  }
   if (((await store.get("refsVersion")) || 0) !== args.refsVersion) {
     await clearGcAttemptState(args.ctx, args.token);
     return { status: "retry", reason: "refs-changed" };
+  }
+  if (((await store.get("snapshotPinVersion")) ?? 0) !== args.snapshotPinVersion) {
+    await clearGcAttemptState(args.ctx, args.token);
+    return { status: "retry", reason: "pins-changed" };
   }
   if (((await store.get("packsetVersion")) || 0) !== args.packsetVersion) {
     await clearGcAttemptState(args.ctx, args.token);

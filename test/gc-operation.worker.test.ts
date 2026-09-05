@@ -28,6 +28,7 @@ describe("durable garbage collection ownership", () => {
       snapshot: {
         token: begin.lease.token,
         refs: begin.refs,
+        snapshotPinVersion: begin.snapshotPinVersion,
         refsVersion: begin.refsVersion,
         packsetVersion: begin.packsetVersion,
         sourcePacks: begin.activeCatalog,
@@ -169,6 +170,7 @@ describe("durable garbage collection ownership", () => {
           snapshot: {
             token: begin.lease.token,
             refs: begin.refs,
+            snapshotPinVersion: begin.snapshotPinVersion,
             refsVersion: begin.refsVersion,
             packsetVersion: begin.packsetVersion,
             sourcePacks: begin.activeCatalog,

@@ -1,21 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
-import { createExecutionContext } from "cloudflare:test";
 import { env, exports as workerExports } from "cloudflare:workers";
 
-import { asBufferSource, bytesToHex, createLogger, zeroOid } from "@/worker/common";
+import { asBufferSource, bytesToHex, zeroOid } from "@/worker/common";
 import { encodeGitObject, parseCommitRefs } from "@/worker/git/core";
 import { readObject } from "@/worker/git/object-store";
 import { parseTree } from "@/worker/git/operations/read/objects";
-import { getLimiter } from "@/worker/git/operations/limits";
-import { RepoDurableObject } from "@/worker/do/repo/repoDO";
-import {
-  materializeAcceptedWrite,
-  snapshotBundleObjectKey,
-  snapshotObjectKey,
-} from "@/worker/git/snapshot/materialize";
+import { snapshotBundleObjectKey, snapshotObjectKey } from "@/worker/git/snapshot/materialize";
 import { __test as receivePipelineTest } from "@/worker/git/receive/pipeline";
 import { __test as receiveCatalogTest } from "@/worker/do/repo/catalog/receive";
 import { __test as readBenchmarkTest } from "@/worker/routes/readBenchmark";
+import { __test as snapshotRouteTest } from "@/worker/routes/snapshot";
 import type {
   FinalizeReceiveResult,
   ReconcileReceiveResult,
@@ -26,7 +20,12 @@ import { createTestCacheContext } from "./util/pack-first";
 import { buildPack } from "./util/git-pack";
 import { buildTreePayload, seedPackedRepoState } from "./util/packed-repo";
 import { setupRepoForTests } from "./util/repoSeed";
-import { callStubWithRetry, uniqueRepoId, withEnvOverrides } from "./util/test-helpers";
+import {
+  callStubWithRetry,
+  runDOWithRetry,
+  uniqueRepoId,
+  withEnvOverrides,
+} from "./util/test-helpers";
 
 type IngestionResponse = {
   acceptedWrite: {
@@ -40,6 +39,7 @@ type IngestionResponse = {
   };
   treeSha: string;
   replayed: boolean;
+  qualificationTimings?: Record<string, number>;
 };
 
 type SnapshotManifest = {
@@ -68,6 +68,7 @@ type ReadBenchmarkResponse = {
   packCatalogVersion?: number;
   compactionQueued?: boolean;
   compactionRunning?: boolean;
+  source?: string;
 };
 
 function ingestionForm(args?: {
@@ -128,7 +129,29 @@ async function postIngestion(
 }
 
 describe("internal ingestion", () => {
-  it("publishes a 20-file snapshot as one indexed bundle before its manifest", async () => {
+  it("attributes every ingestion critical-path phase in qualification mode", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("phase-attribution");
+    await setupRepoForTests(env, owner, repo, { doName: `repo:${owner}-${repo}` });
+    const response = await withEnvOverrides(env, { QUALIFICATION_MODE: "1" }, async () =>
+      postIngestion(owner, repo, ingestionForm({ idempotencyKey: "phase-attribution" }))
+    );
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as IngestionResponse;
+    expect(body.qualificationTimings).toEqual({
+      multipartParseMs: expect.any(Number),
+      gitObjectPackBuildMs: expect.any(Number),
+      receiptRpcMs: expect.any(Number),
+      beginRpcMs: expect.any(Number),
+      packIdxPrefPersistenceMs: expect.any(Number),
+      connectivityMs: expect.any(Number),
+      repoFinalizePinCurrentMs: expect.any(Number),
+      requestToResponseMs: expect.any(Number),
+    });
+    expect(Object.values(body.qualificationTimings!).every((value) => value >= 0)).toBe(true);
+  });
+
+  it("pins and serves a 20-file snapshot directly from Git without a legacy bundle", async () => {
     const owner = "ingest";
     const repo = uniqueRepoId("snapshot-write-batches");
     const seeded = await setupRepoForTests(env, owner, repo, {
@@ -150,31 +173,52 @@ describe("internal ingestion", () => {
     );
     expect(response.status).toBe(201);
     const body = (await response.json()) as IngestionResponse;
-    expect(snapshotWrites.map((key) => key.slice(snapshotPrefix.length))).toEqual([
-      `${body.acceptedWrite.afterSha}/bundle.bin`,
-      `${body.acceptedWrite.afterSha}/manifest.json`,
-    ]);
+    expect(snapshotWrites).toEqual([]);
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
+    await expect(stub.getSnapshotPin(body.acceptedWrite.afterSha)).resolves.toMatchObject({
+      commitSha: body.acceptedWrite.afterSha,
+      treeSha: body.treeSha,
+      ref: "refs/heads/main",
+      sourceSurface: "ingestion",
+    });
     const manifestKey = snapshotObjectKey({
       env,
       repositoryId: seeded.repositoryId,
       commitSha: body.acceptedWrite.afterSha,
     });
     expect(manifestKey).not.toBeNull();
-    const manifest = await env.REPO_BUCKET.get(manifestKey!);
-    const parsedManifest = (await manifest!.json()) as SnapshotManifest;
-    expect(parsedManifest.files).toHaveLength(20);
-    expect(parsedManifest.bundle?.bytes).toBe(330);
-    expect(parsedManifest.files.map((file) => file.offset)).toEqual(
-      parsedManifest.files.map((_, index) => index * 16 + Math.max(0, index - 10))
-    );
-    const served = await workerExports.default.fetch(
-      `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}/file?path=file-19.txt`,
+    expect(await env.REPO_BUCKET.head(manifestKey!)).toBeNull();
+    const bundleKey = snapshotBundleObjectKey({
+      env,
+      repositoryId: seeded.repositoryId,
+      commitSha: body.acceptedWrite.afterSha,
+    });
+    expect(bundleKey).not.toBeNull();
+    expect(await env.REPO_BUCKET.head(bundleKey!)).toBeNull();
+    const staleCache = {
+      match: vi.fn(async () => new Response("stale snapshot bytes\n")),
+      put: vi.fn(async () => {}),
+    } as unknown as Cache;
+    const cacheOpen = vi.spyOn(caches, "open").mockResolvedValue(staleCache);
+    const served = await workerExports.default
+      .fetch(
+        `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}/file?path=file-19.txt`,
+        { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+      )
+      .finally(() => cacheOpen.mockRestore());
+    expect(served.status).toBe(200);
+    expect(served.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(await served.text()).toBe("snapshot file 19\n");
+    expect(staleCache.match).not.toHaveBeenCalled();
+    expect(staleCache.put).not.toHaveBeenCalled();
+    const missing = await workerExports.default.fetch(
+      `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}/file?path=missing.txt`,
       { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
     );
-    expect(await served.text()).toBe("snapshot file 19\n");
+    expect(missing.status).toBe(404);
   });
 
-  it("serves an all-empty bundled snapshot without an invalid R2 range", async () => {
+  it("serves an empty blob directly from its pinned Git pack", async () => {
     const owner = "ingest";
     const repo = uniqueRepoId("empty-snapshot-bundle");
     await setupRepoForTests(env, owner, repo, { doName: `repo:${owner}-${repo}` });
@@ -207,6 +251,187 @@ describe("internal ingestion", () => {
       operation: "snapshot-blob",
       bytes: 0,
       sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    });
+  });
+
+  it("holds a repository reader lease around pack-backed snapshot range reads", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-reader-fence");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const response = await postIngestion(
+      owner,
+      repo,
+      ingestionForm({ idempotencyKey: "snapshot-reader-fence" })
+    );
+    const body = (await response.json()) as IngestionResponse;
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
+    const packPrefix = `do/${stub.id.toString()}/objects/pack/`;
+    const get = env.REPO_BUCKET.get.bind(env.REPO_BUCKET);
+    const events: string[] = [];
+    snapshotRouteTest.setSnapshotReadLeaseObserver((phase) => events.push(phase));
+    const getSpy = vi
+      .spyOn(env.REPO_BUCKET, "get")
+      .mockImplementation(async (...args: Parameters<typeof get>) => {
+        if (
+          String(args[0]).startsWith(packPrefix) &&
+          String(args[0]).endsWith(".pack") &&
+          args[1]?.range
+        ) {
+          events.push("pack-range");
+        }
+        return await get(...args);
+      });
+    const served = await workerExports.default
+      .fetch(
+        `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}/file?path=nested%2Fhello.txt`,
+        { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+      )
+      .finally(() => {
+        getSpy.mockRestore();
+        snapshotRouteTest.setSnapshotReadLeaseObserver(undefined);
+      });
+    expect(served.status).toBe(200);
+    expect(events[0]).toBe("begin");
+    expect(events).toContain("pack-range");
+    expect(events.at(-1)).toBe("finish");
+  });
+
+  it("reports repository deletion as terminal for snapshot files and manifests", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-reader-unavailable");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const response = await postIngestion(
+      owner,
+      repo,
+      ingestionForm({ idempotencyKey: "snapshot-reader-unavailable" })
+    );
+    const body = (await response.json()) as IngestionResponse;
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => await state.storage.put("repositoryDeleting", Date.now())
+    );
+    expect(await stub.releaseSnapshotPin(body.acceptedWrite.afterSha)).toEqual({
+      released: false,
+      reason: "repository-deleting",
+    });
+    const base = `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}`;
+    for (const suffix of ["/manifest", "/file?path=nested%2Fhello.txt"]) {
+      const unavailable = await workerExports.default.fetch(`${base}${suffix}`, {
+        headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` },
+      });
+      expect(unavailable.status).toBe(410);
+      expect(unavailable.headers.get("Retry-After")).toBeNull();
+      expect(unavailable.headers.get("Cache-Control")).toBe("no-store");
+    }
+  });
+
+  it("reports snapshot reader capacity as retryable for files and manifests", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-reader-capacity");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const response = await postIngestion(
+      owner,
+      repo,
+      ingestionForm({ idempotencyKey: "snapshot-reader-capacity" })
+    );
+    const body = (await response.json()) as IngestionResponse;
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
+    const now = Date.now();
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) =>
+        await state.storage.put(
+          "repositoryReadLeases",
+          Array.from({ length: 128 }, (_, index) => ({
+            token: `capacity-${index}`,
+            operation: "snapshot-read",
+            createdAt: now,
+            expiresAt: now + 60_000,
+          }))
+        )
+    );
+    const base = `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}`;
+    for (const suffix of ["/manifest", "/file?path=nested%2Fhello.txt"]) {
+      const unavailable = await workerExports.default.fetch(`${base}${suffix}`, {
+        headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` },
+      });
+      expect(unavailable.status).toBe(503);
+      expect(unavailable.headers.get("Retry-After")).toBe("1");
+    }
+  });
+
+  it("reports transient pack-read failures as retryable for files and manifests", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-pack-read-failure");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const response = await postIngestion(
+      owner,
+      repo,
+      ingestionForm({ idempotencyKey: "snapshot-pack-read-failure" })
+    );
+    const body = (await response.json()) as IngestionResponse;
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
+    const packPrefix = `do/${stub.id.toString()}/objects/pack/`;
+    const get = env.REPO_BUCKET.get.bind(env.REPO_BUCKET);
+    const getSpy = vi
+      .spyOn(env.REPO_BUCKET, "get")
+      .mockImplementation(async (...args: Parameters<typeof get>) => {
+        if (String(args[0]).startsWith(packPrefix)) throw new Error("transient R2 failure");
+        return await get(...args);
+      });
+    try {
+      const base = `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}`;
+      for (const suffix of ["/manifest", "/file?path=nested%2Fhello.txt"]) {
+        const unavailable = await workerExports.default.fetch(`${base}${suffix}`, {
+          headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` },
+        });
+        expect(unavailable.status).toBe(503);
+        expect(unavailable.headers.get("Retry-After")).toBe("1");
+      }
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
+
+  it("releases a historical current snapshot after its authoritative ref is deleted", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("snapshot-release-deleted-ref");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const response = await postIngestion(
+      owner,
+      repo,
+      ingestionForm({ idempotencyKey: "snapshot-release-deleted-ref" })
+    );
+    const body = (await response.json()) as IngestionResponse;
+    const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
+    expect(await stub.releaseSnapshotPin(body.acceptedWrite.afterSha)).toEqual({
+      released: false,
+      reason: "ref-referenced",
+    });
+    expect(await stub.setRefs([])).toBe(true);
+    await withEnvOverrides(env, { SNAPSHOT_BENCHMARK_PREFIX: "../invalid" }, async () => {
+      const released = await workerExports.default.fetch(
+        `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` },
+        }
+      );
+      expect(released.status).toBe(204);
+    });
+    expect(await stub.getSnapshotResolution(body.acceptedWrite.afterSha)).toEqual({
+      status: "released",
     });
   });
 
@@ -263,110 +488,56 @@ describe("internal ingestion", () => {
       bytes: bytes.byteLength,
       sha256,
     });
-  });
-
-  it("binds the ingestion source fast path to the committed tree", async () => {
-    const owner = "ingest";
-    const repo = uniqueRepoId("snapshot-source-binding");
-    const seeded = await setupRepoForTests(env, owner, repo, {
-      doName: `repo:${owner}-${repo}`,
-    });
-    const response = await postIngestion(owner, repo, ingestionForm());
-    expect(response.status).toBe(201);
-    const body = (await response.json()) as IngestionResponse;
-    const prefix = `source-binding-${repo}-snapshots`;
-    const source = {
-      treeSha: body.treeSha,
-      files: [
-        { path: "nested/hello.txt", bytes: new TextEncoder().encode("hello from ingestion\n") },
-        { path: "index.html", bytes: new TextEncoder().encode("<h1>index</h1>\n") },
-      ],
-    };
-    const materialize = async (treeSha: string) =>
-      await materializeAcceptedWrite({
-        env,
-        repoId: seeded.doName,
-        fact: body.acceptedWrite,
-        request: new Request("https://example.com/source-binding"),
-        ctx: createExecutionContext(),
-        limiter: getLimiter(),
-        log: createLogger(env.LOG_LEVEL, { service: "SnapshotSourceBindingTest" }),
-        source: { ...source, treeSha },
-      });
-
-    await withEnvOverrides(env, { SNAPSHOT_BENCHMARK_PREFIX: prefix }, async () => {
-      await expect(materialize("f".repeat(40))).rejects.toThrow(
-        "Snapshot source does not match the committed tree"
-      );
-      expect((await env.REPO_BUCKET.list({ prefix: `${prefix}/` })).objects).toHaveLength(0);
-
-      await expect(materialize(source.treeSha)).resolves.toMatchObject({ treeSha: source.treeSha });
-      const bundleKey = snapshotBundleObjectKey({
-        env,
-        repositoryId: seeded.repositoryId,
-        commitSha: body.acceptedWrite.afterSha,
-      })!;
-      const bundle = await env.REPO_BUCKET.get(bundleKey);
-      expect(await bundle!.text()).toBe("<h1>index</h1>\nhello from ingestion\n");
-    });
-  });
-
-  it("keeps the snapshot lease until a started bundle write settles", async () => {
-    const owner = "ingest";
-    const repo = uniqueRepoId("snapshot-write-failure");
-    const seeded = await setupRepoForTests(env, owner, repo, {
-      doName: `repo:${owner}-${repo}`,
-    });
-    const snapshotPrefix = `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/`;
-    const put = env.REPO_BUCKET.put.bind(env.REPO_BUCKET);
-    let releaseBundleWrite!: () => void;
-    const heldBundleWrite = new Promise<void>((resolve) => {
-      releaseBundleWrite = resolve;
-    });
-    let signalBundleStarted!: () => void;
-    const bundleStarted = new Promise<void>((resolve) => {
-      signalBundleStarted = resolve;
-    });
-    const putSpy = vi
-      .spyOn(env.REPO_BUCKET, "put")
-      .mockImplementation(async (...args: Parameters<typeof put>) => {
-        const key = String(args[0]);
-        if (!key.startsWith(snapshotPrefix) || !key.endsWith("/bundle.bin")) {
-          return await put(...args);
-        }
-        signalBundleStarted();
-        await heldBundleWrite;
-        throw new Error("injected snapshot bundle failure");
-      });
-
-    const responsePromise = postIngestion(owner, repo, multiFileIngestionForm(5));
-    await bundleStarted;
     const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
-    await vi.waitFor(async () => {
-      const state = await stub.getHeadAndRefs();
-      expect(state.refs.find((ref) => ref.name === "refs/heads/main")?.oid).toMatch(
-        /^[0-9a-f]{40}$/
-      );
+    expect(await stub.setRefs([{ name: "refs/heads/main", oid: commitSha }])).toBe(true);
+    const refused = await workerExports.default.fetch(snapshotBase, {
+      method: "DELETE",
+      headers,
     });
-    let probeLeaseToken: string | undefined;
-    await vi.waitFor(async () => {
-      const probe = await stub.beginReceive();
-      expect(probe.ok).toBe(true);
-      if (probe.ok) probeLeaseToken = probe.lease.token;
+    expect(refused.status).toBe(409);
+    expect(await env.REPO_BUCKET.head(manifestKey)).not.toBeNull();
+    expect(await env.REPO_BUCKET.head(fileKey)).not.toBeNull();
+    expect(await stub.setRefs([])).toBe(true);
+    const released = await workerExports.default.fetch(snapshotBase, {
+      method: "DELETE",
+      headers,
     });
-    expect(probeLeaseToken).toBeDefined();
-    await stub.abortReceive(probeLeaseToken!);
-    const deletion = await stub.beginRepositoryDeletion();
-    expect(deletion.ready).toBe(false);
-    releaseBundleWrite();
-    const response = await responsePromise.finally(() => putSpy.mockRestore());
-    expect(response.status).toBe(500);
-    await expect(stub.beginRepositoryDeletion()).resolves.toMatchObject({ ready: true });
-    const objects = await env.REPO_BUCKET.list({ prefix: snapshotPrefix });
-    expect(objects.objects.some((object) => object.key.endsWith("/manifest.json"))).toBe(false);
+    expect(released.status).toBe(204);
+    expect(await env.REPO_BUCKET.head(manifestKey)).toBeNull();
+    expect(await env.REPO_BUCKET.head(fileKey)).toBeNull();
+    expect(
+      await workerExports.default.fetch(`${snapshotBase}/file?path=${path}`, { headers })
+    ).toMatchObject({ status: 404 });
   });
 
-  it("keeps an unpublished staged bundle hidden when accepted-pack publication fails", async () => {
+  it("releases a legacy snapshot even when its manifest is unreadable", async () => {
+    const owner = "ingest";
+    const repo = uniqueRepoId("legacy-snapshot-unreadable");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const commitSha = "b".repeat(40);
+    const manifestKey = snapshotObjectKey({
+      env,
+      repositoryId: seeded.repositoryId,
+      commitSha,
+    })!;
+    await env.REPO_BUCKET.put(manifestKey, "not-json");
+    const released = await workerExports.default.fetch(
+      `https://example.com/_internal/snapshots/${owner}/${repo}/${commitSha}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` },
+      }
+    );
+    expect(released.status).toBe(204);
+    expect(await env.REPO_BUCKET.head(manifestKey)).toBeNull();
+    expect(
+      await env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName)).getSnapshotResolution(commitSha)
+    ).toEqual({ status: "released" });
+  });
+
+  it("leaves refs, current, and pins unchanged when accepted-pack publication fails", async () => {
     const owner = "ingest";
     const repo = uniqueRepoId("snapshot-stage-cleanup");
     const seeded = await setupRepoForTests(env, owner, repo, {
@@ -374,16 +545,10 @@ describe("internal ingestion", () => {
     });
     const snapshotPrefix = `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/`;
     const put = env.REPO_BUCKET.put.bind(env.REPO_BUCKET);
-    let bundleWritten = false;
     const putSpy = vi
       .spyOn(env.REPO_BUCKET, "put")
       .mockImplementation(async (...args: Parameters<typeof put>) => {
         const key = String(args[0]);
-        if (key.startsWith(snapshotPrefix) && key.endsWith("/bundle.bin")) {
-          const result = await put(...args);
-          bundleWritten = true;
-          return result;
-        }
         if (key.includes("/objects/pack/") && key.endsWith(".pack")) {
           await new Response(args[1] as BodyInit).arrayBuffer();
           throw new Error("injected accepted-pack write failure");
@@ -395,12 +560,16 @@ describe("internal ingestion", () => {
       putSpy.mockRestore()
     );
     expect(response.status).toBe(500);
-    expect(bundleWritten).toBe(true);
     const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
+    await expect(stub.listRefs()).resolves.toEqual([]);
+    await expect(stub.listSnapshotPins()).resolves.toEqual([]);
+    await expect(stub.getSnapshotProjection("refs/heads/main")).resolves.toEqual({
+      snapshotCount: 0,
+      current: undefined,
+    });
     await expect(stub.beginRepositoryDeletion()).resolves.toMatchObject({ ready: true });
     const objects = await env.REPO_BUCKET.list({ prefix: snapshotPrefix });
-    expect(objects.objects.map((object) => object.key)).toHaveLength(1);
-    expect(objects.objects[0]!.key).toMatch(/\/bundle\.bin$/);
+    expect(objects.objects).toHaveLength(0);
   });
 
   it("waits for concurrent prebuilt sidecar writes before failed-receive cleanup", async () => {
@@ -429,75 +598,6 @@ describe("internal ingestion", () => {
     expect(response.status).toBe(500);
     const objects = await env.REPO_BUCKET.list({ prefix: packPrefix });
     expect(objects.objects.filter((object) => object.key.includes("pack-rx-"))).toHaveLength(0);
-  });
-
-  it("repairs a post-commit manifest failure through the durable receipt replay", async () => {
-    const owner = "ingest";
-    const repo = uniqueRepoId("snapshot-replay-repair");
-    const seeded = await setupRepoForTests(env, owner, repo, {
-      doName: `repo:${owner}-${repo}`,
-    });
-    const snapshotPrefix = `test-snapshots/${encodeURIComponent(seeded.repositoryId)}/`;
-    const put = env.REPO_BUCKET.put.bind(env.REPO_BUCKET);
-    let failManifest = true;
-    const putSpy = vi
-      .spyOn(env.REPO_BUCKET, "put")
-      .mockImplementation(async (...args: Parameters<typeof put>) => {
-        const key = String(args[0]);
-        if (failManifest && key.startsWith(snapshotPrefix) && key.endsWith("/manifest.json")) {
-          failManifest = false;
-          throw new Error("injected snapshot manifest failure");
-        }
-        return await put(...args);
-      });
-
-    const failed = await postIngestion(owner, repo, ingestionForm());
-    expect(failed.status).toBe(500);
-    const hidden = await env.REPO_BUCKET.list({ prefix: snapshotPrefix });
-    expect(hidden.objects.some((object) => object.key.endsWith("/bundle.bin"))).toBe(true);
-    expect(hidden.objects.some((object) => object.key.endsWith("/manifest.json"))).toBe(false);
-
-    const replay = await postIngestion(owner, repo, ingestionForm()).finally(() =>
-      putSpy.mockRestore()
-    );
-    expect(replay.status).toBe(200);
-    const body = (await replay.json()) as IngestionResponse;
-    expect(body.replayed).toBe(true);
-    const manifestKey = snapshotObjectKey({
-      env,
-      repositoryId: seeded.repositoryId,
-      commitSha: body.acceptedWrite.afterSha,
-    })!;
-    await expect(env.REPO_BUCKET.head(manifestKey)).resolves.not.toBeNull();
-    const served = await workerExports.default.fetch(
-      `https://example.com/_internal/snapshots/${owner}/${repo}/${body.acceptedWrite.afterSha}/file?path=nested%2Fhello.txt`,
-      { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
-    );
-    expect(served.status).toBe(200);
-    expect(await served.text()).toBe("hello from ingestion\n");
-  });
-
-  it("returns the committed result when snapshot lease release fails after publication", async () => {
-    const owner = "ingest";
-    const repo = uniqueRepoId("snapshot-finish-failure");
-    const seeded = await setupRepoForTests(env, owner, repo, {
-      doName: `repo:${owner}-${repo}`,
-    });
-    const finishSpy = vi
-      .spyOn(RepoDurableObject.prototype, "finishSnapshotMaterialization")
-      .mockRejectedValueOnce(new Error("injected snapshot lease finish failure"));
-
-    const response = await postIngestion(owner, repo, ingestionForm()).finally(() =>
-      finishSpy.mockRestore()
-    );
-    expect(response.status).toBe(201);
-    const body = (await response.json()) as IngestionResponse;
-    const manifestKey = snapshotObjectKey({
-      env,
-      repositoryId: seeded.repositoryId,
-      commitSha: body.acceptedWrite.afterSha,
-    })!;
-    await expect(env.REPO_BUCKET.head(manifestKey)).resolves.not.toBeNull();
   });
 
   it("builds a nested Git commit, commits main through ref CAS, and replays without a new pack", async () => {
@@ -563,7 +663,7 @@ describe("internal ingestion", () => {
     expect(manifestResponse.status).toBe(200);
     const manifest = (await manifestResponse.json()) as SnapshotManifest;
     expect(manifest).toMatchObject({
-      version: 1,
+      version: 2,
       repositoryId: seeded.repositoryId,
       commitSha: body.acceptedWrite.afterSha,
       treeSha: body.treeSha,
@@ -629,13 +729,18 @@ describe("internal ingestion", () => {
       `?needle=${encodeURIComponent("hello")}&cold=1`
     );
     const snapshotTree = await runBenchmark("snapshot-tree", "?cold=1");
-    expect(snapshotTree).toMatchObject({ operation: "snapshot-tree", fileCount: 2 });
+    expect(snapshotTree).toMatchObject({
+      operation: "snapshot-tree",
+      source: "git-pack",
+      fileCount: 2,
+    });
     const snapshotBlob = await runBenchmark(
       "snapshot-blob",
       `?path=${encodeURIComponent("nested/hello.txt")}&needle=${encodeURIComponent("hello")}`
     );
     expect(snapshotBlob).toMatchObject({
       operation: "snapshot-blob",
+      source: "git-pack",
       bytes: 21,
       sha256: blobBenchmark.sha256,
     });
@@ -722,6 +827,13 @@ describe("internal ingestion", () => {
       (repoStub) => repoStub.getActivePackCatalog()
     );
     expect(catalog).toHaveLength(1);
+    await expect(stub.getSnapshotPin(body.acceptedWrite.afterSha)).resolves.toMatchObject({
+      commitSha: body.acceptedWrite.afterSha,
+      treeSha: body.treeSha,
+    });
+    await expect(stub.getSnapshotProjection("refs/heads/main")).resolves.toMatchObject({
+      current: { commitSha: body.acceptedWrite.afterSha, sequence: 1 },
+    });
     expect(
       await readObject(
         env,
@@ -734,6 +846,7 @@ describe("internal ingestion", () => {
     const replay = await postIngestion(owner, repo, ingestionForm());
     expect(replay.status).toBe(200);
     expect(await replay.json()).toEqual({ ...body, replayed: true });
+    await expect(stub.listSnapshotPins()).resolves.toHaveLength(1);
     expect(
       await callStubWithRetry(
         () => stub,
@@ -888,6 +1001,10 @@ describe("internal ingestion", () => {
     expect(state.refs).toContainEqual({
       name: "refs/heads/main",
       oid: acceptedBody.acceptedWrite.afterSha,
+    });
+    await expect(stub.listSnapshotPins()).resolves.toHaveLength(1);
+    await expect(stub.getSnapshotProjection("refs/heads/main")).resolves.toMatchObject({
+      current: { commitSha: acceptedBody.acceptedWrite.afterSha, sequence: 1 },
     });
   });
 
@@ -1186,6 +1303,14 @@ describe("internal ingestion", () => {
         readBenchmarkTest.maxScaleBenchmarkFiles
       )
     ).toThrow("Benchmark file limit exceeded");
+  });
+
+  it("exempts only legacy scale snapshot operations from ordinary pack safeguards", () => {
+    expect(readBenchmarkTest.isScaleSnapshotBenchmarkOperation("snapshot-tree")).toBe(false);
+    expect(readBenchmarkTest.isScaleSnapshotBenchmarkOperation("snapshot-blob")).toBe(false);
+    expect(readBenchmarkTest.isScaleSnapshotBenchmarkOperation("snapshot-search")).toBe(false);
+    expect(readBenchmarkTest.isScaleSnapshotBenchmarkOperation("scale-snapshot-tree")).toBe(true);
+    expect(readBenchmarkTest.isScaleSnapshotBenchmarkOperation("scale-snapshot-blob")).toBe(true);
   });
 
   it("selects the expanded direct tree limit only for the authenticated scale operation", async () => {

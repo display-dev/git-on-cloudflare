@@ -99,8 +99,14 @@ export async function commitCoordinatedGc(
         if (native && !isNativeReceiveTerminal(native.state))
           return { status: "retry", reason: "receive-active" };
       }
+      const activeReaders = ((await store.get("repositoryReadLeases")) ?? []).filter(
+        (reader) => reader.operation === "snapshot-projection" && reader.expiresAt > now
+      );
+      if (activeReaders.length > 0) return { status: "retry", reason: "receive-active" };
       if (((await store.get("refsVersion")) ?? 0) !== coordination.refsVersion)
         return { status: "retry", reason: "refs-changed" };
+      if (((await store.get("snapshotPinVersion")) ?? 0) !== coordination.snapshotPinVersion)
+        return { status: "retry", reason: "pins-changed" };
       if (((await store.get("packsetVersion")) ?? 0) !== coordination.packsetVersion)
         return { status: "retry", reason: "packset-changed" };
       const db = getDb(ctx.storage);

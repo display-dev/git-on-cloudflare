@@ -213,6 +213,7 @@ let failNextAfterOutcomeStoreForTesting = false;
 let failNextOutcomeIndexStoreForTesting = false;
 let failNextAfterCatalogActivationForTesting = false;
 let failNextAfterCatalogUpsertForTesting = false;
+let failNextAfterSnapshotPinForTesting = false;
 let catalogUpsertFailureCountForTesting = 0;
 let catalogActivationFailureCountForTesting = 0;
 let outcomeStoreFailureCountForTesting = 0;
@@ -275,6 +276,9 @@ export const __test = {
   failNextAfterCatalogUpsert(): void {
     failNextAfterCatalogUpsertForTesting = true;
   },
+  failNextAfterSnapshotPin(): void {
+    failNextAfterSnapshotPinForTesting = true;
+  },
   consumedFailureCounts(): {
     catalogUpsert: number;
     catalogActivation: number;
@@ -292,6 +296,7 @@ export const __test = {
     failNextOutcomeIndexStoreForTesting = false;
     failNextAfterCatalogActivationForTesting = false;
     failNextAfterCatalogUpsertForTesting = false;
+    failNextAfterSnapshotPinForTesting = false;
     catalogUpsertFailureCountForTesting = 0;
     catalogActivationFailureCountForTesting = 0;
     outcomeStoreFailureCountForTesting = 0;
@@ -838,6 +843,7 @@ export async function finalizeReceiveState(args: {
 
   let committedRefs: Array<{ name: string; oid: string }> = [];
   let refPublication = intent.refPublication;
+  let snapshotPinRetained = true;
   const acceptedWrites = acceptedWriteFactsForIntent(intent);
   const statuses = intent.commands.map((command) => ({ ref: command.ref, ok: true }));
   await args.ctx.storage.transaction(async (transaction) => {
@@ -864,22 +870,44 @@ export async function finalizeReceiveState(args: {
     if (refPublication) {
       await transactionStore.put(intentKey, { ...intent, refPublication });
     }
-    await advanceGcReceiveVersions(
-      transaction,
-      intent.expectedRefsVersion,
-      intent.nextRefsVersion,
-      intent.nextPacksetVersion
-    );
+    const expectedSnapshotPinVersion = (await transactionStore.get("snapshotPinVersion")) ?? 0;
     if (acceptedWrites) {
-      await recordAcceptedWrites(
+      snapshotPinRetained = await recordAcceptedWrites(
         transactionStore,
         intent.nextRefsVersion,
         acceptedWrites,
         intent.createdAt,
-        snapshotEventProbeEnabled(args.env)
+        snapshotEventProbeEnabled(args.env),
+        intent.ingestionReceipt
+          ? {
+              commitSha: intent.ingestionReceipt.acceptedWrite.afterSha,
+              treeSha: intent.ingestionReceipt.treeSha,
+              materializedAt: intent.createdAt,
+              advanceCurrent: !snapshotEventProbeEnabled(args.env),
+              qualificationOwned: args.env.QUALIFICATION_MODE === "1",
+            }
+          : undefined
       );
+      if (failNextAfterSnapshotPinForTesting) {
+        failNextAfterSnapshotPinForTesting = false;
+        throw new Error("injected snapshot pin transaction failure");
+      }
     }
+    await advanceGcReceiveVersions(
+      transaction,
+      intent.expectedRefsVersion,
+      intent.nextRefsVersion,
+      intent.nextPacksetVersion,
+      expectedSnapshotPinVersion,
+      (await transactionStore.get("snapshotPinVersion")) ?? 0
+    );
   });
+  if (!snapshotPinRetained) {
+    args.logger?.warn("receive:snapshot-pin-conflict", {
+      commitSha: intent.ingestionReceipt?.acceptedWrite.afterSha,
+      treeSha: intent.ingestionReceipt?.treeSha,
+    });
+  }
   await args.onMilestone?.({ phase: "authoritative-ref-cas", durable: true });
   const committed: ReceiveCommitOutcome = {
     token: args.token,

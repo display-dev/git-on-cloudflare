@@ -144,22 +144,24 @@ describe("snapshot event plane", () => {
     const seeded = await setupRepoForTests(env, owner, repo, {
       doName: `repo:${owner}-${repo}`,
     });
-    const first = await ingest(
-      owner,
-      repo,
-      ingestionForm({ expectedOid: zeroOid(), idempotencyKey: "gate-1", content: "one\n" })
-    );
+    let first = "";
+    await withEnvOverrides(env, { SNAPSHOT_EVENT_PROBE: "1" }, async () => {
+      first = await ingest(
+        owner,
+        repo,
+        ingestionForm({ expectedOid: zeroOid(), idempotencyKey: "gate-1", content: "one\n" })
+      );
+    });
 
     let plannedSequence = 0;
     await withEnvOverrides(env, { SNAPSHOT_EVENT_PROBE: "1" }, async () => {
       const state = await eventState(owner, repo);
       expect(state.plan).toMatchObject({
-        status: "head_only",
-        afterSha: first,
-        sequence: 1,
+        status: "deliver",
+        entry: { sequence: 1, fact: { afterSha: first } },
       });
-      if (state.plan.status !== "head_only") throw new Error("expected a head-only plan");
-      plannedSequence = state.plan.sequence;
+      if (state.plan.status !== "deliver") throw new Error("expected a delivery plan");
+      plannedSequence = state.plan.entry.sequence;
     });
 
     const second = (await pushStreamingUpdate(owner, repo, first, "two\n")).commitOid;
@@ -169,6 +171,7 @@ describe("snapshot event plane", () => {
       await stub.projectReconciledHead({
         ref: "refs/heads/main",
         commitSha: first,
+        treeSha: zeroOid(),
         sequence: plannedSequence,
         materializedAt: Date.now(),
       })
@@ -176,12 +179,12 @@ describe("snapshot event plane", () => {
 
     await withEnvOverrides(env, { SNAPSHOT_EVENT_PROBE: "1" }, async () => {
       let state = await eventState(owner, repo);
-      expect(state.plan).toMatchObject({
-        status: "head_only",
-        afterSha: first,
-        sequence: 3,
-      });
-      expect((await eventRequest(owner, repo, { action: "reconcile" })).status).toBe(200);
+      if (state.plan.status === "head_only") {
+        expect(state.plan).toMatchObject({ afterSha: first, sequence: 3 });
+        expect((await eventRequest(owner, repo, { action: "reconcile" })).status).toBe(200);
+      } else {
+        expect(state.plan.status).toBe("up_to_date");
+      }
       state = await eventState(owner, repo);
       expect(state.projection.current).toMatchObject({ commitSha: first, sequence: 3 });
       expect(state.plan.status).toBe("up_to_date");
@@ -195,6 +198,7 @@ describe("snapshot event plane", () => {
       const seeded = await setupRepoForTests(env, owner, repo, {
         doName: `repo:${owner}-${repo}`,
       });
+      const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
 
       const first = await ingest(
         owner,
@@ -262,7 +266,11 @@ describe("snapshot event plane", () => {
           })
         ).status
       ).toBe(503);
-      expect(await snapshotStatus(owner, repo, third)).toBe(404);
+      expect(await stub.getSnapshotPin(third)).toMatchObject({ commitSha: third });
+      // The accepted-write transaction already made this exact immutable Git
+      // tree serveable and GC-rooted; event delivery only projects the legacy
+      // bundle/current-pointer path in probe mode.
+      expect(await snapshotStatus(owner, repo, third)).toBe(200);
       expect(
         (
           await eventRequest(owner, repo, {
@@ -303,7 +311,6 @@ describe("snapshot event plane", () => {
       expect(
         (await eventRequest(owner, repo, { action: "drop", entryId: fifthEntry.id })).status
       ).toBe(200);
-      const stub = env.REPO_DO.get(env.REPO_DO.idFromName(seeded.doName));
       const headOnly = await eventRequest(owner, repo, { action: "reconcile" });
       expect(headOnly.status).toBe(200);
       expect(await headOnly.json()).toMatchObject({
@@ -337,6 +344,7 @@ describe("snapshot event plane", () => {
       const staleProjection = await stub.projectReconciledHead({
         ref: "refs/heads/main",
         commitSha: fifth,
+        treeSha: zeroOid(),
         sequence: 6,
         materializedAt: Date.now(),
       });
@@ -344,8 +352,12 @@ describe("snapshot event plane", () => {
 
       await moveRef(owner, repo, fifth, zeroOid());
       state = await eventState(owner, repo);
-      expect(state.plan.status).toBe("deliver");
-      expect((await eventRequest(owner, repo, { action: "reconcile" })).status).toBe(200);
+      // The zero-copy queue can finish before this observation. Both states
+      // preserve the same monotonic deletion projection.
+      expect(["deliver", "up_to_date"]).toContain(state.plan.status);
+      if (state.plan.status === "deliver") {
+        expect((await eventRequest(owner, repo, { action: "reconcile" })).status).toBe(200);
+      }
       state = await eventState(owner, repo);
       expect(state.projection).toMatchObject({
         snapshotCount: 6,

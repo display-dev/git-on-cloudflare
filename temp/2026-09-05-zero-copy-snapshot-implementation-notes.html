@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Zero-copy snapshot implementation notes</title>
+  </head>
+  <body>
+    <h1>Zero-copy snapshot implementation notes</h1>
+    <h2>Original intent</h2>
+    <p>
+      Continue the approved Cloudflare-first Git architecture campaign from reviewed commit
+      <code>9a06b811e245a770fa7946ffcf3075b2fcd98064</code>. Remove the second full snapshot-byte
+      copy from ingestion, make retained snapshots explicit RepoDO GC roots, serve pinned paths from
+      authoritative PACK/IDX/PREF through existing tree and pack lookup, add causal phase
+      attribution and distinguishing tests, obtain a fresh Opus/high review, create an exact local
+      commit, and qualify the reviewed image within the amended campaign budget. Do not push, open a
+      pull request, merge, deploy display-dev, create another GitHub repository, or use
+      customer/production data.
+    </p>
+    <h2>Scope and risk</h2>
+    <p>
+      Implementation base and release target: <code>9a06b811e245a770fa7946ffcf3075b2fcd98064</code>.
+      Initial worktree state contained only the pre-existing untracked
+      <code>qualification/wrangler.match-39e593d.jsonc</code> and <code>temp/</code>, which remain
+      outside the candidate inventory except this notes file. This is the full workflow and T2
+      boundary risk: it changes RepoDO persistence, R2-backed serving, GC reachability, internal
+      qualification behavior, and runtime evidence. The authoritative resources are synthetic and
+      replaceable, but incorrect pin/GC ordering could invalidate snapshot immutability or reclaim
+      required Git objects.
+    </p>
+    <p>
+      Architectural placement: RepoDO owns snapshot retention/pointer sequencing; existing Git tree
+      traversal and pack lookup own content resolution; the ingestion route orchestrates transport
+      and phase attribution. Reverting code restores the prior duplicate-bundle path, while
+      persisted snapshot-pin keys would remain harmless durable metadata until qualification reset
+      or repository deletion.
+    </p>
+    <h2>Campaign boundary</h2>
+    <p>
+      Cumulative provider-time cap remains 1,000 minutes, approximately 400 conservatively charged
+      before this phase, with 45 minutes protected for terminal cleanup. Cumulative transfer cap is
+      2 GiB, with 1 GiB remaining. Newly owned disk remains below 8 GiB, one candidate may be live
+      at once, and approved spend is USD 0. The live target is one disposable owned synthetic
+      Cloudflare composition plus the existing private qualification repository.
+    </p>
+    <h2>Public docs, public skill, verification journeys, changelog</h2>
+    <p>
+      Public docs impact: none; this is an internal unshipped qualification candidate. Public skill
+      impact: none; no CLI or MCP contract changes. Verification journeys: none; no maintained
+      customer journey covers this isolated Git-service qualification, and focused Worker tests plus
+      the repository-service qualification contract own the proof. Changelog: none because no
+      customer-visible release is authorized.
+    </p>
+    <h2>Threat model</h2>
+    <p>
+      The candidate keeps the existing isolated Git Worker, repository-scoped internal
+      authorization, R2/RepoDO authority split, and synthetic qualification boundary. It makes the
+      ADR's already-declared retained-snapshot root concrete without widening a credential, runtime
+      binding, external processor, or storage permission. Recheck after the finished diff; update
+      the canonical threat model only if the implemented boundary materially differs.
+    </p>
+    <h2>Design decisions</h2>
+    <ul>
+      <li>
+        The Git tree is the only path manifest. Snapshot pins contain immutable commit/tree identity
+        and accepted-write sequence/provenance, not file bytes or a path index.
+      </li>
+      <li>
+        Ingestion creates the pin and monotonic current pointer in the exact RepoDO transaction that
+        commits refs. No R2 snapshot object is required for serveability.
+      </li>
+      <li>
+        Snapshot reads first prove the exact pin through RepoDO, then traverse the pinned tree and
+        use existing pack lookup/R2 range reads with request cache disabled.
+      </li>
+      <li>
+        Reachability GC treats every retained snapshot pin as an additional want. Explicit release
+        and qualification reset remove only the selected pin roots.
+      </li>
+    </ul>
+    <h2>Evidence</h2>
+    <p>
+      The maintained candidate now removes ingestion bundle/manifest writes, publishes a RepoDO pin
+      and current pointer in the accepted ref-CAS transaction, resolves snapshot bytes from pinned
+      Git trees through pack lookup, carries pins into both immediate and durable GC closure
+      planning, and supplies explicit release/revocation plus qualification reset behavior.
+    </p>
+    <p>
+      An independent Codex task review found six actionable issues: the durable queue ledger omitted
+      pins; pack-backed reads omitted repository read leases; release still allowed legacy fallback;
+      no injected transaction rollback test existed; cache-bypass coverage was non-distinguishing;
+      and the end-to-end timing label was ambiguous. All six were corrected. Supplemental Fable
+      defect discovery then found seven valid follow-ups: release incorrectly treated the historical
+      current pointer as authority; lease refusals could masquerade as absence; probe-mode ingestion
+      did not pin before queued projection; absent release calls could create unbounded tombstones;
+      the GC test did not prove physical old-pack deletion; request cache setup discarded prior
+      accounting; and snapshot read leases were mislabeled as Git fetches. Those are corrected too.
+      One Fable claim about a missing event-probe prefix was rejected as unreachable because the
+      event-probe enablement gate itself requires that prefix. Per supervisor correction, Fable is
+      not the final implementation-review gate; a fresh read-only Opus/high review is pending.
+    </p>
+    <p>
+      The required first Opus/high implementation review did not approve the candidate as-is. It
+      found that legacy release skipped the live-ref guard, unexpected pack failures became 404s, a
+      generic accepted-write batch could apply one tree to several commits, invalid projection trees
+      could create conflicting authority, obsolete staged-bundle machinery remained, and the
+      pack-derived manifest reused the legacy version. All six were corrected: every release now
+      checks refs first; only typed path absence is 404 and other pack/manifest failures are
+      retryable 503; pin input is bound to exactly one accepted commit; bad tree identity returns a
+      non-mutating tagged result; unused staging/source-fast-path code and its test are gone; and
+      the pack-derived manifest is version 2.
+    </p>
+    <p>
+      Three subsequent fresh Opus/high passes found and drove correction of further bounded issues:
+      manifest path validation and transient error classification, eliminating the remaining
+      production queue bundle-copy path, invalid release configuration, structured read logging,
+      shared limit/type definitions, deleting/capacity status distinctions, lease-release fault
+      isolation, bounded no-content inspection, tagged release outcomes, release warnings and
+      unreadable legacy-manifest handling, and ensuring a stale disposable pin cannot veto an
+      otherwise valid ref CAS. The fourth pass narrowed the gate to three final corrections: store
+      only compact commit OIDs in durable GC operation snapshots, preserve the queue request's
+      limiter/private-cache memo when switching from the control-plane repository ID to the RepoDO
+      name, and apply the ordinary cold-cache/pack-count safeguards to pack-backed snapshot
+      benchmarks. Those corrections and distinguishing tests are now present. A fresh Opus/high
+      review approved the candidate but also identified a credible queue/GC race: the queue released
+      its read fence after object inspection but before installing the pin. Although reported as
+      non-blocking, it directly touched snapshot immutability, so the candidate now keeps the fence
+      through the projection RPC and tests deletion safety at that exact boundary. A second fresh
+      Opus/high pass approved that correction but exposed the complementary root-set race: GC
+      publication fenced refs and packs but not a pin added after its root snapshot. The candidate
+      now snapshots pin OIDs and a monotonic pin version atomically, checks that version at every GC
+      publication path, and uses a dedicated snapshot-projection lease to prevent catalog
+      publication between successful inspection and pin installation without blocking ordinary
+      readers. A test proves both the active-projection and changed-pin fences. A final fresh
+      Opus/high pass approved that design but identified that an expired fixed-duration projection
+      lease was not revalidated inside the pin transaction, the event-probe projection consumer did
+      not hold the new lease, and coordinated receives did not advance the exact pin version they
+      created. The authority now requires a live matching projection token before creating a new
+      pin, both consumers hold and pass it, expired tokens retry without pinning, and coordinated
+      receive accounting advances only from the pin version observed before its own transaction work
+      to the version observed afterward. New tests distinguish expiry rejection and a pinning
+      receive that still permits coordinated GC publication. That confirmation then found one
+      remaining cleanup bug: a pin-version change between durable GC begin and snapshot registration
+      rejected progress but left the newly acquired compact lease and claim live for their long
+      TTLs. The registration path now handles the tagged result directly, aborts the just-acquired
+      lease, yields to clear its claim, and returns a normal retry. A test injects a real pin in
+      that exact RPC gap and proves immediate lease/claim cleanup. Clean final Opus/high
+      confirmation approved the complete candidate with no issues found.
+    </p>
+    <p>
+      Post-correction evidence: TypeScript typecheck passed; 68/68 unit tests passed; 573/573 Worker
+      tests passed; the production build passed. The latest affected focused cohort is 96/96.
+      Focused tests additionally prove no bundle/manifest write on ingestion, direct nested/empty
+      blob serving, read-lease ordering around R2 pack ranges, older snapshot retention through GC
+      and delayed deletion, release then physical reclaim, durable queued-GC pin retention,
+      qualification-only reset, legacy release revocation/cleanup, retryable read refusal,
+      stale-cache rejection, projection-before-reader-release, expired-token retry without pin,
+      coordinated pin-version publication, pin-version publication retry, and exact atomic
+      rollback/retry. The repository-wide formatting check retains two pre-existing warnings in
+      untouched
+      <code>src/worker/tasks/compaction.ts</code> and <code>test/ofs-delta-encode.test.ts</code>;
+      every changed source/test and this notes file has been formatted. Exact local commit, image
+      digest, live cohorts, final evidence/report, and cleanup proof remain pending.
+    </p>
+  </body>
+</html>

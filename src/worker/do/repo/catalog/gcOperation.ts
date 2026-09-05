@@ -162,7 +162,9 @@ export async function claimGcOperation(args: {
         (((await transaction.get<number>("refsVersion")) ?? 0) ===
           (operation.coordination?.refsVersion ?? operation.snapshot.refsVersion) &&
           ((await transaction.get<number>("packsetVersion")) ?? 0) ===
-            (operation.coordination?.packsetVersion ?? operation.snapshot.packsetVersion))
+            (operation.coordination?.packsetVersion ?? operation.snapshot.packsetVersion) &&
+          ((await transaction.get<number>("snapshotPinVersion")) ?? 0) ===
+            (operation.coordination?.snapshotPinVersion ?? operation.snapshot.snapshotPinVersion))
       ) {
         await transaction.put<RepoLease>("compactLease", {
           token: operation.snapshot.token,
@@ -266,7 +268,9 @@ export async function recordGcProgress(args: {
           lease.expiresAt <= now ||
           ((await transaction.get<number>("refsVersion")) ?? 0) !== progress.snapshot.refsVersion ||
           ((await transaction.get<number>("packsetVersion")) ?? 0) !==
-            progress.snapshot.packsetVersion
+            progress.snapshot.packsetVersion ||
+          ((await transaction.get<number>("snapshotPinVersion")) ?? 0) !==
+            progress.snapshot.snapshotPinVersion
         ) {
           return { status: "rejected", reason: "source-changed" };
         }
@@ -274,6 +278,7 @@ export async function recordGcProgress(args: {
         operation.coordination = {
           refsVersion: progress.snapshot.refsVersion,
           packsetVersion: progress.snapshot.packsetVersion,
+          snapshotPinVersion: progress.snapshot.snapshotPinVersion,
           retainedSourcePackKeys: [],
           acceptedReceives: 0,
         };
@@ -469,6 +474,7 @@ export async function commitGcOperation(args: {
     token: operation.snapshot.token,
     refsVersion: operation.snapshot.refsVersion,
     packsetVersion: operation.snapshot.packsetVersion,
+    snapshotPinVersion: operation.snapshot.snapshotPinVersion,
     sourcePacks: operation.snapshot.sourcePacks,
     retainedPackKey: operation.retainedPackKey,
     stagedPack: operation.nativeResult

@@ -6,6 +6,8 @@ import type { CacheContext } from "@/worker/cache";
 import { createLogger, getRepoStub, zeroOid } from "@/worker/common";
 import { __test as packCatalogTest } from "@/worker/do/repo/db/dal/packCatalog";
 import { getDb, upsertPackCatalogRow } from "@/worker/do/repo/db";
+import { recordAcceptedWrites } from "@/worker/do/repo/acceptedWrites";
+import { asTypedStorage, type RepoStateSchema } from "@/worker/do/repo/repoState";
 import { concatChunks, flushPkt, pktLine } from "@/worker/git";
 import { encodeGitObject, parseCommitRefs } from "@/worker/git/core";
 import {
@@ -355,6 +357,9 @@ describe("candidate-native repository maintenance", () => {
       content: "new\n",
       historyMode: "epoch",
     });
+    expect(
+      await getRepoStub(env, seeded.doName).releaseSnapshotPin(first.acceptedWrite.afterSha)
+    ).toEqual({ released: true });
     const doId = env.REPO_DO.idFromName(seeded.doName).toString();
     const sendSpy = vi
       .spyOn(env.REPO_TASKS_QUEUE, "send")
@@ -517,7 +522,67 @@ describe("candidate-native repository maintenance", () => {
     expect(await env.REPO_BUCKET.head(sourceCatalog[0]!.packKey)).not.toBeNull();
   });
 
-  it("starts a parentless epoch and physically removes unreachable canonical Git objects", async () => {
+  it("keeps an older pinned snapshot byte-identical through GC and delayed deletion", async () => {
+    const owner = "maintenance";
+    const repo = uniqueRepoId("pinned-snapshot-gc");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    const first = await ingest(owner, repo, {
+      expectedOid: zeroOid(),
+      idempotencyKey: "pinned-snapshot-first",
+      content: "old-pinned-state\n",
+    });
+    await ingest(owner, repo, {
+      expectedOid: first.acceptedWrite.afterSha,
+      idempotencyKey: "pinned-snapshot-epoch",
+      content: "new-current-state\n",
+      historyMode: "epoch",
+    });
+    await requireRewriteFixture(seeded.doName);
+    const stub = getRepoStub(env, seeded.doName);
+    const sourceCatalog = await stub.getActivePackCatalog();
+    const queueSpy = vi
+      .spyOn(env.REPO_TASKS_QUEUE, "send")
+      .mockImplementation(async () => createQueueSendResponse());
+    try {
+      const result = await runReachabilityGc({
+        env,
+        repoId: seeded.doName,
+        cacheCtx: gcContext(seeded.doName),
+        limiter: new SubrequestLimiter(6),
+        log: createLogger("error", { service: "PinnedSnapshotReachabilityGcTest" }),
+        countSubrequest: () => {},
+      });
+      expect(result.status).toBe("completed");
+      expect(await stub.listSnapshotPins()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ commitSha: first.acceptedWrite.afterSha }),
+        ])
+      );
+      expect(
+        await deleteSupersededOnce(
+          seeded.doName,
+          sourceCatalog.map((row) => row.packKey),
+          true
+        )
+      ).toEqual({ acked: true, retried: false });
+      for (const row of sourceCatalog) {
+        expect(await env.REPO_BUCKET.head(row.packKey)).toBeNull();
+      }
+      const served = await workerExports.default.fetch(
+        `https://example.com/_internal/snapshots/${owner}/${repo}/${first.acceptedWrite.afterSha}/file?path=state.txt`,
+        { headers: { Authorization: `Bearer ${env.INGESTION_RPC_TOKEN}` } }
+      );
+      expect(served.status).toBe(200);
+      expect(served.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(await served.text()).toBe("old-pinned-state\n");
+    } finally {
+      queueSpy.mockRestore();
+    }
+  });
+
+  it("releases snapshot pins before GC reclaims an older epoch", async () => {
     const owner = "maintenance";
     const repo = uniqueRepoId("epoch-gc");
     const seeded = await setupRepoForTests(env, owner, repo, {
@@ -557,6 +622,17 @@ describe("candidate-native repository maintenance", () => {
 
     await requireRewriteFixture(seeded.doName);
     const stub = getRepoStub(env, seeded.doName);
+    expect(await stub.releaseSnapshotPin(first.acceptedWrite.afterSha)).toEqual({ released: true });
+    expect(await stub.releaseSnapshotPin(second.acceptedWrite.afterSha)).toEqual({
+      released: true,
+    });
+    expect(await stub.releaseSnapshotPin(epoch.acceptedWrite.afterSha)).toEqual({
+      released: false,
+      reason: "ref-referenced",
+    });
+    expect(await stub.listSnapshotPins()).toEqual([
+      expect.objectContaining({ commitSha: epoch.acceptedWrite.afterSha }),
+    ]);
     const sourceCatalog = await stub.getActivePackCatalog();
     expect(sourceCatalog).toHaveLength(3);
     const oldCatalogCache = gcContext(seeded.doName);
@@ -981,6 +1057,81 @@ describe("candidate-native repository maintenance", () => {
     }
   });
 
+  it("fences publication across snapshot projection readers and newly installed pins", async () => {
+    const owner = "maintenance";
+    const repo = uniqueRepoId("gc-snapshot-pin-fence");
+    const seeded = await setupRepoForTests(env, owner, repo, {
+      doName: `repo:${owner}-${repo}`,
+    });
+    await ingest(owner, repo, {
+      expectedOid: zeroOid(),
+      idempotencyKey: "gc-snapshot-pin-fence",
+      content: "state\n",
+    });
+    const stub = getRepoStub(env, seeded.doName);
+
+    const readerBlocked = await stub.beginReachabilityGc();
+    if (!readerBlocked.ok) throw new Error("reachability GC lease was not acquired");
+    const reader = await stub.beginRepositoryRead("snapshot-projection");
+    if (!reader.ok) throw new Error("snapshot reader was not acquired");
+    try {
+      await expect(
+        stub.commitReachabilityGc({
+          token: readerBlocked.lease.token,
+          refsVersion: readerBlocked.refsVersion,
+          packsetVersion: readerBlocked.packsetVersion,
+          snapshotPinVersion: readerBlocked.snapshotPinVersion,
+          sourcePacks: readerBlocked.activeCatalog,
+          retainedPackKey: readerBlocked.activeCatalog[0]?.packKey,
+        })
+      ).resolves.toEqual({ status: "retry", reason: "receive-active" });
+    } finally {
+      await stub.finishRepositoryRead(reader.token);
+    }
+
+    const pinChanged = await stub.beginReachabilityGc();
+    if (!pinChanged.ok) throw new Error("second reachability GC lease was not acquired");
+    const commitSha = "b".repeat(40);
+    const treeSha = "c".repeat(40);
+    await runDOWithRetry(
+      () => stub,
+      async (_instance, state) => {
+        await recordAcceptedWrites(
+          asTypedStorage<RepoStateSchema>(state.storage),
+          pinChanged.refsVersion + 1,
+          [
+            {
+              repositoryId: seeded.repositoryId,
+              ref: "refs/heads/archived",
+              beforeSha: zeroOid(),
+              afterSha: commitSha,
+              actor: "gc-pin-fence-test",
+              sourceSurface: "git-push",
+              idempotencyKey: null,
+            },
+          ],
+          Date.now(),
+          true,
+          {
+            commitSha,
+            treeSha,
+            materializedAt: Date.now(),
+          }
+        );
+      }
+    );
+    await expect(
+      stub.commitReachabilityGc({
+        token: pinChanged.lease.token,
+        refsVersion: pinChanged.refsVersion,
+        packsetVersion: pinChanged.packsetVersion,
+        snapshotPinVersion: pinChanged.snapshotPinVersion,
+        sourcePacks: pinChanged.activeCatalog,
+        retainedPackKey: pinChanged.activeCatalog[0]?.packKey,
+      })
+    ).resolves.toEqual({ status: "retry", reason: "pins-changed" });
+  });
+
   it("rolls back an interrupted SQL catalog replacement", async () => {
     const owner = "maintenance";
     const repo = uniqueRepoId("gc-catalog-rollback");
@@ -1013,6 +1164,7 @@ describe("candidate-native repository maintenance", () => {
           token: begin.lease.token,
           refsVersion: begin.refsVersion,
           packsetVersion: begin.packsetVersion,
+          snapshotPinVersion: begin.snapshotPinVersion,
           sourcePacks: begin.activeCatalog,
           stagedPack: {
             packKey: targetPackKey,
